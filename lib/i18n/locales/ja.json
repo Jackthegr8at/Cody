@@ -132,6 +132,8 @@
   "chatInput.cmdFixArg": "[問題]",
   "chatInput.cmdGoal": "セッションの目標を設定する",
   "chatInput.cmdGoalArg": "[目標]",
+  "chatInput.cmdLoop": "完了するまでタスクを繰り返す（最大N回）",
+  "chatInput.cmdLoopArg": "[回数] [タスク]",
   "chatInput.cmdName": "セッションの表示名を設定します",
   "chatInput.cmdPlan": "ステップごとの計画を作成する",
   "chatInput.cmdPlanArg": "[タスク]",

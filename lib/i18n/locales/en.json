@@ -132,6 +132,8 @@
   "chatInput.cmdFixArg": "[issue]",
   "chatInput.cmdGoal": "Set the goal for this session",
   "chatInput.cmdGoalArg": "[goal]",
+  "chatInput.cmdLoop": "Repeat a task until done, up to N attempts",
+  "chatInput.cmdLoopArg": "[count] [task]",
   "chatInput.cmdName": "Set the session display name",
   "chatInput.cmdPlan": "Create a step-by-step plan",
   "chatInput.cmdPlanArg": "[task]",

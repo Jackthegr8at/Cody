@@ -492,9 +492,15 @@ export function AppShell() {
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* capture is best-effort */ }
     const startX = e.clientX;
     const startWidth = sidebarWidth;
+    let uiScale = 1;
+    try {
+      const raw = getComputedStyle(document.documentElement).getPropertyValue("--ui-scale");
+      const value = parseFloat(raw);
+      if (Number.isFinite(value) && value > 0) uiScale = value;
+    } catch { /* computed styles may be unavailable during teardown */ }
     setSidebarResizing(true);
     const onMove = (ev: PointerEvent) => {
-      const next = clampSidebarWidth(startWidth + (ev.clientX - startX));
+      const next = clampSidebarWidth(startWidth + (ev.clientX - startX) / uiScale);
       // Write the CSS variable straight to the DOM: the flex row follows the
       // pointer without re-rendering the whole AppShell on every move.
       sidebarContainerRef.current?.style.setProperty("--sidebar-width", `${next}px`);

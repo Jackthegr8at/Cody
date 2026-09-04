@@ -132,6 +132,8 @@
   "chatInput.cmdFixArg": "[问题]",
   "chatInput.cmdGoal": "设定本次会话的目标",
   "chatInput.cmdGoalArg": "[目标]",
+  "chatInput.cmdLoop": "重复任务直到完成，最多 N 次",
+  "chatInput.cmdLoopArg": "[次数] [任务]",
   "chatInput.cmdName": "设置会话显示名称",
   "chatInput.cmdPlan": "制定分步计划",
   "chatInput.cmdPlanArg": "[任务]",
