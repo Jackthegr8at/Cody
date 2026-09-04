@@ -39,6 +39,7 @@ export interface EngineCapabilities {
   advisor: boolean;
   subagents: boolean;
   memory: boolean;
+  providerLogin: boolean;
 }
 
 /** The active engine's identity, also from GET /api/info. */
@@ -71,6 +72,7 @@ export const ALL_CAPABILITIES: EngineCapabilities = {
   advisor: true,
   subagents: true,
   memory: false,
+  providerLogin: true,
 };
 
 /** Coerce whatever /api/info returned into a full flag set, defaulting every
@@ -194,7 +196,10 @@ export const SETTINGS_CATEGORIES: TabItem[] = [
   { id: "general", label: "Interface & Behavior", description: "UI preferences, completion sound, submission mode", Icon: Settings2 },
   { id: "safety", label: "Safety & Approvals", description: "Tool safety rules, YOLO mode, terminal permissions", Icon: ShieldCheck, needsCapability: "configEditor" },
   { id: "models", label: "AI Model Defaults", description: "Reasoning budget, verbosity, personality, scratchpad", Icon: Cpu, needsCapability: "configEditor" },
-  { id: "providers", label: "API Keys & Providers", description: "Connected OAuth accounts, API keys, and model registry", Icon: KeyRound, needsCapability: "models" },
+  // No needsCapability: every engine reads provider keys from its environment
+  // (lib/harness/provider-keys.ts), so the tab exists for all of them. omp's
+  // OAuth and registry editor inside it stays gated on `models`.
+  { id: "providers", label: "API Keys & Providers", description: "Provider API keys for the active engine, plus omp's OAuth accounts and model registry", Icon: KeyRound },
   // No needsCapability: this scans the network Cody itself runs on, not
   // anything the active engine serves, so it stays visible on every engine —
   // and is just as useful on a headless Docker install as on desktop.

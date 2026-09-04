@@ -69,6 +69,15 @@ export interface HarnessCapabilities {
    * omp has memory too, but exposes no way to read it back, so it stays
    * false and the surface stays hidden rather than empty. */
   memory: boolean;
+  /**
+   * The engine can sign the user in to a provider with the provider's OWN
+   * login (a Claude Pro/Max or ChatGPT subscription, a device code, …) and
+   * keep the credential in its own store — as opposed to an API key, which
+   * Cody stores itself and hands to every engine. True exactly when the
+   * adapter carries `providerLogins`; the Sign in section on the API Keys &
+   * Providers tab renders only under this flag.
+   */
+  providerLogin: boolean;
 }
 
 /**
@@ -109,6 +118,182 @@ export interface EngineUsage {
   cacheWrite: number;
   /** First-party spend in USD, when the engine reports one at all. */
   cost?: number;
+}
+
+/**
+ * ONE ENGINE'S OWN SETTINGS, in the shape the schema-driven panel renders.
+ *
+ * Cody's settings tab is schema-DRIVEN: it draws whatever the active engine
+ * declares, so a setting added upstream appears without a Cody release. Three
+ * engines supply that declaration from three unrelated places — omp from a
+ * TypeScript schema in its package, Hermes from its Python DEFAULT_CONFIG, pi
+ * from the settings table in its shipped docs — and the panel neither knows
+ * nor cares which. This is the type that makes them interchangeable.
+ *
+ * It exists because the route used to switch on engine IDs
+ * (`active.id === "hermes" ? … : ompBranch`), which made "no branch of mine"
+ * mean "omp's branch": every engine without a case fell through and was
+ * handed omp's ~550-key schema and omp's config.yml, stamped with its own
+ * name. An adapter hook cannot do that — an engine either implements it or
+ * the route refuses.
+ */
+export type EngineSettingType = "boolean" | "enum" | "number" | "string" | "array";
+
+/** What one control can hold. A list is a real `string[]`: the panel's list
+ * editor renders `Array.isArray(value) ? value : []`, so JSON text arrives
+ * there as an empty list. */
+export type EngineSettingValue = boolean | number | string | string[];
+
+/** One row of the panel. The superset of what the three derivations produce,
+ * so `OmpSetting[]` and each engine's own setting type assign straight to it. */
+export interface EngineSetting {
+  /** Dotted config path, e.g. "compaction.enabled". */
+  key: string;
+  type: EngineSettingType;
+  tab: string;
+  /** Section within the tab; undefined renders above the first heading. */
+  group?: string;
+  label: string;
+  description?: string;
+  /** Enum choices declared as bare values. */
+  values?: string[];
+  /** Enum choices with their own labels. */
+  options?: Array<{ value: string; label: string; description?: string }>;
+  default?: EngineSettingValue;
+  /** The engine fills the choices from a runtime registry Cody cannot read,
+   * so the row renders as free text. */
+  runtimeOptions?: boolean;
+  /** Shown, never editable — a control whose save always fails is worse than
+   * an honest read-only row. */
+  readOnly?: boolean;
+  readOnlyReason?: string;
+  /** Array settings whose element order is meaningful upstream. */
+  ordered?: boolean;
+  /** Name of the engine predicate gating visibility. */
+  condition?: string;
+  /** Configures the engine's TERMINAL UI only, so changing it does nothing
+   * while working in a browser. Labelled rather than hidden: the same file
+   * still drives the CLI the user runs in a Cody terminal. */
+  terminalOnly?: boolean;
+}
+
+export interface EngineSettingsSchema {
+  /** Tabs in the engine's own declared order. */
+  tabs: Array<{ id: string; label: string }>;
+  /** Section order per tab. */
+  groups: Record<string, string[]>;
+  settings: EngineSetting[];
+  /** Where the declaration was read from, for diagnostics. */
+  source: { packagePath: string; version: string | null };
+}
+
+export interface EngineSettingsRead {
+  /** Absolute path of the file the values live in, shown in the panel. */
+  path: string;
+  /** Null when the declaration cannot be read — the engine is not installed,
+   * or ships a layout this Cody does not know. Null is honest; a fabricated
+   * schema would offer settings that write nowhere. */
+  schema: EngineSettingsSchema | null;
+  values: Record<string, EngineSettingValue>;
+  /** Why `schema` is null, in the engine's own terms. */
+  reason?: string;
+}
+
+export interface EngineSettingsWrite {
+  /** Keys that reached the engine's config. */
+  written: string[];
+  /**
+   * Keys that did not, each with why. A patch is not all-or-nothing: one key
+   * an engine refuses must neither abort the rest nor disappear silently, so
+   * it is NAMED here and the response reports the save as unsuccessful.
+   */
+  rejected: Array<{ key: string; reason: string }>;
+  /** Values as they stand after the write, so the panel re-syncs from the
+   * file rather than from what it hoped it saved. */
+  values: Record<string, EngineSettingValue>;
+}
+
+/**
+ * The engine's settings pipeline. Present exactly when
+ * `capabilities.nativeSettings` is true — the flag hides the tab, this hook
+ * is what the route dispatches on, and an engine that declares the flag
+ * without the hook gets the same 400 `unsupported` as one that declares
+ * neither.
+ *
+ * `write` reports per-key refusals through `rejected` and THROWS only when
+ * the whole patch is impossible (no binary, no readable schema): the route
+ * turns a throw into a 400 carrying the engine's own words.
+ */
+export interface EngineSettingsSurface {
+  readSchema(): EngineSettingsRead;
+  write(patch: Record<string, unknown>): EngineSettingsWrite;
+}
+
+/**
+ * ONE PROVIDER AN ENGINE CAN SIGN THE USER IN TO, with the engine's own login.
+ *
+ * Every engine keeps subscription credentials somewhere Cody must not write
+ * (omp's SQLite store, pi's auth.json, Claude Code's and Codex's own files,
+ * Hermes' auth.json), and every one of them has a login of its own that
+ * prints a URL and takes a code back: omp and pi through the pi-ai OAuth
+ * flows, Claude Code through `claude auth login`, Codex through
+ * `codex login --device-auth`, Hermes through `hermes auth add`. This seam
+ * is the one shape all five are driven through, so the sign-in UI is written
+ * once and the route never asks which engine it is talking to.
+ */
+export interface ProviderLoginOption {
+  /** The engine's own id for the provider ("anthropic", "openai-codex", "chatgpt"). */
+  id: string;
+  name: string;
+  /** Signed in right now, as far as the engine reports it. */
+  authenticated: boolean;
+  /**
+   * "oauth": a browser sign-in whose fallback is pasting the code or the
+   * final redirect URL back; "device": a short code the user types on the
+   * provider's site while the engine polls, nothing to paste.
+   */
+  kind: "oauth" | "device";
+  /** Whether `logout()` can remove this credential. */
+  canLogout: boolean;
+  /** One line of context for the row ("Claude Pro/Max subscription"). */
+  hint?: string;
+}
+
+/**
+ * What a login flow can ask of the person signing in. The route turns these
+ * into the SSE frames the sign-in panel already renders; a driver calls them
+ * in whatever order its engine's flow needs.
+ */
+export interface ProviderLoginUi {
+  /** A URL to open, with the engine's own instructions if it gave any. */
+  onUrl(url: string, instructions?: string | null): void;
+  /** A device code to type on the verification page. */
+  onDeviceCode(info: { userCode: string; verificationUri: string; expiresInSeconds?: number | null; intervalSeconds?: number | null }): void;
+  /** Ask for a value and wait for it. Rejects when the flow is cancelled. */
+  onPrompt(message: string, placeholder?: string | null): Promise<string>;
+  /**
+   * The next value the user pastes WITHOUT being asked — the paste box is on
+   * screen from the first URL, so a redirect URL can arrive before the
+   * engine asks for it. Resolves when one arrives; rejects on cancel.
+   */
+  onManualInput(): Promise<string>;
+  onProgress(message: string): void;
+  /** Fires when the user cancels or the connection drops; drivers kill their child on it. */
+  signal: AbortSignal;
+}
+
+export interface ProviderLoginList {
+  providers: ProviderLoginOption[];
+  /** Why the list is empty when it is — the engine is not installed, its login command failed — in the engine's own terms. */
+  reason?: string;
+}
+
+export interface ProviderLoginSurface {
+  list(): Promise<ProviderLoginList>;
+  /** Resolves when the credential is stored; rejects with the engine's own words otherwise. */
+  login(providerId: string, ui: ProviderLoginUi): Promise<void>;
+  /** Absent when the engine has no non-interactive logout; the row then offers none. */
+  logout?(providerId: string): Promise<void>;
 }
 
 /** One document of an engine's persistent memory. */
@@ -385,4 +570,21 @@ export interface HarnessAdapter {
    * knows about me?" — without pretending Cody owns the file.
    */
   readMemory?(): MemoryDocument[];
+  /**
+   * The engine's own settings, read and written for the schema-driven panel.
+   * Present exactly when `capabilities.nativeSettings` is true.
+   *
+   * This is the seam that replaced an engine-id switch in the route. Each
+   * engine derives the same shape from a different place — omp from its
+   * TypeScript schema, Hermes from its Python DEFAULT_CONFIG, pi from the
+   * settings tables in its shipped docs — and the route asks the adapter
+   * rather than asking which engine it is talking to.
+   */
+  readonly settings?: EngineSettingsSurface;
+  /**
+   * Provider sign-in with the engine's own login flow. Present exactly when
+   * `capabilities.providerLogin` is true; `/api/auth/providers`, `/login`
+   * and `/logout` dispatch on it and refuse `unsupported` without it.
+   */
+  readonly providerLogins?: ProviderLoginSurface;
 }

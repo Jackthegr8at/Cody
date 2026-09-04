@@ -2,7 +2,9 @@ import { homedir } from "os";
 import path from "path";
 import { AcpEngineSession } from "./acp-session";
 import { getEngineVersion, resolveEngineBin } from "./engine-bin";
+import { hermesProviderLogins } from "./hermes-login";
 import { readHermesMemory } from "./hermes-memory";
+import { readHermesSchemaSettings, writeHermesSchemaSettings } from "./hermes-settings";
 import type { EngineSession, EngineSessionOptions, HarnessAdapter } from "./types";
 
 /**
@@ -110,11 +112,24 @@ export const hermesHarness: HarnessAdapter = {
     // (MEMORY.md, USER.md) — the thing that makes it Hermes, and the one
     // question users have about it: what does it think it knows about me?
     memory: true,
+    // Provider sign-in with the engine's own login: `hermes auth add <provider> --type oauth` in a pseudo-terminal.
+    providerLogin: true,
   },
   resolveBinary: () => resolveEngineBin("hermes", "HERMES"),
   getVersion: () => getEngineVersion("hermes", "HERMES", ["acp", "--version"]),
   getAgentDir: () => hermesHome(),
   readMemory: () => readHermesMemory(hermesHome()),
+  settings: {
+    // Derived from Hermes' own DEFAULT_CONFIG and written through
+    // `hermes config` (lib/harness/hermes-settings.ts). Resolved per call so
+    // a Hermes installed after boot is found without a restart.
+    readSchema: () => readHermesSchemaSettings(resolveEngineBin("hermes", "HERMES"), hermesHome()),
+    write: (patch) => writeHermesSchemaSettings(resolveEngineBin("hermes", "HERMES"), hermesHome(), patch),
+  },
+  // `hermes auth add <provider> --type oauth` in a pseudo-terminal
+  // (lib/harness/hermes-login.ts) — Anthropic, Nous Portal, OpenAI Codex,
+  // xAI, Qwen and MiniMax's OAuth-capable providers.
+  providerLogins: hermesProviderLogins,
   // Hermes stores conversations in SQLite rather than a directory of
   // transcripts; this path exists so the adapter contract is satisfied, and
   // the session list comes from the engine-sessions sidecar instead.

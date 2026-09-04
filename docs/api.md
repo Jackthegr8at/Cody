@@ -218,7 +218,7 @@ Error: `500` with `code: "info_unavailable"`.
 | `/api/accounts/login` | POST | public | `{username, password}` → `Set-Cookie` |
 | `/api/accounts/signup` | POST | public | `{username, fullName?, password}`; first human account becomes admin |
 | `/api/accounts/logout` | POST | any | clears the cookie; not on the public list, so a signed-out call is `401` |
-| `/api/accounts/me` | GET, PATCH | any | read profile; `PATCH {fullName}` |
+| `/api/accounts/me` | GET, PATCH | any | read profile (includes `theme`); `PATCH {fullName?, theme?}` — the theme is a `lib/theme-catalog` id, saved per account so it follows the user to every device |
 | `/api/accounts/me/password` | POST | any | `{currentPassword, newPassword}`; bumps `tokenVersion` |
 | `/api/accounts/me/avatar` | POST, DELETE | any | upload / clear avatar image |
 | `/api/accounts/avatar/<id>` | GET | any | an account's avatar bytes |
@@ -666,8 +666,49 @@ is still usable). `thinkingLevels` always starts with `"off"`.
 
 Related, all admin-gated and all **Incidental**: `/api/model-roles`,
 `/api/models-config`, `/api/models-config/{catalog,discover,test}`,
-`/api/providers/enable`, `/api/auth/*` (engine provider sign-in, unrelated to
-Cody accounts — do not confuse the two).
+`/api/providers/enable`, `/api/auth/all-providers` (omp's configured API-key
+providers).
+
+## `/api/auth/providers`, `/api/auth/login/{provider}`, `/api/auth/logout/{provider}` — Incidental
+
+Provider SIGN-IN with the active engine's own login (a Claude Pro/Max or
+ChatGPT subscription, Nous Portal, …) — unrelated to Cody accounts, do not
+confuse the two. Served for every engine whose `capabilities.providerLogin`
+is true; refused `400 unsupported` otherwise. The roster is readable by any
+signed-in user; starting a login and logging out are **admin-only**, since
+the credential is shared by every user's sessions.
+
+- `GET /api/auth/providers` → `{"engine":{"id","shortName"},
+  "providers":[{"id","name","authenticated","kind":"oauth"|"device",
+  "canLogout","hint"?}],"reason"?}`. `reason` explains an empty roster (the
+  engine is not installed).
+- `GET /api/auth/login/{provider}` is an SSE stream of the flow: `auth
+  {url, instructions, token}` (open the URL), `device_code {userCode,
+  verificationUri, expiresInSeconds}` (type the code there), `prompt_request
+  {message, placeholder, token}` (paste the code or redirect URL),
+  `progress {message}`, then `success`, `error {message}` or `cancelled`.
+  `POST /api/auth/login/{provider}` with `{"token","code"}` hands the pasted
+  value back; a value posted before the engine asks is held for it.
+- `POST /api/auth/logout/{provider}` → `{"ok":true}`; `400 unsupported` for
+  an engine whose only logout is interactive (omp).
+
+## `GET|PUT /api/provider-keys` — Incidental
+
+Provider API keys Cody hands to every engine child process — the ACP agents,
+the omp/pi RPC processes and the terminal — as environment variables, so one
+key works the same under every engine. `GET` (any signed-in user) reports the
+catalogue for the active engine with `stored` / `fromEnvironment` flags and
+never a value; `PUT {"name","value"}` (admin) stores one variable from the
+catalogue, and an empty value clears it. Keys live in the instance data dir
+(`cody-provider-keys.json`, mode 0600) and therefore survive engine switches
+without touching any engine's own config.
+
+```json
+{"engine":{"id":"hermes","shortName":"Hermes"},
+ "providers":[{"id":"openai","name":"OpenAI",
+   "variables":[{"name":"OPENAI_API_KEY","label":"API key","secret":true,
+                 "stored":true,"fromEnvironment":false}]}]}
+```
 
 ## The display socket
 

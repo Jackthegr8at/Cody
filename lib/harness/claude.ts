@@ -3,6 +3,7 @@ import path from "path";
 import { AcpEngineSession, type AcpMcpServer } from "./acp-session";
 import { displayMcpAcpServer } from "../display/engine-tools";
 import { getEngineVersion, resolveEngineBin } from "./engine-bin";
+import { claudeProviderLogins } from "./claude-login";
 import type { EngineSession, EngineSessionOptions, HarnessAdapter } from "./types";
 
 /**
@@ -172,10 +173,11 @@ export const claudeHarness: HarnessAdapter = {
   healthArgs: CLAUDE_CLI_VERSION_ARGS,
   // The ADAPTER's version, which is the package installSpec names — not the
   // CLI's 2.x, which moves on its own schedule and is a different package
-  // entirely. 0.70.0 is what Cody's ACP client has been exercised against;
+  // entirely. 0.73.0 is what Cody's ACP client has been exercised against
+  // (initialize, session/new, a prompt round trip, modes and set_mode);
   // `engineCli.adapterLabel` is what the notice names, so a 1.0 adapter reads
   // as a claim about the adapter and nothing else.
-  verifiedVersion: "0.70.0",
+  verifiedVersion: "0.73.0",
   capabilities: {
     // Verified end to end against the real adapter: initialize, session/new,
     // a prompt round trip, a tool call, an approval, and session/load of a
@@ -214,10 +216,16 @@ export const claudeHarness: HarnessAdapter = {
     // Claude Code's CLAUDE.md is project context the user writes, not memory
     // the agent maintains and can hand back.
     memory: false,
+    // Provider sign-in with the engine's own login: `claude auth login` in a pseudo-terminal — a Claude subscription.
+    providerLogin: true,
   },
   resolveBinary: () => resolveEngineBin("claude-agent-acp", "CLAUDE"),
   getVersion: () => getEngineVersion("claude-agent-acp", "CLAUDE"),
   getAgentDir: () => path.join(homedir(), ".claude"),
+  // `claude auth login/status/logout` in a pseudo-terminal
+  // (lib/harness/claude-login.ts) — a Claude Pro/Max subscription, or an
+  // Anthropic Console account billed by API usage.
+  providerLogins: claudeProviderLogins,
   getSessionsDir: () => path.join(homedir(), ".claude", "projects"),
   createSession: (options) => createClaudeSession(options),
 };

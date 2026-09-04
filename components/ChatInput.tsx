@@ -1,7 +1,8 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, ListChecks, Loader2, Paperclip, ShieldCheck, Sparkles, Target, TriangleAlert, Wrench } from "lucide-react";
+import { ChevronDown, ListChecks, Loader2, Paperclip, ShieldCheck, SlidersHorizontal, Sparkles, Target, TriangleAlert, Wrench } from "lucide-react";
+import type { SessionModeOption } from "@/hooks/useAgentSession";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import { ALL_CAPABILITIES, OMP_ENGINE_ID, type ActiveEngineInfo, type EngineCapabilities } from "./SettingsTabs";
 import type { ToolPreset } from "@/lib/tool-presets";
@@ -62,6 +63,9 @@ interface ModelOption {
   name: string;
 }
 
+/** Stable empty list, so a composer without modes never re-renders for a fresh `[]`. */
+const NO_MODES: SessionModeOption[] = [];
+
 interface Props {
   onSend: (message: string, images?: AttachedImage[]) => void;
   onAbort: () => void;
@@ -110,6 +114,13 @@ interface Props {
   compactResult?: CompactResultInfo | null;
   thinkingLevel?: string;
   onThinkingLevelChange?: (level: string) => void;
+  /** The engine's own session modes (ACP `session/new` → `modes`): its
+   * permission posture — Manual / Accept edits / Plan / Auto on Claude,
+   * Default / Accept Edits / Don't Ask on Hermes. Empty for an engine without
+   * the surface, and an empty list renders nothing. */
+  availableModes?: SessionModeOption[];
+  currentModeId?: string | null;
+  onModeChange?: (modeId: string) => void;
   availableThinkingLevels?: string[] | null;
   thinkingLevelMap?: Record<string, string | null> | null;
   /** Display name for the current model when the catalog does not know it. */
@@ -1047,7 +1058,7 @@ function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; plan?: A
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, capabilities = ALL_CAPABILITIES, engine = null, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, onSelectSmartModel, onSmartModelPinned, autoModelSwitch, fastModeEnabled, fastModeActive, fastModeSupported, onFastModeChange, toolPreset, onToolPresetChange,
   onAbortCompaction, isCompacting, compactResult,
-  thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
+  thinkingLevel, onThinkingLevelChange, availableModes = NO_MODES, currentModeId = null, onModeChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
   retryInfo, queuedMessages, inputHistory = [], onAbortRetry,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
@@ -1090,7 +1101,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [modelDropdownRect, setModelDropdownRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
+  const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
   const [toolsDropdownOpen, setToolsDropdownOpen] = useState(false);
+  // Where the tool-preset and reasoning panels hang from on a phone: the
+  // button's top in viewport coordinates, captured when it opens. Icon-only
+  // buttons sit near the right edge there, too close for a panel anchored to
+  // them to stay on screen, so it detaches to the viewport instead.
+  const [toolsAnchorTop, setToolsAnchorTop] = useState<number | null>(null);
+  const [thinkingAnchorTop, setThinkingAnchorTop] = useState<number | null>(null);
+  const [modeAnchorTop, setModeAnchorTop] = useState<number | null>(null);
   const [contextPopoverOpen, setContextPopoverOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
@@ -1124,6 +1143,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const dropdownRef = useRef<HTMLDivElement>(null);
   const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
+  const modeDropdownRef = useRef<HTMLDivElement>(null);
   const toolsDropdownRef = useRef<HTMLDivElement>(null);
   const historyMenuRef = useRef<HTMLDivElement>(null);
   const contextPopoverRef = useRef<HTMLDivElement>(null);
@@ -2231,6 +2251,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (isStreaming) setToolsDropdownOpen(false);
   }, [isStreaming]);
 
+  // The mode the engine reports, or its first offer while the report is
+  // still in flight — never nothing, so the button always has a name.
+  const currentMode = availableModes.find((mode) => mode.id === currentModeId) ?? availableModes[0] ?? null;
+
   // Close dropdowns on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -2242,6 +2266,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       }
       if (thinkingDropdownRef.current && !thinkingDropdownRef.current.contains(e.target as Node)) {
         setThinkingDropdownOpen(false);
+      }
+      if (modeDropdownRef.current && !modeDropdownRef.current.contains(e.target as Node)) {
+        setModeDropdownOpen(false);
       }
       if (toolsDropdownRef.current && !toolsDropdownRef.current.contains(e.target as Node)) {
         setToolsDropdownOpen(false);
@@ -2882,7 +2909,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             }}
             onInput={handleInput}
             onPaste={handlePaste}
-            placeholder={turnWaiting ? t("chatInput.waitingForTurn") : t("chatInput.placeholder")}
+            // The full hint truncates to "…@ for" in a phone-width field, so
+            // there the placeholder is only the part that still reads.
+            placeholder={turnWaiting
+              ? t("chatInput.waitingForTurn")
+              : isMobile ? t("chatInput.placeholderShort") : t("chatInput.placeholder")}
             rows={1}
             style={{
               width: "100%",
@@ -2901,14 +2932,19 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           />
 
           {/* Toolbar: attachment · model · settings · reasoning · fast · context ring · send/stop */}
+          {/* On a phone this row used to wrap into three ~28px lines that ate
+              a quarter of the screen and still left every button smaller than
+              a thumb reliably hits. It stays one row of 38px targets instead:
+              the controls an icon can speak for drop their labels, and the
+              model — the one label worth reading — absorbs what that frees. */}
           <div style={{
             display: "flex",
             alignItems: "center",
-            gap: 2,
+            gap: isMobile ? 4 : 2,
             marginTop: 8,
             paddingTop: 8,
             borderTop: "1px solid color-mix(in srgb, var(--border) 62%, transparent)",
-            flexWrap: isMobile ? "wrap" : "nowrap",
+            flexWrap: "nowrap",
           }}>
             {/* Attachment */}
             <button
@@ -2918,7 +2954,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               aria-label={preparingImageCount > 0 ? t("chatInput.imagePreparing") : t("chatInput.attachFile")}
               style={{
                 flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
-                width: 28, height: 28, padding: 0,
+                width: isMobile ? 38 : 28, height: isMobile ? 38 : 28, padding: 0,
                 background: "none", border: "none",
                 borderRadius: 7,
                 color: (attachedImages.length || attachedTextFiles.length) ? "var(--accent)" : "var(--text-muted)",
@@ -2945,7 +2981,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
             {/* Model selector — compact text button with dropdown */}
             {(modelOptions.length > 0 || currentName || modelError || showModelsLoading) && onModelChange && (
-              <div ref={dropdownRef} style={{ position: "relative", minWidth: 0 }}>
+              <div ref={dropdownRef} style={{ position: "relative", minWidth: 0, flex: isMobile ? "1 1 auto" : undefined }}>
                 <button
                   onClick={(e) => {
                     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -2955,8 +2991,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   disabled={modelSelectorDisabled}
                   style={{
                     display: "flex", alignItems: "center", gap: 5,
-                    height: 28,
-                    maxWidth: 190,
+                    height: isMobile ? 38 : 28,
+                    // The one control that keeps its text on a phone, so it
+                    // takes whatever width the icon-only neighbours leave
+                    // rather than the fixed cap a wide toolbar can afford.
+                    width: isMobile ? "100%" : undefined,
+                    maxWidth: isMobile ? "100%" : 190,
                     padding: "0 8px",
                     overflow: "hidden",
                     background: modelDropdownOpen ? "var(--bg-hover)" : "none",
@@ -3173,14 +3213,20 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 aria-label={t("chatInput.autoSwitchTitle")}
                 style={{
                   display: "inline-flex", alignItems: "center", gap: 4,
-                  height: 28, padding: "0 7px",
+                  // Icon-only on a phone: its text is what would push the
+                  // single row wider than the screen, and the title and
+                  // aria-label already say the same thing.
+                  justifyContent: isMobile ? "center" : undefined,
+                  height: isMobile ? 38 : 28,
+                  width: isMobile ? 38 : undefined,
+                  padding: isMobile ? 0 : "0 7px",
                   background: "none", border: "none", borderRadius: 7,
                   color: "var(--status-warning)", cursor: "pointer",
                   fontSize: 11, flexShrink: 0, whiteSpace: "nowrap",
                 }}
               >
-                <TriangleAlert size={12} aria-hidden="true" style={{ flexShrink: 0 }} />
-                {t("chatInput.autoSwitchChip")}
+                <TriangleAlert size={isMobile ? 16 : 12} aria-hidden="true" style={{ flexShrink: 0 }} />
+                {!isMobile && t("chatInput.autoSwitchChip")}
               </button>
             )}
 
@@ -3188,15 +3234,25 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 available even mid-run (the picked preset takes effect on the
                 next new session, not the live one). */}
             {onToolPresetChange && (
-              <div ref={toolsDropdownRef} style={{ position: "relative" }}>
+              <div ref={toolsDropdownRef} style={{ position: "relative", flexShrink: isMobile ? 0 : undefined }}>
                 <button
-                  onClick={() => setToolsDropdownOpen((v) => !v)}
+                  onClick={(e) => {
+                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                    setToolsAnchorTop(rect.top);
+                    setToolsDropdownOpen((v) => !v);
+                  }}
                   title={t("chatInput.changeToolPresetTitle", { preset: t(TOOL_PRESET_LABEL_KEY[toolPreset ?? "full"]) })}
-                  aria-label={t("chatInput.changeToolPreset")}
+                  // Without the label beside it, the accessible name is the
+                  // only thing left saying which preset the wrench stands for.
+                  aria-label={isMobile
+                    ? `${t("chatInput.changeToolPreset")}: ${t(TOOL_PRESET_LABEL_KEY[toolPreset ?? "full"])}`
+                    : t("chatInput.changeToolPreset")}
                   style={{
                     display: "flex", alignItems: "center", gap: 5,
-                    height: 28,
-                    padding: "0 8px",
+                    justifyContent: isMobile ? "center" : undefined,
+                    height: isMobile ? 38 : 28,
+                    width: isMobile ? 38 : undefined,
+                    padding: isMobile ? 0 : "0 8px",
                     background: toolsDropdownOpen ? "var(--bg-hover)" : "none",
                     border: "none",
                     borderRadius: 7,
@@ -3208,12 +3264,20 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
                   onMouseLeave={(e) => { e.currentTarget.style.background = toolsDropdownOpen ? "var(--bg-hover)" : "none"; }}
                 >
-                  <Wrench size={12} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden="true" />
-                  <span style={{ whiteSpace: "nowrap" }}>{t(TOOL_PRESET_LABEL_KEY[toolPreset ?? "full"])}</span>
-                  <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7 }} aria-hidden="true" />
+                  <Wrench size={isMobile ? 16 : 12} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden="true" />
+                  {!isMobile && <span style={{ whiteSpace: "nowrap" }}>{t(TOOL_PRESET_LABEL_KEY[toolPreset ?? "full"])}</span>}
+                  {!isMobile && <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7 }} aria-hidden="true" />}
                 </button>
                 {toolsDropdownOpen && (
-                  <div className="dropdown-surface" style={{
+                  <div className="dropdown-surface" style={isMobile && toolsAnchorTop != null ? {
+                    // Detached to the viewport (see toolsAnchorTop), the way
+                    // the model list already opens on a phone.
+                    position: "fixed",
+                    bottom: (window.visualViewport?.height ?? window.innerHeight) - toolsAnchorTop + 6,
+                    left: 8, right: 8,
+                    zIndex: 500,
+                    maxHeight: Math.max(120, toolsAnchorTop - 8), overflowY: "auto",
+                  } : {
                     position: "absolute", bottom: "calc(100% + 6px)", left: 0,
                     zIndex: 100, minWidth: 260, maxWidth: "calc(100vw - 32px)",
                   }}>
@@ -3265,16 +3329,24 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             {/* Reasoning level selector — stays visible while the agent
                 runs (disabled) so the level never looks like it reset. */}
             {onThinkingLevelChange && (
-              <div ref={thinkingDropdownRef} style={{ position: "relative" }}>
+              <div ref={thinkingDropdownRef} style={{ position: "relative", flexShrink: isMobile ? 0 : undefined }}>
                 <button
-                  onClick={() => setThinkingDropdownOpen((v) => !v)}
+                  onClick={(e) => {
+                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                    setThinkingAnchorTop(rect.top);
+                    setThinkingDropdownOpen((v) => !v);
+                  }}
                   disabled={isStreaming}
                   title={t("chatInput.changeReasoningTitle", { level: thinkingDisplayLabel })}
+                  // The aria-label already carried the level, which is what the
+                  // icon-only phone button now leans on entirely.
                   aria-label={`${t("chatInput.changeReasoning")}: ${thinkingDisplayLabel}`}
                   style={{
                     display: "flex", alignItems: "center", gap: 5,
-                    height: 28,
-                    padding: "0 8px",
+                    justifyContent: isMobile ? "center" : undefined,
+                    height: isMobile ? 38 : 28,
+                    width: isMobile ? 38 : undefined,
+                    padding: isMobile ? 0 : "0 8px",
                     background: thinkingDropdownOpen ? "var(--bg-hover)" : "none",
                     border: "none",
                     borderRadius: 7,
@@ -3294,16 +3366,23 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     e.currentTarget.style.color = "var(--text-muted)";
                   }}
                 >
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                  <svg width={isMobile ? 16 : 11} height={isMobile ? 16 : 11} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
                     <path d="M9.5 2A5.5 5.5 0 0 0 4 7.5c0 1.7.78 3.21 2 4.21V14a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1v-2.29c1.22-1 2-2.51 2-4.21A5.5 5.5 0 0 0 9.5 2z" />
                     <line x1="7" y1="18" x2="12" y2="18" />
                     <line x1="8" y1="21" x2="11" y2="21" />
                   </svg>
-                  <span style={{ whiteSpace: "nowrap" }}>{thinkingDisplayLabel}</span>
-                  <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7 }} aria-hidden="true" />
+                  {!isMobile && <span style={{ whiteSpace: "nowrap" }}>{thinkingDisplayLabel}</span>}
+                  {!isMobile && <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7 }} aria-hidden="true" />}
                 </button>
                 {thinkingDropdownOpen && (
-                  <div className="dropdown-surface" style={{
+                  <div className="dropdown-surface" style={isMobile && thinkingAnchorTop != null ? {
+                    // Same reason as the tool-preset panel above.
+                    position: "fixed",
+                    bottom: (window.visualViewport?.height ?? window.innerHeight) - thinkingAnchorTop + 6,
+                    left: 8, right: 8,
+                    zIndex: 500,
+                    maxHeight: Math.max(120, thinkingAnchorTop - 8), overflowY: "auto",
+                  } : {
                     position: "absolute", bottom: "calc(100% + 6px)", left: 0,
                     zIndex: 100, minWidth: 250, maxWidth: "calc(100vw - 32px)",
                   }}>
@@ -3351,7 +3430,104 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </div>
             )}
 
-            <div style={{ flex: 1 }} />
+            {/* Agent-mode selector — the engine's own session modes, offered
+                only when it published a list for THIS session. Stays visible
+                while the agent runs (disabled) so the mode never looks reset. */}
+            {onModeChange && currentMode && (
+              <div ref={modeDropdownRef} style={{ position: "relative", flexShrink: isMobile ? 0 : undefined }}>
+                <button
+                  onClick={(e) => {
+                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                    setModeAnchorTop(rect.top);
+                    setModeDropdownOpen((v) => !v);
+                  }}
+                  disabled={isStreaming}
+                  title={t("chatInput.changeModeTitle", { mode: currentMode.name })}
+                  aria-label={`${t("chatInput.changeMode")}: ${currentMode.name}`}
+                  data-testid="agent-mode-button"
+                  style={{
+                    display: "flex", alignItems: "center", gap: 5,
+                    justifyContent: isMobile ? "center" : undefined,
+                    height: isMobile ? 38 : 28,
+                    width: isMobile ? 38 : undefined,
+                    padding: isMobile ? 0 : "0 8px",
+                    background: modeDropdownOpen ? "var(--bg-hover)" : "none",
+                    border: "none",
+                    borderRadius: 7,
+                    color: "var(--text-muted)",
+                    cursor: isStreaming ? "not-allowed" : "pointer",
+                    opacity: isStreaming ? 0.5 : 1,
+                    fontSize: 12,
+                    transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
+                  }}
+                  onMouseEnter={(e) => {
+                    if (isStreaming) return;
+                    e.currentTarget.style.background = "var(--bg-hover)";
+                    e.currentTarget.style.color = "var(--text)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = modeDropdownOpen ? "var(--bg-hover)" : "none";
+                    e.currentTarget.style.color = "var(--text-muted)";
+                  }}
+                >
+                  <SlidersHorizontal size={isMobile ? 16 : 11} strokeWidth={2} style={{ flexShrink: 0 }} aria-hidden="true" />
+                  {!isMobile && <span style={{ whiteSpace: "nowrap" }}>{currentMode.name}</span>}
+                  {!isMobile && <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7 }} aria-hidden="true" />}
+                </button>
+                {modeDropdownOpen && (
+                  <div className="dropdown-surface" role="menu" data-testid="agent-mode-menu" style={isMobile && modeAnchorTop != null ? {
+                    // Same reason as the tool-preset panel above.
+                    position: "fixed",
+                    bottom: (window.visualViewport?.height ?? window.innerHeight) - modeAnchorTop + 6,
+                    left: 8, right: 8,
+                    zIndex: 500,
+                    maxHeight: Math.max(120, modeAnchorTop - 8), overflowY: "auto",
+                  } : {
+                    position: "absolute", bottom: "calc(100% + 6px)", left: 0,
+                    zIndex: 100, minWidth: 250, maxWidth: "calc(100vw - 32px)",
+                  }}>
+                    {availableModes.map((mode) => {
+                      const isActive = mode.id === currentMode.id;
+                      return (
+                        <button
+                          className="dropdown-item"
+                          role="menuitemradio"
+                          aria-checked={isActive}
+                          key={mode.id}
+                          onClick={() => { setModeDropdownOpen(false); if (!isActive && !isStreaming) onModeChange(mode.id); }}
+                          style={{
+                            display: "flex", alignItems: "center", gap: 8,
+                            width: "100%", padding: "7px 12px",
+                            background: isActive ? "var(--bg-selected)" : "transparent",
+                            border: "none",
+                            color: isActive ? "var(--text)" : "var(--text-muted)",
+                            cursor: "pointer", fontSize: 12, textAlign: "left",
+                            fontWeight: isActive ? 600 : 400,
+                            whiteSpace: "nowrap",
+                          }}
+                          onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                          onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
+                        >
+                          {isActive
+                            ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
+                            : <span style={{ width: 10, flexShrink: 0 }} />}
+                          <span style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{mode.name}</span>
+                          {mode.description && (
+                            <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>
+                              {mode.description}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Pushes the gauge and Send right on a wide toolbar; on a phone
+                the model selector is the one that takes the slack instead. */}
+            <div style={{ flex: isMobile ? "0 0 0px" : 1 }} />
 
             {/* Icon-only plan-quota gauge. The arc tracks the binding quota
                 window; context usage lives in the top bar and, in detail,
@@ -3427,10 +3603,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 type="button"
                 onClick={isCompacting ? onAbortCompaction : onAbort}
                 title={t("chatInput.stopAgent")}
+                // Square glyph only on a phone, where the word would cost the
+                // model selector most of its remaining width.
+                aria-label={isMobile ? t("chatInput.stop") : undefined}
                 style={{
-                  display: "flex", alignItems: "center", gap: 6,
-                  height: 28,
-                  padding: "0 14px",
+                  display: "flex", alignItems: "center", justifyContent: isMobile ? "center" : undefined, gap: 6,
+                  height: isMobile ? 38 : 28,
+                  width: isMobile ? 38 : undefined,
+                  flexShrink: isMobile ? 0 : undefined,
+                  padding: isMobile ? 0 : "0 14px",
                   background: "var(--accent-strong)",
                   border: "none",
                   borderRadius: 8,
@@ -3441,10 +3622,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   transition: "background var(--dur-fast) var(--ease-out-warm)",
                 }}
               >
-                <svg width="9" height="9" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+                <svg width={isMobile ? 13 : 9} height={isMobile ? 13 : 9} viewBox="0 0 10 10" fill="none" aria-hidden="true">
                   <rect x="1.5" y="1.5" width="7" height="7" rx="1.5" fill="currentColor" />
                 </svg>
-                {t("chatInput.stop")}
+                {!isMobile && t("chatInput.stop")}
               </button>
             ) : (
               <button
@@ -3453,10 +3634,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 // Sending while an attachment is still being prepared would
                 // send the message without it.
                 disabled={preparingImageCount > 0 || (!value.trim() && !attachedImages.length && !attachedTextFiles.length)}
+                // Arrow only on a phone; the word survives in the accessible
+                // name, and the arrow grows to stay legible in a 38px target.
+                aria-label={isMobile ? t("chatInput.send") : undefined}
                 style={{
-                  display: "flex", alignItems: "center", gap: 6,
-                  height: 28,
-                  padding: "0 14px",
+                  display: "flex", alignItems: "center", justifyContent: isMobile ? "center" : undefined, gap: 6,
+                  height: isMobile ? 38 : 28,
+                  width: isMobile ? 38 : undefined,
+                  flexShrink: isMobile ? 0 : undefined,
+                  padding: isMobile ? 0 : "0 14px",
                   background: (value.trim() || attachedImages.length || attachedTextFiles.length) ? "var(--accent-strong)" : "var(--bg-panel)",
                   border: "none",
                   borderRadius: 8,
@@ -3468,11 +3654,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   transition: "background var(--dur-fast) var(--ease-out-warm), box-shadow var(--dur-fast) var(--ease-out-warm)",
                 }}
               >
-                <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg width={isMobile ? 17 : 12} height={isMobile ? 17 : 12} viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <line x1="2" y1="7" x2="11" y2="7" />
                   <polyline points="7.5 3 12 7 7.5 11" />
                 </svg>
-                {t("chatInput.send")}
+                {!isMobile && t("chatInput.send")}
               </button>
             )}
           </div>

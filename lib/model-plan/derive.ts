@@ -8,15 +8,17 @@ import type { RosterModel } from "./roster";
  * below are testable without an omp process or a model call.
  */
 
-/** The roles Cody exposes, in the order the Models panel lists them
- * (components/ModelsConfig.tsx NATIVE_MODEL_ROLES). */
+/** The roles this module has an opinion about, in the order the Models panel
+ * lists them. omp owns the real list and it changes between releases, so every
+ * caller that can reach the engine passes it in (`lib/omp/model-roles`
+ * `getOmpModelRoleIds`); this stands in when omp is not installed. Assigning a
+ * role the engine dropped writes config.yml entries its resolver ignores. */
 export const ROLE_NAMES: readonly string[] = [
   "default",
   "smol",
   "slow",
   "vision",
   "plan",
-  "designer",
   "commit",
   "tiny",
   "task",
@@ -93,12 +95,65 @@ export function resolveRosterModel(selector: string, roster: RosterModel[]): Ros
   return roster.find((model) => model.selector === base) ?? null;
 }
 
+/**
+ * Anthropic's own published quality ladder, richest first. Reasoning support,
+ * context window and output budget alone cannot separate two lines that ship
+ * identical ceilings on all three — Fable and Opus are on record doing
+ * exactly that (both reasoning, both 1M context, both 128k output, both
+ * offering effort up through "max") — so without an explicit signal here
+ * `compareCapability` fell through to comparing selector strings, which only
+ * put Fable ahead of Opus by the accident of "f" sorting before "o". This is
+ * Anthropic's own naming, not a guess: Fable is the tier Anthropic ships
+ * above Opus.
+ */
+const ANTHROPIC_FAMILY_RANK: Record<string, number> = {
+  fable: 0,
+  opus: 1,
+  sonnet: 2,
+  haiku: 3,
+};
+
+/**
+ * Where a model sits on its own vendor's named quality ladder — the signal
+ * `compareCapability` applies between reasoning support and context window.
+ *
+ * Anthropic is the only vendor ranked here, because it is the only one this
+ * module can justify an order for: "fable > opus > sonnet > haiku" is
+ * Anthropic's own published tiering. Nothing else in Cody assumes an order
+ * between, say, an OpenAI "-mini" and "-nano" id, so inventing one here would
+ * be a guess dressed up as data. An id this cannot place — a non-Anthropic
+ * model, or a Claude id naming no family this table knows — returns null,
+ * which `compareCapability` treats as NO signal rather than a rank that would
+ * silently outrank or underrank a family nobody taught this list about.
+ *
+ * Matched on whether "claude" appears anywhere in the id rather than a
+ * leading anchor, because real catalogs spell it every which way: bare
+ * ("claude-fable-5"), dotted-aggregator ("anthropic/claude-fable-5.1"),
+ * Bedrock ("anthropic.claude-opus-4-8-v1:0"), Vertex
+ * ("claude-fable-5-1@default"), and OpenRouter's tilde/batch variants
+ * ("~anthropic/claude-fable-latest", "anthropic/claude-fable-5:batch"). No
+ * other vendor's id space uses the word, so a substring is evidence enough.
+ */
+function vendorFamilyRank(model: Pick<RosterModel, "id">): number | null {
+  const id = model.id.toLowerCase();
+  if (!id.includes("claude")) return null;
+  for (const [family, rank] of Object.entries(ANTHROPIC_FAMILY_RANK)) {
+    if (id.includes(family)) return rank;
+  }
+  return null;
+}
+
 // Best first. Reasoning support leads because it is the only catalog signal
-// that separates a deep-thinking model from a chat model; context window and
-// output budget rank the rest, and the selector breaks ties so the same roster
-// always yields the same plan.
+// that separates a deep-thinking model from a chat model; a vendor's own
+// named tiers break the next layer of ties (see vendorFamilyRank) — two lines
+// can ship identical reasoning/context/output ceilings and still not be
+// equally capable; context window and output budget rank the rest, and the
+// selector breaks ties so the same roster always yields the same plan.
 function compareCapability(a: RosterModel, b: RosterModel): number {
+  const familyA = vendorFamilyRank(a);
+  const familyB = vendorFamilyRank(b);
   return Number(b.reasoning) - Number(a.reasoning)
+    || (familyA !== null && familyB !== null ? familyA - familyB : 0)
     || (b.contextWindow ?? 0) - (a.contextWindow ?? 0)
     || (b.maxTokens ?? 0) - (a.maxTokens ?? 0)
     || a.selector.localeCompare(b.selector);
@@ -228,6 +283,7 @@ export function deriveChains(args: { roles: Record<string, string>; ladder: stri
 export function validatePlan(
   plan: { roles: Record<string, string>; chains: Record<string, string[]>; rationale?: PlanRationale[] },
   roster: RosterModel[],
+  roleNames: readonly string[] = ROLE_NAMES,
 ): { plan: ModelPlan; warnings: string[] } {
   const warnings: string[] = [];
   // Repairs land on the best model the user can actually reach.
@@ -235,7 +291,7 @@ export function validatePlan(
 
   const roles: Record<string, string> = {};
   for (const [role, selector] of Object.entries(plan.roles)) {
-    if (!ROLE_NAMES.includes(role)) {
+    if (!roleNames.includes(role)) {
       // An invented role name would survive all the way to the save, where the
       // PUT rejects it and the user sees a 400 instead of their plan.
       warnings.push(`Ignored "${role}": not a role Cody assigns.`);
@@ -291,7 +347,10 @@ export function validatePlan(
  * ordering is all it has — the catalog carries no per-role quality signal — so
  * it sorts the roster and places the tiers.
  */
-export function heuristicPlan(roster: RosterModel[], options: { preferredProvider?: string } = {}): PlanDraft {
+export function heuristicPlan(
+  roster: RosterModel[],
+  options: { preferredProvider?: string; roleNames?: readonly string[] } = {},
+): PlanDraft {
   const gateways = gatewayProviders(roster);
   const providerTier = (provider: string, isLocal: boolean): number => (isLocal ? 2 : gateways.has(provider) ? 1 : 0);
   const modelTier = (model: RosterModel): number => providerTier(model.provider, model.local);
@@ -319,8 +378,11 @@ export function heuristicPlan(roster: RosterModel[], options: { preferredProvide
   const fast = pool.filter((model) => !model.reasoning)[0] ?? pool.at(-1) ?? capable;
   const vision = pool.find((model) => model.vision) ?? byCapability.find((model) => model.vision);
 
+  // Roles the engine has dropped are skipped rather than assigned: the entry
+  // would be written to config.yml and resolve to nothing.
+  const known = new Set(options.roleNames ?? ROLE_NAMES);
   const assign = (role: string, model: RosterModel | undefined, text: string): void => {
-    if (!model) return;
+    if (!model || !known.has(role)) return;
     roles[role] = model.selector;
     rationale.push({ subject: role, text });
   };
@@ -329,7 +391,6 @@ export function heuristicPlan(roster: RosterModel[], options: { preferredProvide
   assign("task", capable, `Subagents do the same work as the main session, so they get ${capable.name} too.`);
   assign("plan", capable, `Planning is where reasoning pays off, so it stays on ${capable.name}.`);
   assign("slow", capable, `The deliberate role keeps ${capable.name} for problems worth the extra thinking.`);
-  assign("designer", capable, `Design work reads screenshots and layout code, so it keeps ${capable.name}.`);
   assign("smol", fast, `${fast.name} answers mechanical subagent work without paying for reasoning first.`);
   assign("commit", fast, `Commit messages are short and formulaic — ${fast.name} is enough.`);
   assign("advisor", fast, `The advisor reviews every single turn, so it runs on the cheaper ${fast.name}.`);
