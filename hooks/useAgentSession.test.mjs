@@ -223,3 +223,26 @@ test("todo_auto_update's ungated refresh still fences on the current session", (
   assert.match(cases, /case "todo_reminder":\s*\n\s*case "todo_auto_clear":\s*\n\s*if \(sessionIdRef\.current\) void reconcileAgentState\(sessionIdRef\.current\);/);
   assert.match(cases, /case "todo_auto_update":\s*\n\s*if \(sessionIdRef\.current\) refreshTodoState\(sessionIdRef\.current\);/);
 });
+
+test("quota failures stay visible without treating every streamed message as completion", () => {
+  assert.match(hook, /const NOTICE_ERROR_VISIBLE_MS = 30000;/);
+  assert.match(hook, /function isQuotaLikeError\(text: string\)/);
+  assert.match(hook, /const lastQuotaErrorRef = useRef<string \| null>\(null\)/);
+  assert.match(hook, /const runHadContentRef = useRef\(false\)/);
+  assert.match(hook, /runHadContentRef\.current = true/);
+  assert.match(hook, /toast\.error\("Quota reached"/);
+  assert.match(hook, /const timeout = oldest\.type === "error" \? NOTICE_ERROR_VISIBLE_MS : NOTICE_VISIBLE_MS/);
+  assert.match(hook, /notices: noticeState\.visible, dismissNotice/);
+  assert.match(chatWindow, /<NoticeShelf notices=\{notices\} onDismiss=\{dismissNotice\}/);
+  assert.match(chatWindow, /WebkitLineClamp: isError \? 3/);
+});
+
+test("abandoned new-session sends finish without promoting a dead chat instance", () => {
+  const send = hook.slice(hook.indexOf("const handleSend = useCallback"), hook.indexOf("const handleInterruptAndReply"));
+  assert.match(send, /const ownerGone = !hookAliveRef\.current/);
+  assert.match(send, /if \(!ownerGone\) promoteNewSession\(1, message\)/);
+  assert.match(send, /if \(!ownerGone\) \{\s*await ensureEventsConnected\(sid\)/);
+
+  const bash = hook.slice(hook.indexOf("const executeBash = useCallback"), hook.indexOf("const handleAbort = useCallback"));
+  assert.match(bash, /if \(hookAliveRef\.current\) \{\s*await loadSession\(sid\)/);
+});
