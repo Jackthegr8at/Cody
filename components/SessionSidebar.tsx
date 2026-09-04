@@ -48,6 +48,8 @@ interface Props {
   onInitialRestoreDone?: () => void;
   refreshKey?: number;
   onSessionDeleted?: (sessionId: string) => void;
+  /** Reports the authoritative cross-session running count to the desktop shell. */
+  onRunningSessionCountChange?: (count: number) => void;
   selectedCwd?: string | null;
   onCwdChange?: (cwd: string | null, projectRoot?: string | null) => void;
   onOpenFile?: (filePath: string, fileName: string) => void;
@@ -537,7 +539,7 @@ function CodyTitle() {
     </button>
   );
 }
-export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, onAtMentions, engine = null }: Props) {
+export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, onRunningSessionCountChange, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, onAtMentions, engine = null }: Props) {
   const engineId = engine?.id ?? null;
   // Import writes an omp .jsonl into omp's sessions layout and Archive moves
   // one with omp's gc layout; both routes answer 400 "unsupported" under any
@@ -683,6 +685,10 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   useEffect(() => {
     saveUnreadSessionIds(engineId, unreadSessionIds);
   }, [engineId, unreadSessionIds]);
+
+  useEffect(() => {
+    onRunningSessionCountChange?.(runningSessionIds.size);
+  }, [onRunningSessionCountChange, runningSessionIds]);
 
   useEffect(() => {
     // Live running status and session-list invalidations arrive via SSE; the

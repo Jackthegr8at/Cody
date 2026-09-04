@@ -418,6 +418,14 @@ export function AppShell() {
   const handleSessionStatsChange = useCallback((stats: SessionStatsInfo | null) => {
     setSessionStats(stats);
   }, []);
+  const [activeSessionCount, setActiveSessionCount] = useState(0);
+  const handleRunningSessionCountChange = useCallback((count: number) => {
+    setActiveSessionCount(count);
+  }, []);
+  const [activeSubagentCount, setActiveSubagentCount] = useState(0);
+  const handleActiveSubagentCountChange = useCallback((count: number) => {
+    setActiveSubagentCount(count);
+  }, []);
   const [copiedSessionField, setCopiedSessionField] = useState<SessionCopyField | null>(null);
   const sessionCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleCopySessionField = useCallback((field: SessionCopyField, value: string) => {
@@ -1138,6 +1146,7 @@ export function AppShell() {
         onInitialRestoreDone={handleInitialRestoreDone}
         refreshKey={refreshKey}
         onSessionDeleted={handleSessionDeleted}
+        onRunningSessionCountChange={handleRunningSessionCountChange}
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
         onCwdChange={handleCwdChange}
         onOpenFile={handleOpenFile}
@@ -1212,7 +1221,7 @@ export function AppShell() {
       }
     `}</style>
     <div style={{ display: "flex", flexDirection: "column", height: "var(--app-height, 100dvh)" }}>
-    <TitleBar workspaceName={activeCwdName} />
+    <TitleBar workspaceName={activeCwdName} activeSessions={activeSessionCount} activeSubagents={activeSubagentCount} />
     <div style={{ display: "flex", flex: 1, minHeight: 0, overflow: "hidden", background: "var(--bg)" }}>
       {/* Mobile overlay backdrop */}
       <div
@@ -1863,6 +1872,7 @@ export function AppShell() {
               onBranchDataChange={handleBranchDataChange}
               onSystemPromptChange={handleSystemPromptChange}
               onSessionStatsChange={handleSessionStatsChange}
+              onActiveSubagentCountChange={handleActiveSubagentCountChange}
               onSessionStatsPanelOpen={openSessionStatsPanel}
               onContextUsageChange={handleContextUsageChange}
               onModelUsageChange={handleModelUsageChange}
