@@ -226,6 +226,7 @@ lib/
                        for the first asker; cancel rejects every waiter
   file-paths.ts        client/server path encoding helpers
   markdown.ts          shared markdown helpers
+  model-display.ts    shared display-only model-label formatter; route identifiers remain untouched
   npx.ts               npx runner used by skill install
   permission-request.ts pure client-side readers for an ACP engine's approval
                         requests: option/request parsing off the wire and off
@@ -355,8 +356,7 @@ components/
   settings/           the Settings dialog itself — see "Settings shell" below
                       for the registry/data-cache/writer contracts this
                       directory is built on; file by file:
-    registry.ts         SETTINGS_SECTIONS, the hub table every rail reads, plus
-                        SECTION_ALIASES for legacy deep-link ids
+    registry.ts         SETTINGS_SECTIONS, the hub table every rail reads
     shell-context.tsx   useSettingsShell() / useSettingsOpener() contracts
     SettingsShell.tsx   the dialog: desktop rail+pane, phone MobileStack,
                         dialog-wide search, the busy/leave-confirm guard
@@ -812,7 +812,7 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   every binary, because a cache HIT never expires and the companion CLI's bin
   name is not something the installer models.
 - **`HarnessAdapter.verifiedVersion`** is the exact engine version this Cody
-  build was last audited against — every adapter carries one (omp: 18.1.10,
+  build was last audited against — every adapter carries one (omp: 18.1.12,
   claude-agent-acp: 0.73.0, codex-acp: 1.8.0, pi: 0.73.1, hermes: 0.19.0).
   It is shown verbatim on the System hub's engine roster card (Settings ›
   System › Engines) ("Built to vX.Y.Z", served through `/api/engines`), and
@@ -846,10 +846,7 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
 Settings is one dialog built from a single table, not eight ad hoc panels.
 Eight hubs exist today: **Account**, **Preferences** (`you`); **Providers**,
 **Models**, **Behavior**, **Extensions**, **Memory** (the active engine, named
-by its short name); **System** (the server). Legacy ids from before the
-redesign (`safety`, `intelligence`, `omp`, `localai`, `mcp`, `skills`,
-`plugins`) still open Settings — they resolve to the hub that now holds their
-content and are kept for one release.
+by its short name); **System** (the server).
 
 - **`registry.ts`** is the source of truth: `SETTINGS_SECTIONS`, one entry per
   hub with its label, `group`, icon, `needsCapability` gate (ANY-of over a
@@ -859,7 +856,7 @@ content and are kept for one release.
   dynamically-imported panel component. A hub not in this table does not
   exist. `getVisibleSections`/`getVisibleSubViews` are the ONLY places
   capability gating happens for the rail — a panel never re-decides its own
-  visibility. `SECTION_ALIASES` is the legacy-id table above.
+  visibility.
 - **`SettingsShell.tsx`** owns the open hub/segment, the search query, the
   highlight (a `data-search-id` to scroll to and outline once), the visited
   set (a hub stays MOUNTED once opened — a Providers sign-in SSE survives a
@@ -1458,6 +1455,8 @@ handled or safely ignored.
   running model still matches. The Advisor indicator is ShieldCheck, never
   Sparkles: Sparkles is the Smart glyph, and an accent sparkle beside the
   model name read as "auto-picked".
+- **Display names and picker controls stay presentation-only.** `formatModelDisplayName()` in `lib/model-display.ts` is the shared display boundary for the composer, transcript, and usage surfaces; it may improve a catalog label but never changes the routing identifier. Fast remains beside the existing Composer model picker, and its adjacent Manage models gear opens Settings › Models. Only Smart is pinned; the ordinary named-model list has no sticky selection.
+- **Composer quota is model-scoped.** Select usage windows for the actual selected model: a reported tier explicitly scopes its bucket even when it is also marked shared; only untiered buckets apply to the account as a whole. Render the raw engine-reported plan without inferring a `$tier` convention, and show saved reset credits as a separate count, including zero.
 - **Engine-initiated model switches wear a persistent marker**
   (`autoModelSwitch`): `retry_fallback_applied` (error and usage-aware
   routing both emit it) and any bare `model_changed` whose model differs
@@ -1658,8 +1657,8 @@ handled or safely ignored.
   exactly one of `command`/`url` is required and validated before any write.
 - Writes are atomic (temp file + rename), preserve unrelated top-level keys
   (`disabledServers`, `$schema`, ...), and support rename via `previousName`.
-- The MCP settings live under Settings › Extensions › MCP (legacy id `"mcp"`
-  resolves there via `SECTION_ALIASES`; workspace-gated). Server list rows
+- The MCP settings live under Settings › Extensions › MCP (workspace-gated).
+  Server list rows
   show a config-derived status dot
   (valid+enabled / disabled / invalid) — no live-connectivity probe exists in
   the RPC protocol, so failures surface as toasts (`toast.error`) from the
@@ -1689,56 +1688,20 @@ handled or safely ignored.
   alongside copyable terminal update commands.
 
 ### Model orchestration: roles, plans, chains, resets
-- **omp's out-of-the-box behavior is the baseline.** With no `modelRoles` in
-  config.yml, omp resolves each role from built-in priority lists
-  (src/priority.json: `smol`/`slow`/`designer` chains; `tiny` reuses smol,
-  `advisor` reuses slow; everything else follows the default model). "Reset to
-  OMP defaults" therefore DELETES overrides rather than writing anything:
-  `DELETE /api/model-roles` (drops `modelRoles`), `DELETE /api/omp-settings`
-  `{sections:["retry"]}` (whole retry block), `DELETE /api/model-plan` (only
-  what a plan writes: roles + `retry.fallbackChains` + `usageAwareFallback`,
-  keeping unrelated retry tuning). Deletion allow-lists live in
-  `lib/omp/settings-config.ts` (`RESETTABLE_SECTIONS`/`RESETTABLE_PATHS`).
-- **Config reaches live sessions via restart, not osmosis.** An omp child
-  reads config.yml once at spawn (only subagent preflight reloads it), so
-  plan-apply and every reset call `restartIdleRpcSessions()` (rpc-manager):
-  idle children are destroyed and reconnect on demand with the new config;
-  running turns are never killed and finish on the old one. Responses carry
-  `{restarted, active}` and the UI toasts say so.
-- **Ladder tiering** (`lib/model-plan/derive.ts`): the heuristic plan ranks
-  providers direct → gateway → local. A gateway (OpenRouter-style aggregator)
-  is detected from evidence, not a brand list — most of its model ids are
-  themselves vendor-prefixed (`openrouter/anthropic/claude-…`), so
-  `gatewayProviders()` flags providers where >half the ids contain a slash.
-  `bestAvailableModel` shares the tiering so a gateway's rebadged frontier
-  model never drives main turns while a direct subscription exists; the
-  provider already assigned to the `default` role leads its tier
-  (`preferredProvider`, passed by the model-plan route). Enabled-model
-  curation applies automatically: the roster comes from
-  `get_available_models`, which omp already filters by `enabledModels`.
-- **Fallback switches announce themselves**: omp's `retry_fallback_applied`
-  ({from, to, role}) and `retry_fallback_succeeded` ({model, role}) frames
-  surface as toasts in `useAgentSession` (i18n `agentSession.fallback*`).
-- **Trap — `patchSettingsSection` in `hooks/useConfigWriter.ts`** (formerly
-  SettingsConfig.tsx's `patchSection`) must spread the SECTION (`base?.[key]`),
-  never the whole settings object; the whole-object spread filled config.yml
-  sections with junk top-level keys after the first save. `patchSettingsTop`
-  is the one deliberate exception — top-level keys and arrays like
-  `enabledModels` genuinely need the whole object spread.
-- **omp 17.4 compaction**: `compaction.strategy`/`remoteEnabled` no longer
-  exist upstream — `compaction.methodOrder` (ordered preference list)
-  replaced them. `settings-config.ts` reads legacy keys through omp's own
-  migration mapping and deletes them when writing `methodOrder`.
-- Retry/fallback UI lives in `components/settings/RetryFallbackPanel.tsx`
-  (see its module comment for the never-persist-an-empty-chain rule).
+- **OMP defaults and role scope.** With no `modelRoles` in config.yml, OMP owns role resolution. Its nine canonical built-in roles are `default`, `task`, `plan`, `slow`, `smol`, `tiny`, `commit`, `advisor`, and `vision`; no removed or custom role is implicit. Preserve saved custom-role mappings. “Reset to OMP defaults” deletes only Cody's overrides: `DELETE /api/model-roles` drops `modelRoles`, `DELETE /api/omp-settings` `{sections:["retry"]}` removes the retry section, and `DELETE /api/model-plan` removes the plan's roles, fallback chains, and usage-aware flag while preserving unrelated retry tuning. Deletion allow-lists live in `lib/omp/settings-config.ts` (`RESETTABLE_SECTIONS`/`RESETTABLE_PATHS`).
+- **Live config takes a restart.** An OMP child reads config.yml at spawn (only subagent preflight reloads it), so plan apply and every reset call `restartIdleRpcSessions()` (rpc-manager): idle children reconnect on demand with the new config; running turns complete on their old config. Responses carry `{restarted, active}` for the UI to announce the result.
+- **One effective roster.** `lib/model-plan/roster.ts` builds the planner allow-list directly from OMP's effective `get_available_models` response. That response already applies `enabledModels`; never add a second Cody filter. The planner's `bestAvailableModel` uses the same provider tiering and lets the provider assigned to `default` lead its tier.
+- **Native hints are optional.** The planner may read installed `src/priority.json` through the shared `getOmpPackageRoot()` resolver for native smol/slow suitability ranks. A missing, malformed, or unavailable asset must leave planning functional. Keep task balanced; native-smol suitability remains a valid light-workload signal.
+- **Provider tiering is semantic.** Rank direct Claude/Codex providers first, then other direct APIs, then gateways (including OpenRouter), then genuinely local endpoints. A zero price is common for remote subscriptions or gateways and is never locality evidence; only the endpoint address can establish localness.
+- **Fallback chains keep source intent.** For every role assignment that resolves to the same source, derive one invariant source tier: native suitability, then meaningful provider price, then role-only intent when price is unknown. Same-provider suitable siblings remain eligible so distinct quota buckets can absorb a fallback. Emit selectors in OMP precedence order: exact model first, provider wildcard second, role last.
+- **Fallback switches announce themselves**: OMP's `retry_fallback_applied` ({from, to, role}) and `retry_fallback_succeeded` ({model, role}) frames surface as toasts in `useAgentSession` (i18n `agentSession.fallback*`).
+- **Trap — `patchSettingsSection` in `hooks/useConfigWriter.ts`** (formerly SettingsConfig.tsx's `patchSection`) must spread the SECTION (`base?.[key]`), never the whole settings object; the whole-object spread filled config.yml sections with junk top-level keys after the first save. `patchSettingsTop` is the one deliberate exception — top-level keys and arrays like `enabledModels` genuinely need the whole object spread.
+- **OMP 17.4 compaction**: `compaction.strategy`/`remoteEnabled` no longer exist upstream — `compaction.methodOrder` (ordered preference list) replaced them. `settings-config.ts` reads legacy keys through OMP's own migration mapping and deletes them when writing `methodOrder`.
+- Retry/fallback UI lives in `components/settings/RetryFallbackPanel.tsx` (see its module comment for the never-persist-an-empty-chain rule).
 
 ### Auth and model config
 - Auth flows go through RPC commands (`get_login_providers`, `login`) against the omp child process; credentials live in omp's `agent.db` (SQLite) which Cody never touches directly.
-- `models.yml` in the omp agent directory (`~/.omp/agent/models.yml`, `.yaml`
-  fallback) is read and written from the Providers hub's detail drawer, in a
-  custom endpoint's "Advanced" form (`components/ModelsConfig.tsx`'s editors,
-  rendered by `settings/providers/ProviderDetail.tsx`) — not the Models hub,
-  which only reads the resulting catalog.
+- `models.yml` in the omp agent directory (`~/.omp/agent/models.yml`, `.yaml` fallback) is read and written from the Providers hub's detail drawer, in a custom endpoint's "Advanced" form (`components/ModelsConfig.tsx`'s editors, rendered by `settings/providers/ProviderDetail.tsx`) — not the Models hub, which only reads the resulting catalog.
 - API-key status endpoints must never return the raw key.
 
 ### RPC transport limit — the utility process MUST negotiate v2
@@ -1756,13 +1719,7 @@ handled or safely ignored.
   dialect (pi) still starts.
 
 ### Model curation (`enabledModels`) — omp filters, Cody does not
-- omp owns the allow-list: `get_available_models` is already filtered by
-  `enabledModels` (omp `session/model-controls.ts`), and entries are **glob
-  patterns** matched against `provider/modelId` and bare ids. Cody MUST NOT
-  re-filter — a second dialect of the same setting would disagree with omp on
-  any hand-written pattern. What `/api/models` returns IS the effective set, so
-  the Composer picker, the ten role selects, and fallback chains all shrink for
-  free (measured: 502 models → 18, and 5,020 role `<option>` elements → 200).
+- OMP owns the allow-list: `get_available_models` already applies `enabledModels` (OMP `session/model-controls.ts`), whose entries are **glob patterns** matched against `provider/modelId` and bare ids. The API response is the one effective roster for the Composer picker, role controls, fallback chains, and planner. Cody MUST NOT apply a second enabled-model filter or dialect.
 - **Trap**: because omp filters, a restricted read cannot see what it excluded,
   so curation would be a dead end — no way to find the other 464 OpenRouter
   models to re-add one. `/api/models?catalog=full` therefore runs a throwaway

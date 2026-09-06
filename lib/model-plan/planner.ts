@@ -7,15 +7,12 @@ import type { Roster } from "./roster";
 /**
  * Ask a model to assign Cody's roles. The run itself — spawning the user's own
  * omp binary in print mode and picking the answer out of its NDJSON stream —
- * lives in ./one-shot; this module owns the planner's prompt and the parsing of
- * what comes back.
+ * lives in ./one-shot; this module owns the planner's prompt and answer parsing.
  *
- * Every failure is a value, never an exception: the route answers with the
- * heuristic plan plus a warning naming the cause, because an onboarding step
- * that dead-ends on a flaky model call is worse than one that proposes a
- * defensible plan the user can edit.
+ * Every failure is a value, never an exception: an onboarding step that
+ * dead-ends on a flaky model call is worse than one that proposes a defensible
+ * heuristic the user can edit.
  */
-
 export type PlannerOutcome =
   | { ok: true; draft: PlanDraft }
   | { ok: false; reason: string };
@@ -25,101 +22,121 @@ const PLANNER_TIMEOUT_MS = 120_000;
 const SYSTEM_PROMPT = [
   "You assign models to the roles of a coding agent.",
   "Answer with a single JSON object and nothing else: no prose, no explanation outside the JSON, no markdown fence.",
-  "Use only the model selectors given to you. Never invent, abbreviate or reformat a selector.",
+  "Use only the model selectors given to you. Never invent, abbreviate, or reformat a selector.",
 ].join(" ");
 
-// What each role actually drives. Without this the model guesses from the
-// names, and "smol"/"tiny"/"slow" are not guessable. Teaching order, not the
-// engine's — and filtered against the roles the engine actually has, so a role
-// it has dropped is never described or offered.
-const ROLE_BRIEFS: ReadonlyArray<readonly [string, string]> = [
-  ["default", "the main session: every ordinary turn the user drives."],
-  ["task", "general-purpose subagents doing delegated multi-step work."],
-  ["smol", "the deliberately mechanical subagent: bulk edits, data collection, no judgement."],
-  ["tiny", "constant cheap background work: session titles, classifiers, small extractions. It runs unattended, many times per session."],
-  ["plan", "planning and design turns, where reasoning depth pays off."],
-  ["slow", "the deliberate role for the hardest problems; quality over latency."],
-  ["vision", "anything with images attached; the model must accept image input."],
-  ["commit", "commit messages: short, formulaic, high volume."],
-  ["advisor", "a passive reviewer invoked on every single turn, so its cost is paid constantly."],
-];
+// What each role actually drives. Without this, names such as smol and slow
+// invite guesses that conflict with OMP's real role behavior.
+const ROLE_BRIEF = [
+  "default - the main session: every ordinary user-driven turn.",
+  "task - general-purpose subagents doing balanced, multi-step delegated work; do not spend the frontier model by default.",
+  "smol - deliberately mechanical subagents: bulk edits, data collection, and low-judgement work.",
+  "tiny - constant small background work: titles, classifiers, and extractions.",
+  "plan - planning and design turns, where deliberate reasoning pays off.",
+  "slow - the deliberate role for the hardest problems; quality over latency.",
+  "vision - anything with images attached; the model must accept image input.",
+  "commit - short, formulaic commit messages at high volume.",
+  "advisor - OMP's rigorous second-opinion reviewer, not a cheapest background classifier.",
+].join("\n");
 
-function buildUserPrompt(roster: Roster, roleNames: readonly string[]): string {
-  const wanted = new Set(roleNames);
-  // A role the engine gained since this list was written still appears in the
-  // rules line below; it simply goes undescribed rather than unassignable.
-  const brief = ROLE_BRIEFS.filter(([role]) => wanted.has(role)).map(([role, text]) => `${role} - ${text}`).join("\n");
+function buildUserPrompt(roster: Roster): string {
   return [
     "Assign models to roles for this installation.",
     "",
     "Available models and providers (JSON):",
     JSON.stringify(roster),
     "",
-    "`local: true` means the model is served on the user's own machine: free and private, but it competes with the user's own hardware and is usually weaker.",
+    "`local: true` means the endpoint is actually on a loopback or private-network address. A free or zero-priced remote model is not local.",
+    [
+      "`rolePriority.smol` and `rolePriority.slow` are zero-based OMP native suitability ranks; lower is preferred.",
+      "They are based only on exact selectors or exact bare ids.",
+    ].join(" "),
     "",
     "The roles:",
-    brief,
+    ROLE_BRIEF,
     "",
     "Answer with exactly this JSON shape:",
     '{"roles":{"<role>":"<selector>"},"ladder":["<provider id>"],"rationale":[{"subject":"<role or topic>","text":"<one short sentence>"}]}',
     "",
-    `Rules. Role names must come from this list: ${roleNames.join(", ")}. Omit any role you have no opinion on rather than guessing.`,
-    "Every selector must be one of the `selector` values above, copied exactly.",
-    "`ladder` is provider ids ordered best first: how quality should degrade when a provider is exhausted. Direct providers the user pays for or is signed in to come first, gateway aggregators that resell other vendors' models (OpenRouter and its kind) after them as the backup route, and local providers last.",
-    "`rationale` explains the assignments, one short sentence per entry.",
+    `Rules. Role names must come from this list: ${ROLE_NAMES.join(", ")}. Omit a role only when no available model can satisfy its required image input.`,
+    [
+      "Use a native-smol or otherwise lightweight model for smol, tiny, and commit whenever one is available.",
+      "Use a native-slow model for slow, plan, and advisor whenever one is available.",
+      "Reasoning is a preference, not a reason to leave a chat-only roster unusable.",
+    ].join(" "),
+    [
+      "Vision must use vision: true, and any image-capable source must keep image-capable fallbacks.",
+      "Task should be a balanced multi-step choice rather than the frontier by default.",
+    ].join(" "),
+    [
+      "Provider policy is fixed: openai-codex and anthropic subscriptions first, then other direct APIs.",
+      "Then use gateways such as OpenRouter, then local runtimes.",
+      "Keep both subscriptions eligible regardless of their ladder order.",
+      "Do not infer live quota or quality from names, context length, or catalog price; price is only weak within-provider tier evidence.",
+    ].join(" "),
+    [
+      "Include every available provider id in ladder.",
+      "Cody validates provider tiers, fills omitted providers, and derives exact model, role, and wildcard fallback chains.",
+      "Never silently exclude an enabled provider.",
+    ].join(" "),
+    "rationale explains assignments honestly in one short sentence per entry; never call an unknown-price model lightest or strongest.",
   ].join("\n");
 }
 
 /**
- * The outermost balanced `{...}`, which also handles the code fence and any
- * leading or trailing prose the model wraps its answer in — the brace scan
- * starts at the first `{` and stops at its match, so anything outside is
- * ignored. String state is tracked so a brace inside a rationale sentence
- * cannot end the scan early.
+ * Return the outermost balanced `{...}`. The scanner handles a code fence or
+ * extra prose and ignores braces inside strings.
  */
 function extractJsonObject(text: string): string | null {
   const start = text.indexOf("{");
   if (start === -1) return null;
+
   let depth = 0;
   let inString = false;
   let escaped = false;
-  for (let i = start; i < text.length; i += 1) {
-    const char = text[i];
+  for (let index = start; index < text.length; index += 1) {
+    const character = text[index];
     if (inString) {
       if (escaped) escaped = false;
-      else if (char === "\\") escaped = true;
-      else if (char === '"') inString = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
       continue;
     }
-    if (char === '"') inString = true;
-    else if (char === "{") depth += 1;
-    else if (char === "}" && (depth -= 1) === 0) return text.slice(start, i + 1);
+
+    if (character === '"') inString = true;
+    else if (character === "{") depth += 1;
+    else if (character === "}" && (depth -= 1) === 0) return text.slice(start, index + 1);
   }
+
   return null;
 }
 
 function readDraft(raw: unknown): PlanDraft | null {
   if (!isRecord(raw) || !isRecord(raw.roles)) return null;
-  const roles = Object.fromEntries(Object.entries(raw.roles)
-    .filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim().length > 0));
+
+  const roles = Object.fromEntries(
+    Object.entries(raw.roles).filter(
+      (entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim().length > 0,
+    ),
+  );
   if (Object.keys(roles).length === 0) return null;
+
   const ladder = Array.isArray(raw.ladder)
     ? raw.ladder.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
     : [];
   const rationale = Array.isArray(raw.rationale)
-    ? raw.rationale.flatMap((entry): PlanRationale[] => (isRecord(entry) && typeof entry.subject === "string" && typeof entry.text === "string"
-      ? [{ subject: entry.subject, text: entry.text }]
-      : []))
+    ? raw.rationale.flatMap((entry): PlanRationale[] => (
+      isRecord(entry) && typeof entry.subject === "string" && typeof entry.text === "string"
+        ? [{ subject: entry.subject, text: entry.text }]
+        : []
+    ))
     : [];
+
   return { roles, ladder, rationale };
 }
 
 /** Plan with a model. `model` is a roster selector; the caller picks it. */
-export async function planWithModel(
-  model: string,
-  roster: Roster,
-  roleNames: readonly string[] = ROLE_NAMES,
-): Promise<PlannerOutcome> {
+export async function planWithModel(model: string, roster: Roster): Promise<PlannerOutcome> {
   const bin = resolveOmpBin();
   if (!bin) return { ok: false, reason: "omp binary not found" };
 
@@ -127,19 +144,24 @@ export async function planWithModel(
     bin,
     model,
     systemPrompt: SYSTEM_PROMPT,
-    prompt: buildUserPrompt(roster, roleNames),
+    prompt: buildUserPrompt(roster),
     timeoutMs: PLANNER_TIMEOUT_MS,
   });
   if (!answer.text) return { ok: false, reason: answer.error ?? "the planner returned no answer" };
 
   const json = extractJsonObject(answer.text);
   if (!json) return { ok: false, reason: "the planner did not answer with JSON" };
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
   } catch (error) {
-    return { ok: false, reason: `the planner's JSON could not be parsed: ${error instanceof Error ? error.message : String(error)}` };
+    return {
+      ok: false,
+      reason: `the planner's JSON could not be parsed: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
+
   const draft = readDraft(parsed);
   if (!draft) return { ok: false, reason: "the planner assigned no roles" };
   return { ok: true, draft };

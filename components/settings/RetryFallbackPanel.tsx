@@ -10,6 +10,7 @@ import { DEFAULT_HARNESS_LABEL } from "../SettingsTabs";
 import { NativeSetting, ToggleSwitch } from "./primitives";
 import { useSaveStatus } from "./SaveStatus";
 import { ShellContext } from "./shell-context";
+import { formatModelDisplayName } from "@/lib/model-display";
 
 /**
  * The engine's native retry/fallback config, redesigned so the fallback-chain
@@ -119,11 +120,26 @@ function KindChip({ kind }: { kind: ChainKind }) {
   return <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 4, fontWeight: 600, flexShrink: 0, ...KIND_CHIP_STYLE[kind] }}>{kind}</span>;
 }
 
+type FallbackModelOption = { selector: string; name: string };
+
+/** Match the longest configured selector first, so a model id containing a
+ * colon stays literal and only a suffix beyond the exact id is treated as
+ * effort metadata. */
+function fallbackSelectorMetadata(selector: string, options: FallbackModelOption[]) {
+  const match = options
+    .filter((option) => selector === option.selector || selector.startsWith(option.selector + ":"))
+    .sort((a, b) => b.selector.length - a.selector.length)[0];
+  return {
+    name: match?.name ?? selector,
+    effort: match && selector.length > match.selector.length ? selector.slice(match.selector.length + 1) : null,
+  };
+}
+
 function ChainCard({ chainKey, roleNames, entries, modelOptions, candidate, onCandidateChange, onAdd, onMove, onRemoveEntry, onRemoveCard }: {
   chainKey: string;
   roleNames: string[];
   entries: string[];
-  modelOptions: string[];
+  modelOptions: FallbackModelOption[];
   candidate: string;
   onCandidateChange: (value: string) => void;
   onAdd: () => void;
@@ -132,13 +148,13 @@ function ChainCard({ chainKey, roleNames, entries, modelOptions, candidate, onCa
   onRemoveCard: () => void;
 }) {
   const kind = chainKeyKind(chainKey, roleNames);
-  const unused = modelOptions.filter((value) => !entries.includes(value));
+  const unused = modelOptions.filter((option) => !entries.includes(option.selector));
   return (
     <section style={sectionCardStyle}>
       <div style={{ ...sectionHeaderStyle, display: "flex", alignItems: "center", gap: 8 }}>
         <KindChip kind={kind} />
         <code style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{chainKey}</code>
-        <button type="button" onClick={onRemoveCard} title={`Remove ${chainKey} chain`} style={{ padding: 3, border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer" }}><Trash2 size={13} /></button>
+        <button type="button" onClick={onRemoveCard} title={"Remove " + chainKey + " chain"} style={{ padding: 3, border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer" }}><Trash2 size={13} /></button>
       </div>
       {entries.length === 0 ? (
         <div style={{ padding: "8px 12px", color: "var(--text-dim)", fontSize: 11, lineHeight: 1.45, borderTop: "1px solid var(--border)" }}>
@@ -146,21 +162,27 @@ function ChainCard({ chainKey, roleNames, entries, modelOptions, candidate, onCa
         </div>
       ) : (
         <div style={{ borderTop: "1px solid var(--border)" }}>
-          {entries.map((selector, index) => (
-            <div key={selector} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", color: "var(--text-muted)", fontSize: 12, borderBottom: index === entries.length - 1 ? "none" : "1px solid var(--border)" }}>
-              <span style={{ width: 18, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{index + 1}</span>
-              <code style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{selector}</code>
-              <button type="button" disabled={index === 0} onClick={() => onMove(index, -1)} title="Move up" style={{ padding: 2, border: "none", background: "transparent", color: "var(--text-muted)", cursor: index === 0 ? "default" : "pointer", opacity: index === 0 ? 0.4 : 1 }}><ArrowUp size={14} /></button>
-              <button type="button" disabled={index === entries.length - 1} onClick={() => onMove(index, 1)} title="Move down" style={{ padding: 2, border: "none", background: "transparent", color: "var(--text-muted)", cursor: index === entries.length - 1 ? "default" : "pointer", opacity: index === entries.length - 1 ? 0.4 : 1 }}><ArrowDown size={14} /></button>
-              <button type="button" onClick={() => onRemoveEntry(index)} title="Remove" style={{ padding: 2, border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer" }}><Trash2 size={14} /></button>
-            </div>
-          ))}
+          {entries.map((selector, index) => {
+            const metadata = fallbackSelectorMetadata(selector, modelOptions);
+            return (
+              <div key={selector} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", color: "var(--text-muted)", fontSize: 12, borderBottom: index === entries.length - 1 ? "none" : "1px solid var(--border)" }}>
+                <span style={{ width: 18, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{index + 1}</span>
+                <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+                  <span style={{ color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{metadata.name}{metadata.effort ? <span style={{ color: "var(--text-dim)", fontWeight: 400 }}> · {metadata.effort}</span> : null}</span>
+                  <code style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 10.5 }}>{selector}</code>
+                </span>
+                <button type="button" disabled={index === 0} onClick={() => onMove(index, -1)} title="Move up" style={{ padding: 2, border: "none", background: "transparent", color: "var(--text-muted)", cursor: index === 0 ? "default" : "pointer", opacity: index === 0 ? 0.4 : 1 }}><ArrowUp size={14} /></button>
+                <button type="button" disabled={index === entries.length - 1} onClick={() => onMove(index, 1)} title="Move down" style={{ padding: 2, border: "none", background: "transparent", color: "var(--text-muted)", cursor: index === entries.length - 1 ? "default" : "pointer", opacity: index === entries.length - 1 ? 0.4 : 1 }}><ArrowDown size={14} /></button>
+                <button type="button" onClick={() => onRemoveEntry(index)} title="Remove" style={{ padding: 2, border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer" }}><Trash2 size={14} /></button>
+              </div>
+            );
+          })}
         </div>
       )}
       <div style={{ display: "flex", gap: 8, padding: 10, borderTop: "1px solid var(--border)" }}>
         <select value={candidate} onChange={(event) => onCandidateChange(event.target.value)} style={{ flex: 1, minWidth: 0, padding: "6px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12 }}>
           <option value="">Add a model...</option>
-          {unused.map((value) => <option key={value} value={value}>{value}</option>)}
+          {unused.map((option) => <option key={option.selector} value={option.selector}>{option.name}</option>)}
         </select>
         <button type="button" disabled={!candidate} onClick={onAdd} style={{ padding: "6px 10px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "var(--on-accent)", fontSize: 12, cursor: candidate ? "pointer" : "default", opacity: candidate ? 1 : 0.6, display: "inline-flex", alignItems: "center", gap: 4 }}><Plus size={13} /> Add</button>
       </div>
@@ -206,7 +228,7 @@ export function RetryFallbackPanel({ models, onOpenModelPlan, panelId = "models"
 
   const retry: RetryConfig = settings.retry ?? {};
   const chains = retry.fallbackChains ?? {};
-  const modelOptions = models.map((model) => `${model.provider}/${model.id}`);
+  const modelOptions = models.map((model) => ({ selector: model.provider + "/" + model.id, name: formatModelDisplayName(model.id, model.name) }));
   const providers = [...new Set(models.map((model) => model.provider))].sort();
 
   const persistedKeys = Object.keys(chains);
@@ -336,7 +358,7 @@ export function RetryFallbackPanel({ models, onOpenModelPlan, panelId = "models"
     <section style={sectionCardStyle}>
       <div style={sectionHeaderStyle}>Fallback chains</div>
       <p style={{ margin: 0, padding: "8px 12px", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45, borderTop: "1px solid var(--border)" }}>
-        When a model fails, {engineName} tries these models in order. Each chain is keyed by a role, a specific model, or a provider wildcard. Roles without their own chain use the default chain.
+        When a model fails, {engineName} selects one chain: an exact model match first, then a provider wildcard, then a matching role. This precedence applies to both main sessions and subagents. Within the selected chain, it tries eligible models in order.
       </p>
 
       {visibleKeys.length === 0 ? (

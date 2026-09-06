@@ -27,6 +27,7 @@ import { ModelIcon, ProviderIcon } from "@/components/ProviderIcon";
 import { toast } from "@/components/ui/toast";
 import type { CatalogRow, ModelCatalogHandle } from "@/hooks/useModelCatalog";
 import { curationModeFor, allowListActive } from "@/lib/model-allow-list";
+import { formatModelDisplayName } from "@/lib/model-display";
 import { Drawer } from "../Drawer";
 import { chipStyle, nativeOptionStyle, nativeSelectStyle, READ_ONLY_BADGE } from "../primitives";
 import { useSaveStatus } from "../SaveStatus";
@@ -388,7 +389,7 @@ export function ModelCatalog({ catalog, panelId }: { catalog: ModelCatalogHandle
                 </span>
                 <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
                   <span style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", minWidth: 0 }}>
-                    <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "100%" }}>{row.name}</span>
+                    <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "100%" }}>{formatModelDisplayName(row.id, row.name)}</span>
                     {row.isNew && <span style={{ ...chipStyle, color: "var(--accent)" }}>New</span>}
                     {row.pinned && <span style={chipStyle}>Pinned</span>}
                     <StateChip row={row} />

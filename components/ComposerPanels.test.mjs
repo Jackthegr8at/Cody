@@ -145,6 +145,7 @@ test("history chips render terminal telemetry without pulsing state", () => {
   assert.match(html, /Map the surface/);
   assert.match(html, /data-subagent-metric="999k tok"/);
   assert.match(html, /data-subagent-metric="6m"/);
+  assert.match(html, /GPT-5.6/);
   // History chips must not show the pulsing live dot.
   assert.doesNotMatch(html, /live-pulse/);
 });

@@ -34,6 +34,7 @@ import {
   restoreScrollTop,
   VISIBLE_PAGE_SIZE,
 } from "@/lib/chat-lazy-load";
+import { formatModelDisplayName } from "@/lib/model-display";
 
 interface Props {
   session: SessionInfo | null;
@@ -65,6 +66,8 @@ interface Props {
    * session popover. Null on unmount so a closed chat clears the readout. */
   onModelUsageChange?: (usage: SessionModelUsage[] | null) => void;
   onOpenFile?: (filePath: string) => void;
+  /** Opens model catalog and curation from the composer. */
+  onOpenModels?: () => void;
   onOpenPreview?: (url: string, sessionId?: string) => void;
   onPreviewUrlsSeen?: (urls: string[], sessionId?: string) => void;
   /** The open session's own model catalog, for engines that publish models
@@ -681,7 +684,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
 /** Memoized: AppShell holds ~60 state values (git badge polls, update checks,
  *  the context-usage tick ChatWindow itself pushes up), and each of those
  *  re-renders would otherwise rebuild this whole tree. */
-export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, advisorEnabled: advisorPreferred, capabilities = ALL_CAPABILITIES, engine = null, toolCallsDefaultCollapsed = true, thinkingDefaultExpanded = false, onAgentEnd, onSessionNamed, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onModelUsageChange, onOpenFile, onOpenPreview, onPreviewUrlsSeen, onSessionModelsChange }: Props) {
+export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, advisorEnabled: advisorPreferred, capabilities = ALL_CAPABILITIES, engine = null, toolCallsDefaultCollapsed = true, thinkingDefaultExpanded = false, onAgentEnd, onSessionNamed, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onModelUsageChange, onOpenFile, onOpenModels, onOpenPreview, onPreviewUrlsSeen, onSessionModelsChange }: Props) {
   const { t, tn } = useI18n();
   // The three flags this file reasons about most, unpacked once. They are
   // derived from the prop rather than passed as separate props so that every
@@ -1037,12 +1040,14 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
   const modelUsageRows = useMemo<SessionModelUsage[]>(() => (
     contextModelUsage.map((entry) => ({
       ...entry,
-      name: modelList.find((option) => option.provider === entry.provider && option.id === entry.modelId)?.name
-        ?? modelNames[`${entry.provider}:${entry.modelId}`]
-        ?? (displayModelValue?.provider === entry.provider && displayModelValue.modelId === entry.modelId
-          ? liveModelMeta?.name ?? null
-          : null)
-        ?? entry.modelId,
+      name: formatModelDisplayName(
+        entry.modelId,
+        modelList.find((option) => option.provider === entry.provider && option.id === entry.modelId)?.name
+          ?? modelNames[`${entry.provider}:${entry.modelId}`]
+          ?? (displayModelValue?.provider === entry.provider && displayModelValue.modelId === entry.modelId
+            ? liveModelMeta?.name ?? null
+            : null),
+      ),
     }))
   ), [contextModelUsage, modelList, modelNames, displayModelValue, liveModelMeta]);
   // Push it up the same way as sessionStats: keyed on scalars so a fresh array
@@ -1115,6 +1120,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       fastModeActive={fastModeActive}
       fastModeSupported={fastModeCapable && chatExtras && Boolean(displayModelValue && modelList.some((entry) => entry.provider === displayModelValue.provider && entry.id === displayModelValue.modelId && entry.supportsFastMode))}
       onFastModeChange={session || isNew ? handleFastModeChange : undefined}
+      onOpenModels={onOpenModels}
       toolPreset={toolPreset}
       onToolPresetChange={chatExtras ? handleToolPresetChange : undefined}
       onAbortRetry={session ? handleAbortRetry : undefined}

@@ -28,6 +28,7 @@ import { useSettingsRoute } from "@/hooks/useSettingsData";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { providerGlob } from "@/lib/model-allow-list";
 import { omitUntouchedModelDrafts } from "@/lib/models-config-drafts";
+import { formatModelDisplayName } from "@/lib/model-display";
 import { isSubscriptionLogin, type ProviderMethod, type ProviderMethodVariable, type ProviderRow, type ProvidersResponse } from "@/lib/provider-directory";
 import { DangerZone } from "../DangerZone";
 import { Drawer } from "../Drawer";
@@ -561,7 +562,10 @@ function AdvancedForm({ row, onDirtyChange, onSaved }: {
                 onClick={() => setEditing(index)}
                 style={{ display: "flex", alignItems: "center", gap: 8, minHeight: 44, padding: "8px 12px", border: "none", borderTop: index > 0 ? "1px solid var(--border)" : "none", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", textAlign: "left", width: "100%" }}
               >
-                <code style={{ flex: 1, minWidth: 0, fontSize: 12, fontFamily: "var(--font-mono)", color: model.id ? "var(--text)" : "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{model.id || "new model"}</code>
+                <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+                  <span style={{ fontSize: 12, color: model.id ? "var(--text)" : "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{model.id ? formatModelDisplayName(model.id, model.name) : "new model"}</span>
+                  {model.id && <code style={{ fontSize: 10.5, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{model.id}</code>}
+                </span>
                 {model.reasoning && <span style={{ ...chipStyle, color: "var(--accent)" }}>thinking</span>}
                 <ChevronRight size={14} aria-hidden="true" style={{ color: "var(--text-dim)" }} />
               </button>

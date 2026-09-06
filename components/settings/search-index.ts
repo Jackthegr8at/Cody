@@ -22,7 +22,7 @@
  */
 import type { EngineCapabilities } from "../SettingsTabs";
 import { TERMINAL_ONLY_BADGE, UNAVAILABLE_BADGE } from "./primitives";
-import { capabilityAllows, getVisibleSections, groupLabel, normalizeSectionId, type CapabilityGate, type SettingsSectionId } from "./registry";
+import { capabilityAllows, getVisibleSections, groupLabel, type CapabilityGate, type SettingsSectionId } from "./registry";
 import { cardOwner, cardSurfaceAvailable } from "./engine/recommended-cards";
 import { SEARCH_ENTRIES as PREFERENCE_ENTRIES } from "./panels/PreferencesPanel";
 
@@ -342,7 +342,7 @@ export function searchSettings(query: string, entries: readonly SearchEntry[], o
 
 /** The hub a result opens, as the shell's `selectSection` wants it. */
 export function resultTarget(result: SearchEntry): { id: SettingsSectionId; sub?: string } {
-  return { id: normalizeSectionId(result.tab), ...(result.sub ? { sub: result.sub } : {}) };
+  return { id: result.tab, ...(result.sub ? { sub: result.sub } : {}) };
 }
 
 /** The highlight a result asks the pane for: hub rows highlight nothing. */

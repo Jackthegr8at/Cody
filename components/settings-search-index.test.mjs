@@ -269,7 +269,7 @@ test("chips narrow the union and list everything they match when the query is em
   assert.equal(searchSettings("row", entries, { filter: null }).length, 5);
 });
 
-test("a result opens its hub (with the legacy sub-view) and highlights everything but a hub row", () => {
+test("a result opens its hub and explicit sub-view, and highlights everything but a hub row", () => {
   assert.deepEqual(resultTarget({ id: "load-project-mcp-servers", tab: "extensions", sub: "mcp", label: "x", breadcrumb: [], action: "jump" }), { id: "extensions", sub: "mcp" });
   assert.deepEqual(resultTarget({ id: "theme", tab: "general", label: "x", breadcrumb: [], action: "jump" }), { id: "general" });
   assert.equal(resultHighlight({ id: "tab-providers", tab: "providers", label: "x", breadcrumb: [], action: "jump" }), null);

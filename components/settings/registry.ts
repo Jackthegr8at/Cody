@@ -5,11 +5,8 @@
  * order, under which eyebrow, gated on which capability, and which panel
  * module renders each one. `SettingsShell`, `SettingsSidebar` (desktop rail),
  * `MobileStack` (phone) and the dialog-wide search all read this table; a
- * hub that is not here does not exist.
- *
- * Legacy ids survive one release: every id `SettingsTab` still lists is
- * normalised here (`normalizeSectionId` / `resolveSection`) so old deep links,
- * toasts and callers land on the hub that now holds their content.
+ * hub that is not here does not exist. Incoming ids are validated against this
+ * table, with unknown values falling back to General.
  */
 import dynamic from "next/dynamic";
 import { createElement, type ComponentType, type CSSProperties } from "react";
@@ -264,18 +261,6 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   },
 ];
 
-/** Legacy ids and where their content lives now. `models` is deliberately
- * absent: the id survives but points at the Models hub, not at the old "AI
- * Model Defaults" tab (that content is under Behavior). */
-export const SECTION_ALIASES: Readonly<Record<string, { id: SettingsSectionId; sub?: string }>> = {
-  safety: { id: "engine" },
-  intelligence: { id: "engine" },
-  omp: { id: "engine" },
-  localai: { id: "providers" },
-  mcp: { id: "extensions", sub: "mcp" },
-  skills: { id: "extensions", sub: "skills" },
-  plugins: { id: "extensions", sub: "plugins" },
-};
 
 const SECTION_IDS = new Set<string>(SETTINGS_SECTIONS.map((section) => section.id));
 
@@ -283,21 +268,19 @@ export function isSectionId(value: string): value is SettingsSectionId {
   return SECTION_IDS.has(value);
 }
 
-/** The hub a legacy or current id lands on; unknown ids fall back to
- * Preferences, the one section every engine and every account has. */
+/** Validate an incoming hub id; unknown values fall back to General, the one
+ * section every engine and every account has. */
 export function normalizeSectionId(id: SettingsTab | string | null | undefined): SettingsSectionId {
   if (!id) return "general";
   if (isSectionId(id)) return id;
-  return SECTION_ALIASES[id]?.id ?? "general";
+  return "general";
 }
 
-/** Like `normalizeSectionId`, but keeps the sub-view a legacy id implies
- * (`skills` → Extensions › Skills). An explicit `sub` wins over the alias. */
-export function resolveSection(idOrLegacy: SettingsTab | string | null | undefined, sub?: string | null): { id: SettingsSectionId; sub?: string } {
-  const id = normalizeSectionId(idOrLegacy);
-  const implied = idOrLegacy ? SECTION_ALIASES[idOrLegacy]?.sub : undefined;
-  const resolved = sub ?? implied;
-  return resolved ? { id, sub: resolved } : { id };
+/** Validate an incoming hub id while preserving only an explicitly supplied
+ * sub-view. */
+export function resolveSection(id: SettingsTab | string | null | undefined, sub?: string | null): { id: SettingsSectionId; sub?: string } {
+  const resolved = normalizeSectionId(id);
+  return sub ? { id: resolved, sub } : { id: resolved };
 }
 
 /** ANY semantics for a list: a hub whose sub-surfaces gate individually stays

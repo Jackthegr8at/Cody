@@ -3,6 +3,7 @@
 import { AlertCircle, AlertTriangle, ArrowDown, ArrowUp, Check, Loader2, Sparkles, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "@/lib/i18n";
+import { formatModelDisplayName } from "@/lib/model-display";
 import { toast } from "@/components/ui/toast";
 import { NativeSetting, ToggleSwitch, nativeSelectStyle } from "./primitives";
 
@@ -12,12 +13,11 @@ import { NativeSetting, ToggleSwitch, nativeSelectStyle } from "./primitives";
  * config.yml. Rendered as the last setup-wizard step and as a Settings detail;
  * the wizard passes the callbacks it needs to advance, Settings passes none.
  *
- * The fallback chains are the reason this exists. omp resolves a subagent's
- * chain as fallbackChains[roleName] ?? fallbackChains.default, so a config
- * holding only provider wildcard keys leaves subagents with no chain at all and
- * their first usage limit kills the turn. The plan therefore always carries
- * role-keyed entries, and the editor keeps role keys visually separate from
- * wildcard keys so a user pruning entries can see which ones subagents inherit.
+ * The review follows OMP’s runtime precedence: exact model chains, provider
+ * catch-alls, then role chains. Exact entries protect each enabled model’s
+ * fallback tier in both main sessions and subagents; role entries also seed
+ * delegated sessions. Keep these groups distinct so the effective policy is
+ * visible before the user applies it.
  */
 
 interface PlannerCandidate {
@@ -128,9 +128,10 @@ function reason(failure: unknown): string {
   return failure instanceof Error ? failure.message : String(failure);
 }
 
-/** `provider/model:effort` split so a select can match on the model while the
- * reasoning effort the plan asked for survives an edit. */
-function splitSelector(selector: string): { base: string; effort: string } {
+/** Splits a recognized effort suffix, but leaves an exact available selector
+ * intact: provider IDs can legitimately contain literal suffixes such as `:batch`. */
+function splitSelector(selector: string, availableSelectors?: ReadonlySet<string>): { base: string; effort: string } {
+  if (availableSelectors?.has(selector)) return { base: selector, effort: "" };
   const match = selector.match(/:([^,:/]+)$/);
   return match ? { base: selector.slice(0, match.index), effort: match[1] } : { base: selector, effort: "" };
 }
@@ -288,23 +289,31 @@ export function ModelPlanPanel({ onApplied, onSkip, compact }: {
   // re-split the chains on every edit in the review form.
   const roleNames = useMemo(() => snapshot?.roleNames ?? [], [snapshot]);
   const rosterSelectors = useMemo(
-    () => roster.map((model) => ({ selector: `${model.provider}/${model.id}`, label: model.name || model.id })),
+    () => roster.map((model) => ({ selector: `${model.provider}/${model.id}`, name: formatModelDisplayName(model.id, model.name) })),
     [roster],
   );
+  const selectorNames = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const candidate of snapshot?.plannerCandidates ?? []) names.set(candidate.selector, formatModelDisplayName(candidate.selector.slice(candidate.selector.indexOf("/") + 1), candidate.label));
+    for (const entry of rosterSelectors) names.set(entry.selector, entry.name);
+    return names;
+  }, [snapshot?.plannerCandidates, rosterSelectors]);
+  const availableSelectorSet = useMemo(() => new Set(selectorNames.keys()), [selectorNames]);
 
   const chainGroups = useMemo(() => {
     const roleKeys = new Set([...roleNames, "default"]);
     const role: Array<[string, string[]]> = [];
+    const model: Array<[string, string[]]> = [];
     const wildcard: Array<[string, string[]]> = [];
     for (const entry of Object.entries(chains)) {
-      (roleKeys.has(entry[0]) ? role : wildcard).push(entry);
+      (roleKeys.has(entry[0]) ? role : entry[0].endsWith("/*") ? wildcard : model).push(entry);
     }
-    return { role, wildcard };
+    return { role, model, wildcard };
   }, [chains, roleNames]);
 
   const setRole = (role: string, base: string) => {
     setRoles((current) => {
-      const { effort } = splitSelector(current[role] ?? "");
+      const { effort } = splitSelector(current[role] ?? "", availableSelectorSet);
       return { ...current, [role]: base ? `${base}${effort ? `:${effort}` : ""}` : "" };
     });
   };
@@ -445,7 +454,7 @@ export function ModelPlanPanel({ onApplied, onSkip, compact }: {
             >
               {candidates.map((candidate) => (
                 <option key={candidate.selector} value={candidate.selector}>
-                  {candidate.label} ({candidate.selector})
+                  {formatModelDisplayName(candidate.selector.slice(candidate.selector.indexOf("/") + 1), candidate.label)} ({candidate.selector})
                 </option>
               ))}
               <option value={HEURISTIC}>{t("modelPlan.plannerHeuristic")}</option>
@@ -473,7 +482,7 @@ export function ModelPlanPanel({ onApplied, onSkip, compact }: {
   }
 
   const plannerLabel = plannerUsed
-    ? snapshot?.plannerCandidates.find((candidate) => candidate.selector === plannerUsed)?.label ?? plannerUsed
+    ? formatModelDisplayName(plannerUsed.slice(plannerUsed.indexOf("/") + 1), snapshot?.plannerCandidates.find((candidate) => candidate.selector === plannerUsed)?.label)
     : null;
 
   return (
@@ -503,7 +512,7 @@ export function ModelPlanPanel({ onApplied, onSkip, compact }: {
         </div>
         {roleNames.map((role) => {
           const value = roles[role] ?? "";
-          const { base, effort } = splitSelector(value);
+          const { base, effort } = splitSelector(value, availableSelectorSet);
           const known = !base || rosterSelectors.some((entry) => entry.selector === base);
           return (
             <div key={role} className="model-role-row" style={{ display: "grid", gridTemplateColumns: "minmax(140px, 0.9fr) minmax(0, 1.1fr)", alignItems: "center", gap: 10 }}>
@@ -523,7 +532,7 @@ export function ModelPlanPanel({ onApplied, onSkip, compact }: {
                 <option value="">{t("modelPlan.roleUnset")}</option>
                 {!known && <option value={base}>{t("modelPlan.roleUnavailable", { selector: base })}</option>}
                 {rosterSelectors.map((entry) => (
-                  <option key={entry.selector} value={entry.selector}>{entry.label} ({entry.selector})</option>
+                  <option key={entry.selector} value={entry.selector}>{entry.name} ({entry.selector})</option>
                 ))}
               </select>
             </div>
@@ -532,8 +541,9 @@ export function ModelPlanPanel({ onApplied, onSkip, compact }: {
       </section>
 
       {([
-        { key: "role", title: t("modelPlan.chainsRoleTitle"), note: t("modelPlan.chainsRoleNote"), entries: chainGroups.role },
+        { key: "model", title: t("modelPlan.chainsModelTitle"), note: t("modelPlan.chainsModelNote"), entries: chainGroups.model },
         { key: "wildcard", title: t("modelPlan.chainsWildcardTitle"), note: t("modelPlan.chainsWildcardNote"), entries: chainGroups.wildcard },
+        { key: "role", title: t("modelPlan.chainsRoleTitle"), note: t("modelPlan.chainsRoleNote"), entries: chainGroups.role },
       ] as const).filter((group) => group.entries.length > 0).map((group) => (
         <section key={group.key} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <div>
@@ -545,10 +555,15 @@ export function ModelPlanPanel({ onApplied, onSkip, compact }: {
               <div style={{ padding: "7px 12px", background: "var(--bg-panel)", fontSize: 11.5, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-mono)" }}>{key}</div>
               {entries.length === 0
                 ? <div style={{ padding: "8px 12px", fontSize: 11.5, color: "var(--text-dim)" }}>{t("modelPlan.chainEmpty")}</div>
-                : entries.map((entry, index) => (
-                  <div key={`${entry}-${index}`} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px 6px 12px", borderTop: "1px solid var(--border)" }}>
+                : entries.map((entry, index) => {
+                  const { base } = splitSelector(entry, availableSelectorSet);
+                  const modelName = selectorNames.get(base);
+                  return <div key={`${entry}-${index}`} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px 6px 12px", borderTop: "1px solid var(--border)" }}>
                     <span style={{ width: 16, fontSize: 11, color: "var(--text-dim)", flexShrink: 0 }}>{index + 1}</span>
-                    <span style={{ flex: 1, minWidth: 0, fontSize: 11.5, fontFamily: "var(--font-mono)", color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry}</span>
+                    <span style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1, minWidth: 0 }}>
+                      <span title={entry} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11.5, color: "var(--text)" }}>{modelName ?? entry}</span>
+                      {modelName && <code title={entry} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)", fontSize: 10.5, fontFamily: "var(--font-mono)" }}>{entry}</code>}
+                    </span>
                     <button type="button" title={t("modelPlan.moveUp")} aria-label={t("modelPlan.moveUp")} disabled={index === 0} onClick={() => moveChainEntry(key, index, -1)} style={disabledStyle(iconButton, index === 0)}>
                       <ArrowUp size={12} aria-hidden />
                     </button>
@@ -558,8 +573,8 @@ export function ModelPlanPanel({ onApplied, onSkip, compact }: {
                     <button type="button" title={t("modelPlan.remove")} aria-label={t("modelPlan.remove")} onClick={() => removeChainEntry(key, index)} style={iconButton}>
                       <X size={12} aria-hidden />
                     </button>
-                  </div>
-                ))}
+                  </div>;
+                })}
             </div>
           ))}
         </section>

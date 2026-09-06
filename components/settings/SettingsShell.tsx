@@ -38,7 +38,7 @@ import { SettingsSidebar } from "./SettingsSidebar";
 import { createSettingsBusy, ShellContext, type SessionModel, type SettingsShellCallbacks, type SettingsShellPrefs, type SettingsShellValue } from "./shell-context";
 
 export interface SettingsRequest {
-  /** Hub or legacy id to open; null means the last-open hub. */
+  /** Hub to open; null means the last-open hub. */
   section: SettingsTab | null;
   sub?: string;
   highlight?: string;

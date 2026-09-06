@@ -1,18 +1,6 @@
 import type { RosterModel } from "./roster";
 
-/**
- * Pure planning arithmetic: role assignment -> retry fallback chains.
- *
- * No I/O here on purpose. Everything that decides what lands in the user's
- * config.yml is a plain function over a roster snapshot, so the invariants
- * below are testable without an omp process or a model call.
- */
-
-/** The roles this module has an opinion about, in the order the Models panel
- * lists them. omp owns the real list and it changes between releases, so every
- * caller that can reach the engine passes it in (`lib/omp/model-roles`
- * `getOmpModelRoleIds`); this stands in when omp is not installed. Assigning a
- * role the engine dropped writes config.yml entries its resolver ignores. */
+/** OMP 18.1 no longer has a designer role. */
 export const ROLE_NAMES: readonly string[] = [
   "default",
   "smol",
@@ -26,16 +14,12 @@ export const ROLE_NAMES: readonly string[] = [
 ];
 
 export interface PlanRationale {
-  /** A role name, or a topic like "ladder" — the UI groups on this. */
   subject: string;
   text: string;
 }
 
-/** What a planner (LLM or heuristic) decides: assignments plus the order in
- * which quality is allowed to degrade. Chains are derived, never authored. */
 export interface PlanDraft {
   roles: Record<string, string>;
-  /** Provider ids, best first. */
   ladder: string[];
   rationale: PlanRationale[];
 }
@@ -47,65 +31,21 @@ export interface ModelPlan {
   rationale: PlanRationale[];
 }
 
-// The provider is the FIRST path segment, not everything before the last "/":
-// gateway model ids can themselves contain slashes.
-export function providerOf(selector: string): string {
-  const slash = selector.indexOf("/");
-  return slash === -1 ? selector : selector.slice(0, slash);
+type NativePriorityRole = "smol" | "slow";
+type PriceIntent = "lightest" | "strongest" | "balanced";
+
+interface RoleWorkload {
+  requireVision: boolean;
+  preferReasoning: boolean;
+  preferNonReasoning: boolean;
+  nativePriority?: NativePriorityRole;
+  priceIntent: PriceIntent;
 }
 
-/**
- * Providers that are gateways: aggregators (OpenRouter and its kind) that
- * resell many vendors' models under one key. Judged from evidence, not a brand
- * list — a gateway's model ids are themselves vendor-prefixed
- * (`openrouter/anthropic/claude-…`), so a provider where most ids carry a
- * slash is an aggregator. A gateway is a backup route, never the first choice:
- * the same models exist on their home providers with the quota the user
- * actually pays for, so gateways rank after direct providers and before local
- * runtimes wherever this module orders providers.
- */
-export function gatewayProviders(roster: RosterModel[]): Set<string> {
-  const slashed = new Map<string, number>();
-  const totals = new Map<string, number>();
-  for (const model of roster) {
-    totals.set(model.provider, (totals.get(model.provider) ?? 0) + 1);
-    if (model.id.includes("/")) slashed.set(model.provider, (slashed.get(model.provider) ?? 0) + 1);
-  }
-  const gateways = new Set<string>();
-  for (const [provider, total] of totals) {
-    if ((slashed.get(provider) ?? 0) * 2 > total) gateways.add(provider);
-  }
-  return gateways;
-}
-
-/**
- * Find a plan selector in the roster.
- *
- * Exact match first, because a model id can itself contain a colon
- * (self-hosted tags such as `qwen3:8b`); the optional `:thinking` suffix may
- * only be stripped once the verbatim string has been ruled out as a real model.
- */
-export function resolveRosterModel(selector: string, roster: RosterModel[]): RosterModel | null {
-  if (!selector || !selector.trim()) return null;
-  const exact = roster.find((model) => model.selector === selector);
-  if (exact) return exact;
-  const colon = selector.lastIndexOf(":");
-  if (colon <= selector.lastIndexOf("/")) return null;
-  const base = selector.slice(0, colon);
-  return roster.find((model) => model.selector === base) ?? null;
-}
-
-/**
- * Anthropic's own published quality ladder, richest first. Reasoning support,
- * context window and output budget alone cannot separate two lines that ship
- * identical ceilings on all three — Fable and Opus are on record doing
- * exactly that (both reasoning, both 1M context, both 128k output, both
- * offering effort up through "max") — so without an explicit signal here
- * `compareCapability` fell through to comparing selector strings, which only
- * put Fable ahead of Opus by the accident of "f" sorting before "o". This is
- * Anthropic's own naming, not a guess: Fable is the tier Anthropic ships
- * above Opus.
- */
+const SUBSCRIPTION_PROVIDERS = new Set(["openai-codex", "anthropic"]);
+const LIGHTWEIGHT_ROLES = new Set(["smol", "tiny", "commit"]);
+const SLOW_ROLES = new Set(["slow", "plan", "advisor"]);
+const THINKING_LEVELS = ["inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const ANTHROPIC_FAMILY_RANK: Record<string, number> = {
   fable: 0,
   opus: 1,
@@ -113,325 +53,805 @@ const ANTHROPIC_FAMILY_RANK: Record<string, number> = {
   haiku: 3,
 };
 
+/** Mirrors OMP's case-sensitive concrete effort parser and exact auto alias. */
+export function isRecognizedThinkingSuffix(suffix: string): boolean {
+  if (suffix === "auto" || THINKING_LEVELS.includes(suffix)) return true;
+  if (suffix.length < 2) return false;
+
+  return THINKING_LEVELS.filter((level) => level.startsWith(suffix)).length === 1;
+}
+
+export function providerOf(selector: string): string {
+  const slash = selector.indexOf("/");
+  return slash === -1 ? selector : selector.slice(0, slash);
+}
+
 /**
- * Where a model sits on its own vendor's named quality ladder — the signal
- * `compareCapability` applies between reasoning support and context window.
- *
- * Anthropic is the only vendor ranked here, because it is the only one this
- * module can justify an order for: "fable > opus > sonnet > haiku" is
- * Anthropic's own published tiering. Nothing else in Cody assumes an order
- * between, say, an OpenAI "-mini" and "-nano" id, so inventing one here would
- * be a guess dressed up as data. An id this cannot place — a non-Anthropic
- * model, or a Claude id naming no family this table knows — returns null,
- * which `compareCapability` treats as NO signal rather than a rank that would
- * silently outrank or underrank a family nobody taught this list about.
- *
- * Matched on whether "claude" appears anywhere in the id rather than a
- * leading anchor, because real catalogs spell it every which way: bare
- * ("claude-fable-5"), dotted-aggregator ("anthropic/claude-fable-5.1"),
- * Bedrock ("anthropic.claude-opus-4-8-v1:0"), Vertex
- * ("claude-fable-5-1@default"), and OpenRouter's tilde/batch variants
- * ("~anthropic/claude-fable-latest", "anthropic/claude-fable-5:batch"). No
- * other vendor's id space uses the word, so a substring is evidence enough.
+ * Resolve only an exact roster selector, plus an OMP-recognized trailing
+ * thinking level. A colon in a genuine model id (for example :batch) remains
+ * part of that exact id rather than becoming an accidental alias.
  */
-function vendorFamilyRank(model: Pick<RosterModel, "id">): number | null {
+export function resolveRosterModel(selector: string, roster: RosterModel[]): RosterModel | null {
+  const normalized = selector.trim();
+  if (!normalized) return null;
+
+  const exact = roster.find((model) => model.selector === normalized);
+  if (exact) return exact;
+
+  const colon = normalized.lastIndexOf(":");
+  if (colon <= normalized.lastIndexOf("/")) return null;
+  if (!isRecognizedThinkingSuffix(normalized.slice(colon + 1))) return null;
+
+  return roster.find((model) => model.selector === normalized.slice(0, colon)) ?? null;
+}
+
+/** OpenRouter remains a gateway even when its currently enabled ids are bare. */
+export function gatewayProviders(roster: RosterModel[]): Set<string> {
+  const totals = new Map<string, number>();
+  const nested = new Map<string, number>();
+
+  for (const model of roster) {
+    totals.set(model.provider, (totals.get(model.provider) ?? 0) + 1);
+    if (model.id.includes("/")) {
+      nested.set(model.provider, (nested.get(model.provider) ?? 0) + 1);
+    }
+  }
+
+  return new Set(
+    [...totals].flatMap(([provider, total]) => {
+      const normalized = provider.toLowerCase();
+      const isGateway = normalized === "openrouter"
+        || normalized.includes("gateway")
+        || (nested.get(provider) ?? 0) * 2 > total;
+      return isGateway ? [provider] : [];
+    }),
+  );
+}
+
+/** A mixed remote/local provider is not a local-only fallback tier. */
+function localProviders(roster: RosterModel[]): Set<string> {
+  const byProvider = new Map<string, RosterModel[]>();
+  for (const model of roster) {
+    const models = byProvider.get(model.provider) ?? [];
+    models.push(model);
+    byProvider.set(model.provider, models);
+  }
+
+  return new Set(
+    [...byProvider].flatMap(([provider, models]) => (
+      models.length > 0 && models.every((model) => model.local) ? [provider] : []
+    )),
+  );
+}
+
+/** Quota is runtime health, so it deliberately never appears in this ordering. */
+function providerTier(provider: string, gateways: Set<string>, locals: Set<string>): number {
+  if (SUBSCRIPTION_PROVIDERS.has(provider)) return 0;
+  if (locals.has(provider)) return 3;
+  return gateways.has(provider) ? 2 : 1;
+}
+
+function priceOf(model: RosterModel): number | null {
+  return typeof model.relativeCost === "number"
+    && Number.isFinite(model.relativeCost)
+    && model.relativeCost > 0
+    ? model.relativeCost
+    : null;
+}
+function vendorFamilyRank(model: Pick<RosterModel, "id" | "provider">): number | null {
   const id = model.id.toLowerCase();
-  if (!id.includes("claude")) return null;
+  if (!id.includes("claude") && model.provider !== "anthropic") return null;
   for (const [family, rank] of Object.entries(ANTHROPIC_FAMILY_RANK)) {
     if (id.includes(family)) return rank;
   }
   return null;
 }
 
-// Best first. Reasoning support leads because it is the only catalog signal
-// that separates a deep-thinking model from a chat model; a vendor's own
-// named tiers break the next layer of ties (see vendorFamilyRank) — two lines
-// can ship identical reasoning/context/output ceilings and still not be
-// equally capable; context window and output budget rank the rest, and the
-// selector breaks ties so the same roster always yields the same plan.
-function compareCapability(a: RosterModel, b: RosterModel): number {
-  const familyA = vendorFamilyRank(a);
-  const familyB = vendorFamilyRank(b);
-  return Number(b.reasoning) - Number(a.reasoning)
-    || (familyA !== null && familyB !== null ? familyA - familyB : 0)
-    || (b.contextWindow ?? 0) - (a.contextWindow ?? 0)
-    || (b.maxTokens ?? 0) - (a.maxTokens ?? 0)
-    || a.selector.localeCompare(b.selector);
+function nativeRank(model: RosterModel, role: NativePriorityRole | undefined): number | undefined {
+  return role ? model.rolePriority?.[role] : undefined;
 }
 
-/**
- * The model to reach for whenever a plan needs "the good one": the strongest
- * model on a DIRECT provider the user pays for or is signed in to, then a
- * gateway model, and a local model only when the roster offers nothing else.
- * Shared by the planner suggestion, the heuristic assignment and the repair
- * path so all three agree.
- */
-export function bestAvailableModel(roster: RosterModel[]): RosterModel | null {
+function providerOrder(
+  roster: RosterModel[],
+  requested: readonly string[] = [],
+  preferred?: string,
+): string[] {
   const gateways = gatewayProviders(roster);
-  const tier = (model: RosterModel): number => (model.local ? 2 : gateways.has(model.provider) ? 1 : 0);
-  const ranked = [...roster].sort((a, b) => tier(a) - tier(b) || compareCapability(a, b));
-  return ranked[0] ?? null;
+  const locals = localProviders(roster);
+  const known = [...new Set(roster.map((model) => model.provider))];
+  const requestedRank = new Map(requested.map((provider, index) => [provider, index]));
+
+  return known.sort((left, right) => (
+    providerTier(left, gateways, locals) - providerTier(right, gateways, locals)
+    || Number(right === preferred) - Number(left === preferred)
+    || (requestedRank.get(left) ?? Number.MAX_SAFE_INTEGER)
+      - (requestedRank.get(right) ?? Number.MAX_SAFE_INTEGER)
+    || left.localeCompare(right)
+  ));
 }
 
+function workloadForRole(role: string, reference?: RosterModel): RoleWorkload {
+  const requireVision = role === "vision" || reference?.vision === true;
+
+  if (LIGHTWEIGHT_ROLES.has(role)) {
+    return {
+      requireVision,
+      preferReasoning: false,
+      preferNonReasoning: true,
+      nativePriority: "smol",
+      priceIntent: "lightest",
+    };
+  }
+
+  if (SLOW_ROLES.has(role)) {
+    return {
+      requireVision,
+      preferReasoning: true,
+      preferNonReasoning: false,
+      nativePriority: "slow",
+      priceIntent: "strongest",
+    };
+  }
+
+  if (role === "task") {
+    return {
+      requireVision,
+      preferReasoning: true,
+      preferNonReasoning: false,
+      priceIntent: "balanced",
+    };
+  }
+
+  return {
+    requireVision,
+    preferReasoning: true,
+    preferNonReasoning: false,
+    priceIntent: "strongest",
+  };
+}
+
+function compareByPrice(left: RosterModel, right: RosterModel, intent: PriceIntent): number {
+  if (intent === "strongest") {
+    const leftFamily = vendorFamilyRank(left);
+    const rightFamily = vendorFamilyRank(right);
+    if (leftFamily !== null && rightFamily !== null && leftFamily !== rightFamily) {
+      return leftFamily - rightFamily;
+    }
+  }
+  const leftPrice = priceOf(left);
+  const rightPrice = priceOf(right);
+
+  if (leftPrice !== null && rightPrice !== null && leftPrice !== rightPrice) {
+    return intent === "lightest" ? leftPrice - rightPrice : rightPrice - leftPrice;
+  }
+  if (leftPrice !== null && rightPrice === null) return -1;
+  if (leftPrice === null && rightPrice !== null) return 1;
+  return left.selector.localeCompare(right.selector);
+}
+
+function sortBalanced(models: RosterModel[]): RosterModel[] {
+  const priced = models.filter((model) => priceOf(model) !== null)
+    .sort((left, right) => (priceOf(left) ?? 0) - (priceOf(right) ?? 0));
+  const unknown = models.filter((model) => priceOf(model) === null)
+    .sort((left, right) => left.selector.localeCompare(right.selector));
+  if (priced.length === 0) return unknown;
+
+  const middle = (priced.length - 1) / 2;
+  return priced
+    .map((model, index) => ({ model, distance: Math.abs(index - middle) }))
+    .sort((left, right) => left.distance - right.distance || left.model.selector.localeCompare(right.model.selector))
+    .map(({ model }) => model)
+    .concat(unknown);
+}
+
+function isNativeOppositeOnly(model: RosterModel, target: NativePriorityRole): boolean {
+  const opposite: NativePriorityRole = target === "smol" ? "slow" : "smol";
+  return model.rolePriority?.[opposite] !== undefined
+    && model.rolePriority?.[target] === undefined;
+}
+
+function sortCandidates(models: RosterModel[], workload: RoleWorkload): RosterModel[] {
+  if (workload.priceIntent === "balanced") return sortBalanced(models);
+
+  return [...models].sort((left, right) => {
+    if (workload.priceIntent === "strongest") {
+      const leftFamily = vendorFamilyRank(left);
+      const rightFamily = vendorFamilyRank(right);
+      if (leftFamily !== null && rightFamily !== null && leftFamily !== rightFamily) {
+        return leftFamily - rightFamily;
+      }
+    }
+    if (workload.nativePriority) {
+      const leftNative = nativeRank(left, workload.nativePriority);
+      const rightNative = nativeRank(right, workload.nativePriority);
+      if (leftNative !== undefined || rightNative !== undefined) {
+        if (leftNative === undefined) return 1;
+        if (rightNative === undefined) return -1;
+        if (leftNative !== rightNative) return leftNative - rightNative;
+      }
+    }
+
+    return compareByPrice(left, right, workload.priceIntent);
+  });
+}
+
+function lightCandidates(fullProvider: RosterModel[]): RosterModel[] {
+  const candidates = fullProvider.filter((model) => !isNativeOppositeOnly(model, "smol"));
+  if (candidates.length === 0) return [];
+
+  const native = candidates.filter((model) => model.rolePriority?.smol !== undefined);
+  const nonReasoning = candidates.filter((model) => !model.reasoning);
+  const priced = candidates.filter((model) => priceOf(model) !== null);
+  const lowest = priced.length > 0
+    ? Math.min(...priced.map((model) => priceOf(model) ?? Number.POSITIVE_INFINITY))
+    : null;
+  const priceLight = lowest === null
+    ? []
+    : priced.filter((model) => priceOf(model) === lowest);
+  const eligible = [...native, ...nonReasoning, ...priceLight];
+
+  // A catalog without a light signal still needs a usable chat fallback.
+  return eligible.length > 0 ? [...new Set(eligible)] : candidates;
+}
+
+function strongCandidates(fullProvider: RosterModel[]): RosterModel[] {
+  const withoutNativeSmol = fullProvider.filter((model) => !isNativeOppositeOnly(model, "slow"));
+  const candidates = withoutNativeSmol.length > 0 ? withoutNativeSmol : fullProvider;
+  const native = candidates.filter((model) => model.rolePriority?.slow !== undefined);
+  const priced = candidates.filter((model) => priceOf(model) !== null);
+  const lowest = priced.length > 0
+    ? Math.min(...priced.map((model) => priceOf(model) ?? Number.POSITIVE_INFINITY))
+    : null;
+  // Native-slow models lead. Price then admits the strong and balanced tiers,
+  // but never a separately identified cheapest model merely because it reasons.
+  const compatible = lowest === null
+    ? []
+    : priced.filter((model) => (priceOf(model) ?? Number.NEGATIVE_INFINITY) > lowest);
+  const eligible = [...native, ...compatible];
+  return eligible.length > 0 ? [...new Set(eligible)] : candidates;
+}
+
+function nativeOrPriceProfile(
+  model: RosterModel,
+  roster: RosterModel[],
+): "smol" | "slow" | "task" | "default" | null {
+  if (model.rolePriority?.smol !== undefined) return "smol";
+  if (model.rolePriority?.slow !== undefined) return "slow";
+  return sourcePriceRole(model, roster);
+}
+
+function balancedCandidates(fullProvider: RosterModel[], roster: RosterModel[]): RosterModel[] {
+  const balanced = fullProvider.filter((model) => nativeOrPriceProfile(model, roster) === "task");
+  if (balanced.length > 0) return balanced;
+
+  const nonLight = fullProvider.filter((model) => nativeOrPriceProfile(model, roster) !== "smol");
+  // A sparse/chat-only provider may have no balanced or nonlight tier at all.
+  return nonLight.length > 0 ? nonLight : fullProvider;
+}
 /**
- * The closest thing `provider` offers to `reference`. Reasoning support has to
- * match — substituting a chat model for a thinking model changes what the role
- * can do — and among the models that match, the largest context window is the
- * nearest equivalent the catalog can express.
- *
- * The mismatch rule is asymmetric on purpose. A provider with no reasoning
- * model contributes NOTHING to a reasoning reference's chain: falling back
- * from a thinking model to a small chat model (a Haiku-class rung under a
- * planning role) trades a rate-limit pause for a model that loops on problems
- * it cannot think through — strictly worse than skipping the rung. A
- * non-reasoning reference may still step up to a reasoning model, which is
- * merely overqualified.
+ * Models suited to one workload on a single provider. Source-tier eligibility
+ * is calculated before removing the failing source, so its lone cheap model
+ * cannot make a remaining frontier sibling look lightweight.
  */
-function equivalentOn(provider: string, reference: RosterModel | null, roster: RosterModel[]): RosterModel | null {
-  const candidates = roster.filter((model) => model.provider === provider);
+function rankedModelsOnProvider(
+  provider: string,
+  roster: RosterModel[],
+  workload: RoleWorkload,
+  excludedSelector?: string,
+): RosterModel[] {
+  const fullProvider = roster.filter((model) => (
+    model.provider === provider
+    && (!workload.requireVision || model.vision)
+  ));
+  if (fullProvider.length === 0) return [];
+
+  const eligible = workload.preferNonReasoning
+    ? lightCandidates(fullProvider)
+    : workload.priceIntent === "balanced"
+      ? balancedCandidates(fullProvider, roster)
+      : strongCandidates(fullProvider);
+  return sortCandidates(
+    eligible.filter((model) => model.selector !== excludedSelector),
+    workload,
+  );
+}
+
+function firstRankedModelOnProvider(
+  provider: string,
+  roster: RosterModel[],
+  workload: RoleWorkload,
+): RosterModel | null {
+  return rankedModelsOnProvider(provider, roster, workload)[0] ?? null;
+}
+
+function selectAcrossProviders(
+  candidates: RosterModel[],
+  providers: readonly string[],
+  workload: RoleWorkload,
+  preferred?: string,
+): RosterModel | null {
   if (candidates.length === 0) return null;
-  const sameKind = reference ? candidates.filter((model) => model.reasoning === reference.reasoning) : [];
-  if (sameKind.length > 0) return sameKind.sort(compareCapability)[0];
-  if (reference?.reasoning) return null;
-  return candidates.sort(compareCapability)[0];
+
+  const providerRank = new Map(providers.map((provider, index) => [provider, index]));
+  return [...candidates].sort((left, right) => {
+    if (workload.nativePriority) {
+      const leftNative = nativeRank(left, workload.nativePriority);
+      const rightNative = nativeRank(right, workload.nativePriority);
+      if (leftNative !== undefined || rightNative !== undefined) {
+        if (leftNative === undefined) return 1;
+        if (rightNative === undefined) return -1;
+        if (leftNative !== rightNative) return leftNative - rightNative;
+      }
+    }
+
+    return Number(right.provider === preferred) - Number(left.provider === preferred)
+      || (providerRank.get(left.provider) ?? Number.MAX_SAFE_INTEGER)
+        - (providerRank.get(right.provider) ?? Number.MAX_SAFE_INTEGER)
+      || left.selector.localeCompare(right.selector);
+  })[0] ?? null;
 }
 
+function bestForWorkload(
+  workload: RoleWorkload,
+  roster: RosterModel[],
+  preferredProvider?: string,
+  onlyTier?: number,
+): RosterModel | null {
+  const gateways = gatewayProviders(roster);
+  const locals = localProviders(roster);
+  const providers = providerOrder(roster, [], preferredProvider);
+  const tiers = onlyTier === undefined ? [0, 1, 2, 3] : [onlyTier];
+
+  for (const tier of tiers) {
+    const tierProviders = providers.filter((provider) => providerTier(provider, gateways, locals) === tier);
+    const candidates = tierProviders.flatMap((provider) => {
+      const candidate = firstRankedModelOnProvider(provider, roster, workload);
+      return candidate ? [candidate] : [];
+    });
+    const selected = selectAcrossProviders(candidates, tierProviders, workload, preferredProvider);
+    if (selected) return selected;
+  }
+
+  return null;
+}
+
+function bestFor(role: string, roster: RosterModel[], preferredProvider?: string): RosterModel | null {
+  return bestForWorkload(workloadForRole(role), roster, preferredProvider);
+}
+
+/** Best eligible main-turn model, without treating context length or a name as a benchmark. */
+export function bestAvailableModel(
+  roster: RosterModel[],
+  options: { preferredProvider?: string } = {},
+): RosterModel | null {
+  return bestFor("default", roster, options.preferredProvider);
+}
+
+function rolesAssignedTo(
+  selector: string,
+  roles: Record<string, string>,
+  roster: RosterModel[],
+): string[] {
+  return ROLE_NAMES.flatMap((role) => {
+    const assigned = roles[role] ? resolveRosterModel(roles[role], roster) : null;
+    return assigned?.selector === selector ? [role] : [];
+  });
+}
+
+const SOURCE_ROLE_PRECEDENCE = [
+  "vision",
+  "slow",
+  "plan",
+  "advisor",
+  "default",
+  "task",
+  "smol",
+  "tiny",
+  "commit",
+];
+
 /**
- * Turn role assignments plus a provider ladder into omp's retry.fallbackChains.
- *
- * The invariant that makes this worth deriving instead of hand-writing: omp
- * resolves a SUBAGENT's chain as `fallbackChains[roleName] ?? fallbackChains.default`.
- * Provider/model wildcard keys are never consulted for that lookup — they only
- * apply to the model active in the main session. A config carrying wildcards
- * alone therefore leaves every subagent with no chain at all, and the first
- * usage limit it meets is fatal: the subagent dies with zero assistant turns.
- * So every assigned role gets its own key, `default` is always attempted as
- * the inheritance safety net, and the wildcard keys are emitted *in addition*.
+ * One exact selector can serve several roles, but OMP resolves its exact chain
+ * before a role key. Produce one deterministic source profile so those role
+ * assignments cannot write conflicting fallback behavior.
  */
-export function deriveChains(args: { roles: Record<string, string>; ladder: string[]; roster: RosterModel[] }): Record<string, string[]> {
+function sourcePriceRole(
+  model: RosterModel,
+  roster: RosterModel[],
+): "smol" | "default" | "task" | null {
+  const modelPrice = priceOf(model);
+  if (modelPrice === null) return null;
+
+  const prices = roster
+    .filter((candidate) => candidate.provider === model.provider)
+    .map((candidate) => priceOf(candidate))
+    .filter((price): price is number => price !== null);
+  if (prices.length < 2) return null;
+
+  const lowest = Math.min(...prices);
+  const highest = Math.max(...prices);
+  if (lowest === highest) return null;
+  if (modelPrice === lowest) return "smol";
+  if (modelPrice === highest) return "default";
+  return "task";
+}
+
+function exactFallbackWorkload(role: string, model: RosterModel): RoleWorkload {
+  const workload = workloadForRole(role, model);
+  if (workload.priceIntent !== "strongest" || workload.nativePriority) return workload;
+
+  // Exact source chains can move between separate model quota buckets. Native
+  // slow suitability ranks those strong targets before catalog price, while
+  // main-role selection continues to use its independent default workload.
+  return { ...workload, nativePriority: "slow" };
+}
+
+function workloadForExactSource(
+  model: RosterModel,
+  assignedRoles: readonly string[],
+  roster: RosterModel[],
+): RoleWorkload {
+  if (model.rolePriority?.smol !== undefined) return exactFallbackWorkload("smol", model);
+  if (model.rolePriority?.slow !== undefined) return exactFallbackWorkload("slow", model);
+
+  const priceRole = sourcePriceRole(model, roster);
+  if (priceRole) return exactFallbackWorkload(priceRole, model);
+
+  // Only sparse, tied, or unknown price spectra need an assigned-role signal.
+  const assigned = SOURCE_ROLE_PRECEDENCE.find((role) => assignedRoles.includes(role));
+  if (assigned) return exactFallbackWorkload(assigned, model);
+
+  // No source-tier or assignment evidence remains. Stay conservative without
+  // treating reasoning itself as a model-size signal.
+  return exactFallbackWorkload("default", model);
+}
+function fallbackProviderOrder(
+  reference: RosterModel,
+  roster: RosterModel[],
+  requested: readonly string[],
+  includeSourceProvider: boolean,
+): string[] {
+  const ordered = providerOrder(roster, requested);
+  if (!includeSourceProvider) return ordered.filter((provider) => provider !== reference.provider);
+
+  const gateways = gatewayProviders(roster);
+  const locals = localProviders(roster);
+  // A subscription model's model-scoped quota may be separate from its
+  // siblings. Keep those siblings first within the subscription tier only;
+  // a gateway/local source still gives subscriptions their normal priority.
+  if (providerTier(reference.provider, gateways, locals) === 0) {
+    return [reference.provider, ...ordered.filter((provider) => provider !== reference.provider)];
+  }
+
+  return ordered;
+}
+
+function alternatives(
+  reference: RosterModel,
+  workload: RoleWorkload,
+  roster: RosterModel[],
+  requestedLadder: readonly string[],
+  includeSourceProvider = false,
+): string[] {
+  const chain: string[] = [];
+  for (const provider of fallbackProviderOrder(
+    reference,
+    roster,
+    requestedLadder,
+    includeSourceProvider,
+  )) {
+    for (const replacement of rankedModelsOnProvider(
+      provider,
+      roster,
+      workload,
+      includeSourceProvider ? reference.selector : undefined,
+    )) {
+      if (!chain.includes(replacement.selector)) chain.push(replacement.selector);
+    }
+  }
+  return chain;
+}
+
+/** Exact selectors win OMP wildcards and roles: protect every enabled model first. */
+export function deriveChains(args: {
+  roles: Record<string, string>;
+  ladder: string[];
+  roster: RosterModel[];
+}): Record<string, string[]> {
   const { roles, ladder, roster } = args;
   const chains: Record<string, string[]> = {};
-  // Stand-in reference for a role whose own model cannot be resolved, and for
-  // the synthesized `default` chain below.
-  const best = bestAvailableModel(roster);
+  const enabled = new Set(roster.map((model) => model.selector));
 
-  const walk = (from: number, reference: RosterModel | null, own: string | null): string[] => {
-    const chain: string[] = [];
-    for (const provider of ladder.slice(from)) {
-      const substitute = equivalentOn(provider, reference, roster);
-      // Skip a provider with nothing usable, the role's own model (retrying
-      // the model that just failed is the one useless rung), and any selector
-      // already on the chain.
-      if (!substitute || substitute.selector === own || chain.includes(substitute.selector)) continue;
-      chain.push(substitute.selector);
+  for (const model of roster) {
+    const workload = workloadForExactSource(
+      model,
+      rolesAssignedTo(model.selector, roles, roster),
+      roster,
+    );
+    const chain = alternatives(model, workload, roster, ladder, true);
+    if (chain.length > 0) chains[model.selector] = chain;
+  }
+
+  // Wildcards cover a user-pinned selector absent from this snapshot. They are
+  // cross-provider escape hatches; exact source chains above retain siblings.
+  for (const provider of providerOrder(roster, ladder)) {
+    const reference = firstRankedModelOnProvider(provider, roster, workloadForRole("default"));
+    if (!reference) continue;
+
+    const chain = alternatives(reference, workloadForRole("default", reference), roster, ladder);
+    if (chain.length > 0) chains[`${provider}/*`] = chain;
+  }
+
+  for (const role of ROLE_NAMES) {
+    const selected = roles[role] ? resolveRosterModel(roles[role], roster) : null;
+    if (selected && chains[selected.selector]) {
+      // This mirrors the exact winner when models are shared across roles.
+      chains[role] = [...chains[selected.selector]];
+      continue;
     }
-    return chain;
-  };
 
-  for (const [role, selector] of Object.entries(roles)) {
-    const own = resolveRosterModel(selector, roster);
-    // indexOf + 1 lands on 0 for a provider that is not on the ladder, which
-    // walks the whole ladder: every rung is a genuine alternative to a model
-    // whose own provider was never ranked. Same arithmetic skips exactly one
-    // provider when it is ranked.
-    const chain = walk(ladder.indexOf(providerOf(selector)) + 1, own ?? best, own?.selector ?? selector);
-    // An empty array reads to omp as "a chain exists and it is empty", which
-    // is worse than no key: with no key the role inherits `default`.
+    const reference = selected ?? bestFor(role, roster);
+    if (!reference) continue;
+
+    const chain = alternatives(reference, workloadForRole(role, reference), roster, ladder);
     if (chain.length > 0) chains[role] = chain;
   }
 
-  if (!roles.default) {
-    // No default assignment means the main session runs on whatever model omp
-    // resolves, so there is no own provider to skip and no own model to
-    // exclude: walk the entire ladder, matched against the best model around.
-    const chain = walk(0, best, null);
-    if (chain.length > 0) chains.default = chain;
-  }
-
-  // Model-oriented keys, the other half of the story: a role-keyed chain only
-  // rescues the role whose model failed. When a whole provider's quota is
-  // exhausted, every other model of that provider is a dead end unless the
-  // provider itself has a chain, and `<provider>/*` is the key omp consults
-  // for the model in the main session.
-  const references = new Map<string, RosterModel>();
-  for (const selector of Object.values(roles)) {
-    const model = resolveRosterModel(selector, roster);
-    if (!model) continue;
-    const current = references.get(model.provider);
-    // A provider can own several assignments (a strong model and a cheap one);
-    // matching its wildcard chain against the strongest keeps the substitute
-    // from being weaker than the work the provider was trusted with.
-    if (!current || compareCapability(model, current) < 0) references.set(model.provider, model);
-  }
-  for (const [provider, reference] of references) {
-    const chain = walk(ladder.indexOf(provider) + 1, reference, reference.selector);
-    // The last rung of the ladder has nothing below it: no key at all.
-    if (chain.length > 0) chains[`${provider}/*`] = chain;
+  for (const key of Object.keys(chains)) {
+    chains[key] = chains[key].filter((selector) => enabled.has(selector));
   }
 
   return chains;
 }
 
-/**
- * Reconcile a plan with the roster it will actually be written against, and
- * report every change in words the UI can show.
- *
- * `usageAwareFallback` is recomputed here rather than carried in: it is a
- * function of the final assignment, and a repair or a drop can change how many
- * providers the plan spans.
- */
+
 export function validatePlan(
-  plan: { roles: Record<string, string>; chains: Record<string, string[]>; rationale?: PlanRationale[] },
+  plan: {
+    roles: Record<string, string>;
+    chains: Record<string, string[]>;
+    rationale?: PlanRationale[];
+  },
   roster: RosterModel[],
-  roleNames: readonly string[] = ROLE_NAMES,
 ): { plan: ModelPlan; warnings: string[] } {
   const warnings: string[] = [];
-  // Repairs land on the best model the user can actually reach.
   const repair = bestAvailableModel(roster);
-
   const roles: Record<string, string> = {};
-  for (const [role, selector] of Object.entries(plan.roles)) {
-    if (!roleNames.includes(role)) {
-      // An invented role name would survive all the way to the save, where the
-      // PUT rejects it and the user sees a 400 instead of their plan.
+
+  for (const [role, rawSelector] of Object.entries(plan.roles ?? {})) {
+    if (!ROLE_NAMES.includes(role)) {
       warnings.push(`Ignored "${role}": not a role Cody assigns.`);
       continue;
     }
+    if (typeof rawSelector !== "string") {
+      warnings.push(`Dropped ${role}: its selector is not a string.`);
+      continue;
+    }
+
+    const selector = rawSelector.trim();
     if (resolveRosterModel(selector, roster)) {
       roles[role] = selector;
-      continue;
+    } else if (repair) {
+      roles[role] = repair.selector;
+      warnings.push(`"${rawSelector}" is not available; ${role} now uses ${repair.selector}.`);
+    } else {
+      warnings.push(`Dropped ${role}: "${rawSelector}" is not available and there is no replacement.`);
     }
-    if (!repair) {
-      warnings.push(`Dropped ${role}: "${selector}" is not available and there is no model to replace it with.`);
-      continue;
-    }
-    warnings.push(`"${selector}" is not an available model; ${role} now uses ${repair.selector}.`);
-    roles[role] = repair.selector;
   }
 
   const chains: Record<string, string[]> = {};
-  for (const [key, chain] of Object.entries(plan.chains)) {
-    // A repaired role can collide with its own chain (the chain was derived
-    // against the model that vanished), so the own-model rule is re-applied
-    // against the assignment as it stands now.
-    const own = roles[key] ? resolveRosterModel(roles[key], roster)?.selector : undefined;
-    const kept: string[] = [];
-    const seen = new Set<string>();
-    for (const selector of chain) {
-      const model = resolveRosterModel(selector, roster);
-      if (!model) {
-        warnings.push(`Dropped "${selector}" from the ${key} fallback chain: not an available model.`);
-        continue;
-      }
-      if (model.selector === own || seen.has(model.selector)) continue;
-      seen.add(model.selector);
-      kept.push(selector);
-    }
-    if (kept.length > 0) {
-      chains[key] = kept;
+  for (const [rawKey, rawChain] of Object.entries(plan.chains ?? {})) {
+    const key = rawKey.trim();
+    if (!key) {
+      warnings.push("Dropped a fallback chain with an empty key.");
       continue;
     }
-    if (chain.length > 0) warnings.push(`Removed the ${key} fallback chain: none of its models are available.`);
+    if (!Array.isArray(rawChain)) {
+      warnings.push(`Dropped the ${key} fallback chain: it is not an array.`);
+      continue;
+    }
+
+    const rolePrimary = roles[key] ? resolveRosterModel(roles[key], roster)?.selector : undefined;
+    const modelPrimary = key.includes("/") && !key.endsWith("/*")
+      ? resolveRosterModel(key, roster)?.selector
+      : undefined;
+    const ownSelector = rolePrimary ?? modelPrimary;
+    const seenModels = new Set<string>();
+    const kept: string[] = [];
+
+    for (const rawSelector of rawChain) {
+      if (typeof rawSelector !== "string") {
+        warnings.push(`Dropped a non-string entry from the ${key} fallback chain.`);
+        continue;
+      }
+
+      const selector = rawSelector.trim();
+      const model = resolveRosterModel(selector, roster);
+      if (!model) {
+        warnings.push(`Dropped "${rawSelector}" from the ${key} fallback chain: not an available model.`);
+        continue;
+      }
+      if (model.selector === ownSelector || seenModels.has(model.selector)) continue;
+
+      seenModels.add(model.selector);
+      // Keep the first selector spelling, including a legitimate thinking level.
+      kept.push(selector);
+    }
+
+    if (kept.length > 0) chains[key] = kept;
   }
 
-  const providers = new Set(Object.values(roles).map(providerOf));
+  // Any nonempty validated chain contains a distinct usable target: self
+  // entries were removed above. Provider diversity is not required because
+  // OMP tracks model-scoped quota buckets as well as provider availability.
+  const usageAwareFallback = Object.values(chains).some((chain) => chain.length > 0);
+
   return {
-    plan: { roles, chains, usageAwareFallback: providers.size >= 2, rationale: plan.rationale ?? [] },
+    plan: {
+      roles,
+      chains,
+      usageAwareFallback,
+      rationale: plan.rationale ?? [],
+    },
     warnings,
   };
 }
 
-/**
- * The no-model-call path: the plan Cody proposes when the user declines the
- * LLM step, and the fallback whenever the planner call fails. Capability
- * ordering is all it has — the catalog carries no per-role quality signal — so
- * it sorts the roster and places the tiers.
- */
+function hasLightweightAlternative(
+  workload: RoleWorkload,
+  roster: RosterModel[],
+  permittedTier: number,
+  selected: RosterModel,
+): boolean {
+  const gateways = gatewayProviders(roster);
+  const locals = localProviders(roster);
+  const providers = new Set(
+    roster
+      .filter((model) => (
+        providerTier(model.provider, gateways, locals) === permittedTier
+        && (!workload.requireVision || model.vision)
+      ))
+      .map((model) => model.provider),
+  );
+
+  for (const provider of providers) {
+    const candidates = roster.filter((model) => (
+      model.provider === provider
+      && (!workload.requireVision || model.vision)
+      && !isNativeOppositeOnly(model, "smol")
+    ));
+    const priced = candidates.filter((model) => priceOf(model) !== null);
+    const lowest = priced.length > 0
+      ? Math.min(...priced.map((model) => priceOf(model) ?? Number.POSITIVE_INFINITY))
+      : null;
+    const alternative = candidates.some((model) => (
+      model.selector !== selected.selector
+      && (model.rolePriority?.smol !== undefined
+        || !model.reasoning
+        || (lowest !== null && priceOf(model) === lowest))
+    ));
+    if (alternative) return true;
+  }
+
+  return false;
+}
+
+/** Enforce capability and provider-tier policy without second-guessing valid LLM choices. */
+export function constrainPlanDraft(
+  draft: PlanDraft,
+  roster: RosterModel[],
+): { draft: PlanDraft; warnings: string[] } {
+  const roles: Record<string, string> = {};
+  const warnings: string[] = [];
+  const gateways = gatewayProviders(roster);
+  const locals = localProviders(roster);
+
+  for (const role of ROLE_NAMES) {
+    const requested = draft.roles[role];
+    const model = requested ? resolveRosterModel(requested, roster) : null;
+    const replacement = bestFor(role, roster);
+    if (!model) {
+      if (requested) warnings.push(`Replaced unavailable ${role} model "${requested}".`);
+      if (replacement) roles[role] = replacement.selector;
+      continue;
+    }
+
+    const permittedTier = replacement
+      ? providerTier(replacement.provider, gateways, locals)
+      : Number.MAX_SAFE_INTEGER;
+    if (providerTier(model.provider, gateways, locals) !== permittedTier) {
+      if (replacement) {
+        roles[role] = replacement.selector;
+        warnings.push(`Replaced ${role} model "${requested}" to preserve the enabled provider tier.`);
+      }
+      continue;
+    }
+
+    const workload = workloadForRole(role);
+    if (workload.requireVision && !model.vision) {
+      const visionReplacement = bestForWorkload(workload, roster, model.provider, permittedTier) ?? replacement;
+      if (visionReplacement) {
+        roles[role] = visionReplacement.selector;
+        warnings.push(`Replaced ${role} model "${requested}" because it cannot accept image input.`);
+      }
+      continue;
+    }
+
+    const clearLightweightViolation = workload.preferNonReasoning
+      && model.rolePriority?.smol === undefined
+      && model.reasoning
+      && hasLightweightAlternative(workload, roster, permittedTier, model);
+    if (clearLightweightViolation) {
+      const lightweightReplacement = bestForWorkload(workload, roster, model.provider, permittedTier) ?? replacement;
+      if (lightweightReplacement) {
+        roles[role] = lightweightReplacement.selector;
+        warnings.push(`Replaced ${role} model "${requested}" with a suitable lightweight enabled model.`);
+      }
+      continue;
+    }
+
+    // Reasoning and native priorities guide a proposal, but valid choices in
+    // the same provider tier are intentionally left to the planner/user.
+    roles[role] = requested.trim();
+  }
+
+  const requestedProviders = draft.ladder.filter((provider) => (
+    roster.some((model) => model.provider === provider)
+  ));
+  return {
+    draft: {
+      ...draft,
+      roles,
+      ladder: providerOrder(roster, requestedProviders),
+    },
+    warnings,
+  };
+}
+
+function rationaleFor(role: string, model: RosterModel): string {
+  const workload = workloadForRole(role);
+  const native = workload.nativePriority ? nativeRank(model, workload.nativePriority) : undefined;
+  if (native !== undefined && workload.nativePriority) {
+    return `${model.name} matches OMP's native ${workload.nativePriority} priority for this role.`;
+  }
+
+  const price = priceOf(model);
+  if (price !== null) {
+    if (workload.priceIntent === "lightest") {
+      return `${model.name} is the lowest published-cost eligible model on its enabled provider tier.`;
+    }
+    if (workload.priceIntent === "strongest") {
+      return `${model.name} has the highest published-cost eligible tier; price is only a within-provider signal.`;
+    }
+    return `${model.name} is a balanced published-cost option for delegated multi-step work.`;
+  }
+
+  return `${model.name} satisfies this role's enabled provider and capability requirements.`;
+}
+
+/** Deterministic proposal when the optional planner model is unavailable. */
 export function heuristicPlan(
   roster: RosterModel[],
-  options: { preferredProvider?: string; roleNames?: readonly string[] } = {},
+  options: { preferredProvider?: string } = {},
 ): PlanDraft {
-  const gateways = gatewayProviders(roster);
-  const providerTier = (provider: string, isLocal: boolean): number => (isLocal ? 2 : gateways.has(provider) ? 1 : 0);
-  const modelTier = (model: RosterModel): number => providerTier(model.provider, model.local);
-  const byCapability = [...roster].sort((a, b) => modelTier(a) - modelTier(b) || compareCapability(a, b));
   const roles: Record<string, string> = {};
   const rationale: PlanRationale[] = [];
-  const capable = bestAvailableModel(roster);
-  if (!capable) return { roles, ladder: [], rationale };
 
-  // Local models are free but share the machine with the session, so the tiers
-  // above `tiny` are drawn from models on a provider the user pays for or is
-  // signed in to — unless that is all the roster has. Within that pool the
-  // tier sort above keeps direct providers ahead of gateways, so an
-  // aggregator's rebadged frontier model never outranks the same vendor's
-  // model on the account the user actually pays for.
-  const local = byCapability.filter((model) => model.local);
-  const reachable = byCapability.filter((model) => !model.local);
-  const pool = reachable.length > 0 ? reachable : byCapability;
-  // "Cheap" without price data: the strongest NON-reasoning model on the same
-  // pool. Non-reasoning because a thinking model spends tokens before it
-  // answers, which is exactly wrong for mechanical work; strongest of those
-  // because the alternative — the weakest model in the roster — is usually a
-  // legacy entry nobody wants driving a subagent. With nothing but reasoning
-  // models around, the cheapest tier is the weakest of them.
-  const fast = pool.filter((model) => !model.reasoning)[0] ?? pool.at(-1) ?? capable;
-  const vision = pool.find((model) => model.vision) ?? byCapability.find((model) => model.vision);
+  for (const role of ROLE_NAMES) {
+    const model = bestFor(role, roster, options.preferredProvider);
+    if (!model) continue;
 
-  // Roles the engine has dropped are skipped rather than assigned: the entry
-  // would be written to config.yml and resolve to nothing.
-  const known = new Set(options.roleNames ?? ROLE_NAMES);
-  const assign = (role: string, model: RosterModel | undefined, text: string): void => {
-    if (!model || !known.has(role)) return;
     roles[role] = model.selector;
-    rationale.push({ subject: role, text });
-  };
+    rationale.push({ subject: role, text: rationaleFor(role, model) });
+  }
 
-  assign("default", capable, `${capable.name} is the most capable model you can reach, so it drives main turns.`);
-  assign("task", capable, `Subagents do the same work as the main session, so they get ${capable.name} too.`);
-  assign("plan", capable, `Planning is where reasoning pays off, so it stays on ${capable.name}.`);
-  assign("slow", capable, `The deliberate role keeps ${capable.name} for problems worth the extra thinking.`);
-  assign("smol", fast, `${fast.name} answers mechanical subagent work without paying for reasoning first.`);
-  assign("commit", fast, `Commit messages are short and formulaic — ${fast.name} is enough.`);
-  assign("advisor", fast, `The advisor reviews every single turn, so it runs on the cheaper ${fast.name}.`);
-  assign(
-    "tiny",
-    local[0] ?? fast,
-    local[0]
-      ? `Titles and classifiers run constantly, and ${local[0].name} is served locally, so they cost nothing.`
-      : `${fast.name} is the cheapest model available for constant background work like titles.`,
-  );
-  if (vision) assign("vision", vision, `${vision.name} is the strongest model here that accepts images.`);
-
-  // One rung per provider, its best model standing in for it. Quality degrades
-  // in the order the user would choose themselves: direct paid or signed-in
-  // providers first, gateway aggregators (OpenRouter and its kind) as the
-  // backup route behind them, local runtimes last. The provider driving the
-  // user's current default model leads its tier — it is the provider they
-  // already trusted with main turns, so the ladder starts from it.
-  //
-  // Localness is judged per PROVIDER here, not from the rung's own model: a
-  // self-hosted runtime serves whatever names its operator loaded, and the
-  // catalog does publish real prices for some of those names. Ranking on the
-  // best model's own flag let such an entry pull the whole runtime above a paid
-  // provider (seen on a live install), which is how a rate-limited session ends
-  // up on local hardware while a subscription still has quota.
-  const localProviders = new Set(local.map((model) => model.provider));
-  const bestPerProvider = new Map<string, RosterModel>();
-  for (const model of byCapability) if (!bestPerProvider.has(model.provider)) bestPerProvider.set(model.provider, model);
-  const preferred = options.preferredProvider && bestPerProvider.has(options.preferredProvider)
-    ? options.preferredProvider
-    : undefined;
-  const ladder = [...bestPerProvider.values()]
-    .sort((a, b) =>
-      providerTier(a.provider, localProviders.has(a.provider)) - providerTier(b.provider, localProviders.has(b.provider))
-      || Number(b.provider === preferred) - Number(a.provider === preferred)
-      || compareCapability(a, b))
-    .map((model) => model.provider);
+  const ladder = providerOrder(roster, [], options.preferredProvider);
   if (ladder.length > 1) {
     rationale.push({
       subject: "ladder",
-      text: `When a provider runs out, work moves down ${ladder.join(" → ")} to that provider's nearest equivalent model — direct providers first, gateways as backup, local models last.`,
+      text: [
+        `OMP runtime health chooses through ${ladder.join(" → ")}; subscriptions lead, then direct APIs, gateways, and local runtimes.`,
+        "Catalog prices distinguish only models within one provider, never live quota or measured quality.",
+      ].join(" "),
     });
   }
 

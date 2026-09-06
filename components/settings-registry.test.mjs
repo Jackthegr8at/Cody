@@ -13,29 +13,19 @@ const jiti = createJiti(import.meta.url, {
  * The Settings registry is the ONE table the desktop rail, the phone stack,
  * the dialog search and every deep link read. These tests pin what the
  * redesign promised: eight hubs in a fixed order under three eyebrows, each
- * hidden only by its own capability gate, every legacy id landing on the hub
- * that now holds its content, and the `settings-tab-<id>` /
+ * hidden only by its own capability gate, and the `settings-tab-<id>` /
  * `settings-panel-<id>` DOM contract the audit scripts drive.
  */
 const {
   SETTINGS_SECTIONS,
-  SECTION_ALIASES,
   getVisibleSections,
   getVisibleSubViews,
   groupSections,
-  normalizeSectionId,
-  resolveSection,
   getSection,
 } = await jiti.import("./settings/registry.ts");
-const { ALL_CAPABILITIES, getNormalizedActive } = await jiti.import("./SettingsTabs.tsx");
+const { ALL_CAPABILITIES } = await jiti.import("./SettingsTabs.tsx");
 const { SettingsSidebar } = await jiti.import("./settings/SettingsSidebar.tsx");
 const { getHarnessById } = await jiti.import("../lib/harness/index.ts");
-
-/** Every id the SettingsTab union carries, hubs and legacy alike. */
-const EVERY_TAB_ID = [
-  "accounts", "general", "safety", "models", "providers", "intelligence", "memory",
-  "engine", "extensions", "mcp", "omp", "skills", "plugins", "localai", "system",
-];
 
 test("the eight hubs sit in the spec's order under You / engine / Server", () => {
   assert.deepEqual(
@@ -89,31 +79,6 @@ test("gates use ANY semantics and sub-views gate individually", () => {
   // Memory hides unless the engine can hand its memory back.
   assert.ok(!getVisibleSections(ALL_CAPABILITIES).some((section) => section.id === "memory"));
   assert.ok(getVisibleSections({ ...ALL_CAPABILITIES, memory: true }).some((section) => section.id === "memory"));
-});
-
-test("every legacy id resolves to a visible hub, with the segment it implies", () => {
-  const everything = { ...ALL_CAPABILITIES, memory: true };
-  const visible = new Set(getVisibleSections(everything).map((section) => section.id));
-  for (const id of EVERY_TAB_ID) {
-    const hub = normalizeSectionId(id);
-    assert.ok(visible.has(hub), `${id} → ${hub} is a visible hub`);
-    assert.equal(getNormalizedActive(id), hub, "SettingsTabs.getNormalizedActive delegates to the registry");
-  }
-  assert.deepEqual(resolveSection("safety"), { id: "engine" });
-  assert.deepEqual(resolveSection("intelligence"), { id: "engine" });
-  assert.deepEqual(resolveSection("omp"), { id: "engine" });
-  assert.deepEqual(resolveSection("localai"), { id: "providers" });
-  assert.deepEqual(resolveSection("mcp"), { id: "extensions", sub: "mcp" });
-  assert.deepEqual(resolveSection("skills"), { id: "extensions", sub: "skills" });
-  assert.deepEqual(resolveSection("plugins"), { id: "extensions", sub: "plugins" });
-  assert.deepEqual(resolveSection("extensions"), { id: "extensions" });
-  // `models` keeps its id: it now means the Models hub, deliberately.
-  assert.deepEqual(resolveSection("models"), { id: "models" });
-  assert.equal("models" in SECTION_ALIASES, false);
-  // An explicit sub wins over an alias's implied one; unknown ids land on Preferences.
-  assert.deepEqual(resolveSection("mcp", "skills"), { id: "extensions", sub: "skills" });
-  assert.equal(normalizeSectionId("not-a-tab"), "general");
-  assert.equal(normalizeSectionId(null), "general");
 });
 
 test("the phone list groups by eyebrow with Preferences first and Account last", () => {

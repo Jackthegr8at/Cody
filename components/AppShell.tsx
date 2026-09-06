@@ -1882,6 +1882,7 @@ export function AppShell() {
               onModelUsageChange={handleModelUsageChange}
               onSessionModelsChange={setSessionModels}
               onOpenFile={handleOpenLinkedFile}
+              onOpenModels={() => openSettings("models", { highlight: "model-curation" })}
               onOpenPreview={handleAgentOpenPreview}
               onPreviewUrlsSeen={handlePreviewUrlsSeen}
               advisorEnabled={advisorEnabled}

@@ -129,7 +129,7 @@ export interface SettingsOpenOptions {
   highlight?: string;
 }
 
-/** Open Settings on a hub (or a legacy id); no tab means the last-open hub. */
+/** Open Settings on a hub; no tab means the last-open hub. */
 export type OpenSettings = (tab?: SettingsTab, opts?: SettingsOpenOptions) => void;
 
 export const SettingsOpenerContext = createContext<OpenSettings>(() => {});

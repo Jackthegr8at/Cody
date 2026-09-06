@@ -31,6 +31,7 @@
 import { useMemo, useState } from "react";
 import { Drawer } from "../Drawer";
 import { ToggleSwitch } from "../primitives";
+import { formatModelDisplayName } from "@/lib/model-display";
 
 export interface CurationModel {
   id: string;
@@ -167,7 +168,7 @@ export function ModelCurationDialog({ open, provider, catalog, enabled, saving, 
               <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", minHeight: 36, color: "var(--text-muted)", fontSize: 12, borderBottom: "1px solid var(--border)", cursor: "pointer" }}>
                 <input type="checkbox" checked={draft.has(key)} onChange={(event) => bulk([key], event.target.checked)} />
                 <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {model.name && model.name !== model.id ? <>{model.name} <code style={{ color: "var(--text-dim)" }}>{model.id}</code></> : <code>{model.id}</code>}
+                  {formatModelDisplayName(model.id, model.name) !== model.id ? <>{formatModelDisplayName(model.id, model.name)} <code style={{ color: "var(--text-dim)" }}>{model.id}</code></> : <code>{model.id}</code>}
                 </span>
               </label>
             );

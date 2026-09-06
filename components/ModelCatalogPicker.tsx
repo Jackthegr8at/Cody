@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { useI18n } from "@/lib/i18n";
 import { formatCompactNumber } from "@/lib/format";
 import { Drawer } from "@/components/settings/Drawer";
+import { formatModelDisplayName } from "@/lib/model-display";
 
 /** One flattened models.dev entry as served by /api/models-config/catalog. */
 export interface CatalogModelEntry {
@@ -176,11 +177,13 @@ export function ModelCatalogPicker({ open, providerName, providerBaseUrl, existi
             results.map((entry) => {
               const alreadyAdded = existingIds.has(entry.id);
               const setsBaseUrl = Boolean(entry.providerBaseUrl) && !providerBaseUrl;
+              const displayName = formatModelDisplayName(entry.id, entry.name);
               return (
                 <div key={entry.key} style={rowStyle}>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                      <span style={{ fontSize: 12, fontFamily: "var(--font-mono)", color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.id}</span>
+                      <span style={{ fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{displayName}</span>
+                      {displayName !== entry.id && <code style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)" }}>{entry.id}</code>}
                       {entry.reasoning && (
                         <span style={{ fontSize: 9, padding: "1px 4px", background: "color-mix(in srgb, var(--accent) 12%, transparent)", color: "var(--accent)", borderRadius: 3, flexShrink: 0 }}>T</span>
                       )}

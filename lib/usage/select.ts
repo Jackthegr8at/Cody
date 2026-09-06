@@ -100,16 +100,13 @@ export function modelMatchesTier(modelId: string, tier: string): boolean {
 }
 
 /**
- * A window applies unless it is scoped to some other model's tier: shared
- * windows and untiered windows bind every model on the account, while a tiered
- * one binds only its own models. Showing a spent "weekly (opus)" ring to
- * someone typing at a sonnet model is the exact confusion this rules out.
+ * A reported tier always scopes a window to its own models. OMP can mark a
+ * tiered bucket shared too, so that flag must not erase the explicit scope and
+ * charge it to another model. Untiered windows bind the whole account.
  */
 function windowConstrainsModel(window: UsageWindow, modelId: string): boolean {
-  if (window.shared === true) return true;
   const tier = typeof window.tier === "string" ? window.tier.trim() : "";
-  if (!tier) return true;
-  return modelMatchesTier(modelId, tier);
+  return !tier || modelMatchesTier(modelId, tier);
 }
 
 /** Accounts rank by their own binding window; one that constrains this model

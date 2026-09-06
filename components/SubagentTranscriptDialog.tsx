@@ -5,7 +5,7 @@ import { Loader2 } from "lucide-react";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { useI18n } from "@/lib/i18n";
-import { formatCost, formatDuration, formatTokens } from "@/lib/subagent-format";
+import { formatCost, formatDuration, formatTokens, shortModel } from "@/lib/subagent-format";
 import { MarkdownBody } from "./MarkdownBody";
 import { Dialog, DialogContent, DialogTitle } from "./ui/primitives";
 import type { SubagentInfo } from "@/hooks/useAgentSession";
@@ -495,7 +495,7 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
         historyTokens ? t("chatWindow.tokensUnit", { count: historyTokens }) : null,
         formatCost(progress?.cost),
         formatDuration(progress?.durationMs),
-        progress?.resolvedModel ? progress.resolvedModel.replace(/:.*$/, "") : null,
+        shortModel(progress?.resolvedModel),
       ].filter(Boolean).join(" · ")
     : null;
   const outcomeError = subagent?.source === "history"

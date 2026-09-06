@@ -20,11 +20,13 @@
  * restart it causes before running.
  */
 import { RotateCcw } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ConfirmDialog } from "@/components/ui/field";
 import { toast } from "@/components/ui/toast";
 import { useConfigWriter } from "@/hooks/useConfigWriter";
 import { invalidateSettingsRoutes, useSettingsRoute } from "@/hooks/useSettingsData";
+import { formatModelDisplayName } from "@/lib/model-display";
+import { isRecognizedThinkingSuffix } from "@/lib/model-plan/derive";
 import { nativeOptionStyle, nativeSelectStyle, UNAVAILABLE_BADGE, chipStyle } from "../primitives";
 import { useSaveStatus } from "../SaveStatus";
 import { useSettingsShell } from "../shell-context";
@@ -45,10 +47,13 @@ interface ModelRolesBody {
 }
 
 const ROLES_ROUTE = "/api/model-roles";
-
-function splitSelector(raw: string): { model: string; effort: string } {
-  const match = raw.match(/:([^,:/]+)$/);
-  return match ? { model: raw.slice(0, match.index), effort: match[1] } : { model: raw, effort: "" };
+function splitSelector(raw: string, selectors: ReadonlySet<string>): { model: string; effort: string } {
+  if (selectors.has(raw)) return { model: raw, effort: "" };
+  const colon = raw.lastIndexOf(":");
+  if (colon <= raw.lastIndexOf("/") || !isRecognizedThinkingSuffix(raw.slice(colon + 1))) {
+    return { model: raw, effort: "" };
+  }
+  return { model: raw.slice(0, colon), effort: raw.slice(colon + 1) };
 }
 
 export function ModelRoles({ models, panelId }: { models: RoleModelOption[]; panelId: string }) {
@@ -61,6 +66,7 @@ export function ModelRoles({ models, panelId }: { models: RoleModelOption[]; pan
   const [saving, setSaving] = useState(false);
   const [resetOpen, setResetOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const modelSelectors = useMemo(() => new Set(models.map((model) => model.provider + "/" + model.id)), [models]);
   const roleNames = route.data?.roleNames ?? [];
 
   // The server's copy wins until the user edits; a save that lands re-reads
@@ -107,10 +113,10 @@ export function ModelRoles({ models, panelId }: { models: RoleModelOption[]; pan
 
   const update = (role: string, next: { model?: string; effort?: string }) => {
     setRoles((values) => {
-      const current = splitSelector(values[role] ?? "");
+      const current = splitSelector(values[role] ?? "", modelSelectors);
       const model = next.model ?? current.model;
       const effort = next.effort ?? current.effort;
-      return { ...values, [role]: model ? `${model}${effort ? `:${effort}` : ""}` : "" };
+      return { ...values, [role]: model ? model + (effort ? ":" + effort : "") : "" };
     });
     setDirty(true);
   };
@@ -128,8 +134,8 @@ export function ModelRoles({ models, panelId }: { models: RoleModelOption[]; pan
       {route.loading && !route.data
         ? <div style={{ color: "var(--text-muted)", fontSize: 12 }}>Loading roles…</div>
         : roleNames.map((role) => {
-          const { model: selectedModel, effort: selectedThinking } = splitSelector(roles[role] ?? "");
-          const assigned = models.find((item) => `${item.provider}/${item.id}` === selectedModel);
+          const { model: selectedModel, effort: selectedThinking } = splitSelector(roles[role] ?? "", modelSelectors);
+          const assigned = models.find((item) => item.provider + "/" + item.id === selectedModel);
           const assignedHidden = Boolean(assigned?.hidden);
           const modelKnown = !selectedModel || Boolean(assigned);
           const unavailable = assignedHidden
@@ -151,10 +157,10 @@ export function ModelRoles({ models, panelId }: { models: RoleModelOption[]; pan
               <select value={selectedModel} aria-label={`${role} model`} onChange={(event) => update(role, { model: event.target.value })} style={{ ...nativeSelectStyle, minWidth: 0, width: "100%" }}>
                 <option value="" style={nativeOptionStyle}>No override</option>
                 {selectedModel && (!modelKnown || assignedHidden) && (
-                  <option value={selectedModel} style={nativeOptionStyle}>{assigned?.name ?? selectedModel} ({assignedHidden ? "hidden" : "not currently available"})</option>
+                  <option value={selectedModel} style={nativeOptionStyle}>{assigned ? formatModelDisplayName(assigned.id, assigned.name) : selectedModel} ({assignedHidden ? "hidden" : "not currently available"})</option>
                 )}
                 {visibleModels.map((item) => (
-                  <option key={`${item.provider}/${item.id}`} value={`${item.provider}/${item.id}`} style={nativeOptionStyle}>{item.name || item.id} ({item.provider}/{item.id})</option>
+                  <option key={item.provider + "/" + item.id} value={item.provider + "/" + item.id} style={nativeOptionStyle}>{formatModelDisplayName(item.id, item.name)} ({item.provider}/{item.id})</option>
                 ))}
               </select>
               <select value={selectedThinking} aria-label={`${role} reasoning level`} disabled={!assigned} onChange={(event) => update(role, { effort: event.target.value })} style={{ ...nativeSelectStyle, minWidth: 0, width: "100%", opacity: assigned ? 1 : 0.55 }}>

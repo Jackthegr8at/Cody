@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, Clock, Cpu, ListChecks, Loader2, Paperclip, Pin, Search, ShieldCheck, SlidersHorizontal, Sparkles, Target, TriangleAlert, Wrench } from "lucide-react";
+import { ChevronDown, Clock, ListChecks, Loader2, Paperclip, Pin, Search, Settings, ShieldCheck, SlidersHorizontal, Sparkles, Target, TriangleAlert, Wrench } from "lucide-react";
 import type { SessionModeOption } from "@/hooks/useAgentSession";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import { ALL_CAPABILITIES, OMP_ENGINE_ID, type ActiveEngineInfo, type EngineCapabilities } from "./SettingsTabs";
@@ -49,6 +49,7 @@ import { STORAGE_EVENTS } from "@/lib/storage-keys";
 import { migrateComposerAllowlist, mirrorServerVisibility, modelVisibilityKey, pushRecentModel, readComposerVisibility, type ComposerVisibility } from "@/lib/composer-model-visibility";
 import { useSettingsRoute } from "@/hooks/useSettingsData";
 import { useSettingsOpener } from "./settings/shell-context";
+import { formatModelDisplayName } from "@/lib/model-display";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix (already compressed if it needed to be)
@@ -111,6 +112,8 @@ interface Props {
   fastModeActive?: boolean;
   fastModeSupported?: boolean;
   onFastModeChange?: (enabled: boolean) => void;
+  /** Opens the Models catalog and curation hub. */
+  onOpenModels?: () => void;
   /** Applied at spawn time only (--tools/--no-tools flags) — omp's RPC
    * protocol cannot change an already-running session's toolset. */
   toolPreset?: ToolPreset;
@@ -255,6 +258,10 @@ export interface QuotaKnownView {
   others: QuotaOtherWindowView[];
   fetchedAt: string | null;
   stale: boolean;
+  /** Subscription name only when the engine reported one. */
+  planType: string | null;
+  /** Banked rate-limit resets remain separate from quota windows. */
+  resetCredits: UsageAccount["resetCredits"];
 }
 
 export interface QuotaAbsentView {
@@ -499,6 +506,8 @@ export function buildQuotaView(
       others,
       fetchedAt: snapshot.fetchedAt ?? null,
       stale: snapshot.stale === true,
+      planType: match.account.planType,
+      resetCredits: match.account.resetCredits,
     };
   }
 
@@ -538,6 +547,8 @@ export function buildQuotaView(
     others: [],
     fetchedAt: snapshot.fetchedAt ?? null,
     stale: snapshot.stale === true,
+    planType: binding.account.planType,
+    resetCredits: binding.account.resetCredits,
   };
 }
 
@@ -654,30 +665,50 @@ export function QuotaPopover({
   provider,
   modelName,
   now,
+  anchorTop = null,
+  anchorRight = null,
 }: {
   quota: QuotaView;
   /** Selected model's provider, naming the header before anything binds. */
   provider: string | null;
   modelName: string | null;
   now: number;
+  anchorTop?: number | null;
+  anchorRight?: number | null;
 }) {
   const { t, locale } = useI18n();
   const percentText = quota.known ? `${Math.round(quota.percent)}%` : "—";
   const headlineReset = quota.known ? formatResetTime(quota.resetsAt, locale, now) : null;
   const age = quota.known && quota.fetchedAt ? formatRelativeTime(quota.fetchedAt, locale, now) : null;
+  const savedResetExpiry = quota.known && quota.resetCredits
+    ? formatResetTime(quota.resetCredits.earliestExpiresAt, locale, now)
+    : null;
   // Age is only claimed when the snapshot carries a usable timestamp, and a
   // snapshot the server flagged stale says so rather than passing for fresh.
   const freshness = age
     ? [t("usage.updatedAgo", { ago: age }), quota.known && quota.stale ? t("usage.stale") : null]
       .filter(Boolean).join(" · ")
     : null;
+  const anchor = anchorTop != null && anchorRight != null ? { top: anchorTop, right: anchorRight } : null;
 
   return (
     <div
       role="dialog"
       aria-label={t("usage.title")}
       className="dropdown-surface"
-      style={{
+      style={anchor ? {
+        // Detach to the viewport: a composer control row can be narrower than
+        // its visual viewport. Keep the trigger alignment where it fits, then
+        // clamp both horizontal edges to the same 8px gutter.
+        position: "fixed",
+        bottom: (window.visualViewport?.height ?? window.innerHeight) - anchor.top + 6,
+        left: `clamp(8px, ${anchor.right - 320}px, calc(100% - 328px))`,
+        zIndex: 500,
+        width: 320,
+        maxWidth: "calc(100% - 16px)",
+        maxHeight: Math.max(0, anchor.top - 6 - 8),
+        overflowY: "auto",
+      } : {
         position: "absolute",
         right: 0,
         bottom: "calc(100% + 8px)",
@@ -686,7 +717,9 @@ export function QuotaPopover({
         maxWidth: "calc(100vw - 32px)",
       }}
     >
-      <div style={{ maxHeight: "min(400px, calc(100vh - 120px))", overflowY: "auto", padding: 16 }}>
+      <div style={anchor
+        ? { padding: 16 }
+        : { maxHeight: "min(400px, calc(100vh - 120px))", overflowY: "auto", padding: 16 }}>
         {/* Header — whose quota (brand mark + model) and the binding number. */}
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <ProviderIcon
@@ -717,6 +750,26 @@ export function QuotaPopover({
         {quota.known && (
           <div style={{ marginTop: 8 }}>
             <QuotaBar percent={quota.percent} color={quota.color} />
+          </div>
+        )}
+        {quota.known && quota.planType && (
+          <div style={{ marginTop: 8, fontSize: 10, color: "var(--text-muted)" }}>
+            {t("usage.reportedPlan", { plan: quota.planType })}
+          </div>
+        )}
+        {quota.known && quota.resetCredits && (
+          <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text)" }}>
+              {t("usage.savedResets", { count: quota.resetCredits.availableCount })}
+            </div>
+            {savedResetExpiry && (
+              <div style={{ marginTop: 2, fontSize: 10, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
+                {t("usage.expiresAt", { time: savedResetExpiry })}
+              </div>
+            )}
+            <div style={{ marginTop: 4, fontSize: 10, lineHeight: 1.45, color: "var(--text-dim)" }}>
+              {t("usage.savedResetsNote")}
+            </div>
           </div>
         )}
 
@@ -1071,7 +1124,7 @@ function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; plan?: A
 }
 
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, capabilities = ALL_CAPABILITIES, engine = null, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, onSmartModelPinned, autoModelSwitch, fastModeEnabled, fastModeActive, fastModeSupported, onFastModeChange, toolPreset, onToolPresetChange,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, capabilities = ALL_CAPABILITIES, engine = null, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, onSmartModelPinned, autoModelSwitch, fastModeEnabled, fastModeActive, fastModeSupported, onFastModeChange, onOpenModels, toolPreset, onToolPresetChange,
   onAbortCompaction, isCompacting, compactResult,
   thinkingLevel, onThinkingLevelChange, availableModes = NO_MODES, currentModeId = null, onModeChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
   retryInfo, queuedMessages, inputHistory = [], onAbortRetry,
@@ -1125,6 +1178,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [toolsAnchorTop, setToolsAnchorTop] = useState<number | null>(null);
   const [thinkingAnchorTop, setThinkingAnchorTop] = useState<number | null>(null);
   const [modeAnchorTop, setModeAnchorTop] = useState<number | null>(null);
+  const [contextPopoverAnchor, setContextPopoverAnchor] = useState<{ top: number; right: number } | null>(null);
   const [contextPopoverOpen, setContextPopoverOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
@@ -2152,7 +2206,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   // something the list has.
   const allModelOptions: ModelOption[] = React.useMemo(() => {
     if (modelList && modelList.length > 0) {
-      return modelList.map((m) => ({ provider: m.provider, modelId: m.id, name: m.name }))
+      return modelList.map((m) => ({ provider: m.provider, modelId: m.id, name: formatModelDisplayName(m.id, m.name) }))
         .filter((m) => {
           const key = `${m.provider}/${m.modelId}`;
           const isActive = model?.provider === m.provider && model?.modelId === m.modelId;
@@ -2163,7 +2217,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     return Object.entries(modelNames ?? {}).map(([modelId, name]) => ({
       provider: model?.provider ?? "unknown",
       modelId,
-      name,
+      name: formatModelDisplayName(modelId, name),
     })).sort((a, b) => compareModelOptions(modelCollator, a, b));
   }, [modelList, modelNames, model?.provider, model?.modelId, visibility, modelCollator]);
   const modelOptions = allModelOptions;
@@ -3057,7 +3111,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             marginTop: 8,
             paddingTop: 8,
             borderTop: "1px solid color-mix(in srgb, var(--border) 62%, transparent)",
-            flexWrap: "nowrap",
+            flexWrap: "wrap",
+            rowGap: 4,
           }}>
             {/* Attachment */}
             <button
@@ -3224,7 +3279,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     </button>
                     )}
                     {showModelSearch && (
-                      <div style={{ position: "sticky", top: 0, zIndex: 2, padding: "6px 8px", background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 6 }}>
+                      <div style={{ padding: "6px 8px", background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 6 }}>
                         <Search size={12} aria-hidden="true" style={{ flexShrink: 0, color: "var(--text-dim)" }} />
                         <input
                           type="search"
@@ -3251,9 +3306,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                             fontSize: 10, fontWeight: 600, color: group.kind === "provider" ? "var(--text-dim)" : "var(--accent)",
                             textTransform: "uppercase", letterSpacing: "0.07em",
                             borderTop: gi > 0 ? "1px solid var(--border)" : "none",
-                            // Sticky under the search box so a long provider
-                            // group still says whose models these are.
-                            position: "sticky", top: showModelSearch ? 37 : 0, zIndex: 1,
                             background: "var(--bg-panel)",
                           }}>
                             {group.kind === "pinned"
@@ -3298,19 +3350,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         })}
                       </div>
                     ))}
-                    {/* The footer: what is new since the user last looked
-                        (the cached diff only), and the way into the hub. It
-                        shares one sticky slab with the Fast row below so both
-                        stay in view under a long list. */}
-                    <div style={{ position: "sticky", bottom: 0, background: "var(--bg-panel)" }}>
-                    <div style={{
-                      display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
-                      padding: "6px 8px 6px 12px",
-                      borderTop: "1px solid var(--border)",
-                      background: "var(--bg-panel)",
-                      fontSize: 11,
-                    }}>
-                      {newModelCount > 0 && (
+                    {newModelCount > 0 && (
+                      <div style={{ display: "flex", padding: "6px 12px", borderTop: "1px solid var(--border)", background: "var(--bg-panel)" }}>
                         <button
                           type="button"
                           onClick={() => { setModelDropdownOpen(false); openSettings("models"); }}
@@ -3319,47 +3360,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                           <Sparkles size={11} aria-hidden="true" />
                           {tn("chatInput.newModels", newModelCount, { count: newModelCount })} · {t("chatInput.reviewNewModels")}
                         </button>
-                      )}
-                      <span style={{ flex: 1 }} />
-                      <button
-                        type="button"
-                        onClick={() => { setModelDropdownOpen(false); openSettings("models"); }}
-                        style={{ display: "inline-flex", alignItems: "center", gap: 5, minHeight: isMobile ? 44 : 26, padding: "0 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text-muted)", fontSize: 11, cursor: "pointer", whiteSpace: "nowrap" }}
-                      >
-                        <Cpu size={11} aria-hidden="true" />
-                        {t("chatInput.manageModels")}
-                      </button>
-                    </div>
-                    {/* Fast mode lives with the model it belongs to: the
-                        footer only appears when the active model supports it. */}
-                    {fastModeSupported && onFastModeChange && (
-                      <label
-                        style={{
-                          position: "sticky", bottom: 0,
-                          display: "flex", alignItems: "flex-start", gap: 8,
-                          padding: "8px 12px",
-                          borderTop: "1px solid var(--border)",
-                          background: "var(--bg-panel)",
-                          cursor: "pointer",
-                        }}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={Boolean(fastModeEnabled)}
-                          onChange={() => onFastModeChange(!fastModeEnabled)}
-                          style={{ margin: "2px 0 0", accentColor: "var(--accent)", cursor: "pointer", flexShrink: 0 }}
-                        />
-                        <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
-                          <span style={{ fontSize: 12, fontWeight: 600, color: fastModeActive ? "var(--accent)" : "var(--text)" }}>
-                            {t("chatInput.fastLabel")}
-                          </span>
-                          <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                            {t("chatInput.fastModeHint")}
-                          </span>
-                        </span>
-                      </label>
+                      </div>
                     )}
-                    </div>
                   </div>
                   );
                 })()}
@@ -3697,10 +3699,37 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 )}
               </div>
             )}
-
             {/* Pushes the gauge and Send right on a wide toolbar; on a phone
                 the model selector is the one that takes the slack instead. */}
             <div style={{ flex: isMobile ? "0 0 0px" : 1 }} />
+            {((fastModeSupported && onFastModeChange) || onOpenModels) && (
+              <div style={{ display: "flex", alignItems: "center", gap: 2, flexShrink: 0, flexWrap: "wrap" }}>
+                {fastModeSupported && onFastModeChange && (
+                  <button
+                    type="button"
+                    onClick={() => onFastModeChange(!fastModeEnabled)}
+                    title={t("chatInput.fastModeHint")}
+                    aria-label={t("chatInput.fastLabel")}
+                    aria-pressed={Boolean(fastModeEnabled)}
+                    style={{ display: "inline-flex", alignItems: "center", gap: 4, height: isMobile ? 38 : 28, padding: isMobile ? "0 10px" : "0 8px", background: fastModeEnabled ? "var(--bg-hover)" : "none", border: "none", borderRadius: 7, color: fastModeActive ? "var(--accent)" : "var(--text-muted)", cursor: "pointer", fontSize: 12, fontWeight: fastModeEnabled ? 600 : 400 }}
+                  >
+                    {t("chatInput.fastLabel")}
+                  </button>
+                )}
+                {onOpenModels && (
+                  <button
+                    type="button"
+                    onClick={onOpenModels}
+                    title={t("chatInput.manageModels")}
+                    aria-label={t("chatInput.manageModels")}
+                    style={{ display: "inline-flex", alignItems: "center", gap: 4, height: isMobile ? 38 : 28, padding: isMobile ? "0 10px" : "0 8px", background: "none", border: "none", borderRadius: 7, color: "var(--text-muted)", cursor: "pointer", fontSize: 12 }}
+                  >
+                    <Settings size={14} strokeWidth={1.8} aria-hidden="true" />
+                    <span>{t("chatInput.manageModels")}</span>
+                  </button>
+                )}
+              </div>
+            )}
 
             {/* Icon-only plan-quota gauge. The arc tracks the binding quota
                 window; context usage lives in the top bar and, in detail,
@@ -3721,7 +3750,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   aria-label={quotaRingLabel}
                   aria-expanded={contextPopoverOpen}
                   aria-haspopup="dialog"
-                  onClick={() => setContextPopoverOpen((open) => !open)}
+                  onClick={(e) => {
+                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                    setContextPopoverAnchor({ top: rect.top, right: rect.right });
+                    setContextPopoverOpen((open) => !open);
+                  }}
                   style={{
                     position: "relative",
                     width: 28,
@@ -3765,6 +3798,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     provider={quotaProvider ?? null}
                     modelName={displayModelName}
                     now={usageNow}
+                    anchorTop={contextPopoverAnchor?.top ?? null}
+                    anchorRight={contextPopoverAnchor?.right ?? null}
                   />
                 )}
               </div>

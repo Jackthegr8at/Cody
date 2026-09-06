@@ -1,32 +1,18 @@
 "use client";
 
-import { normalizeSectionId } from "./settings/registry";
-
 /**
  * Every id Settings can be opened with. The eight HUB ids (accounts, general,
  * providers, models, engine, extensions, memory, system) are the sections
- * `components/settings/registry.ts` renders; the rest are LEGACY ids that
- * deep links, toasts and older callers still pass, kept for one release and
- * normalised by `normalizeSectionId` (safety/intelligence/omp → engine,
- * localai → providers, mcp/skills/plugins → extensions with a sub-view).
- * `models` keeps its id but now means the Models hub, not "AI Model Defaults"
- * (those moved into Behavior).
+ * `components/settings/registry.ts` renders.
  */
 export type SettingsTab =
   | "accounts"
   | "general"
-  | "safety"
   | "models"
   | "providers"
-  | "intelligence"
   | "memory"
   | "engine"
   | "extensions"
-  | "mcp"
-  | "omp"
-  | "skills"
-  | "plugins"
-  | "localai"
   | "system";
 
 /**
@@ -163,7 +149,3 @@ export function extensionsGroupDescription(capabilities: EngineCapabilities): st
  * dialog search could not find. One constant, one answer.
  */
 export const SCHEMA_TAB_CAPABILITY = "nativeSettings" satisfies keyof EngineCapabilities;
-
-/** Legacy id → the hub that now renders it. Delegates to the registry so the
- * alias table is spelled once. */
-export const getNormalizedActive = (tab: SettingsTab): SettingsTab => normalizeSectionId(tab);
