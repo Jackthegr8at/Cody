@@ -513,7 +513,7 @@ export default function StreamTunerPage() {
                 isStreaming={running}
                 toolResults={toolResults}
                 modelNames={{ "simulator:playground": "Stream Tuner" }}
-                toolCallsDefaultCollapsed={!expandTools}
+                activityDisplayMode={expandTools ? "full" : "compact"}
                 thinkingDefaultExpanded
               />
             )}

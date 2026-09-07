@@ -8,7 +8,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { MessageView, SafeMarkdownBody, TaskResultPanel } = await jiti.import("./MessageView.tsx");
+const { MessageView, SafeMarkdownBody, TaskResultPanel, getStructuredActivityStatus } = await jiti.import("./MessageView.tsx");
 const { CodeBlock } = await jiti.import("./MermaidBlock.tsx");
 
 test("large message content avoids the markdown pipeline until requested", () => {
@@ -46,7 +46,7 @@ test("MCP mount notices stay out of the transcript", () => {
 test("streaming tool calls start collapsed when the interface preference is enabled", () => {
   const html = renderToStaticMarkup(React.createElement(MessageView, {
     isStreaming: true,
-    toolCallsDefaultCollapsed: true,
+    activityDisplayMode: "compact",
     message: {
       role: "assistant",
       content: [{ type: "toolCall", toolCallId: "call-1", toolName: "read", input: { path: "foo.ts" } }],
@@ -60,7 +60,7 @@ test("streaming tool calls start collapsed when the interface preference is enab
 test("streaming tool calls can still start expanded when the preference is disabled", () => {
   const html = renderToStaticMarkup(React.createElement(MessageView, {
     isStreaming: true,
-    toolCallsDefaultCollapsed: false,
+    activityDisplayMode: "full",
     message: {
       role: "assistant",
       content: [{ type: "toolCall", toolCallId: "call-1", toolName: "read", input: { path: "foo.ts" } }],
@@ -156,3 +156,28 @@ test("advisor custom messages use the localized advisor label", () => {
   assert.doesNotMatch(html, /customType/);
 });
 
+
+test("activity modes leave user prose and assistant thinking/text untouched", () => {
+  const user = renderToStaticMarkup(React.createElement(MessageView, { activityDisplayMode: "hidden", message: { role: "user", content: "ordinary user prose" } }));
+  assert.match(user, /ordinary user prose/);
+  const assistant = renderToStaticMarkup(React.createElement(MessageView, { activityDisplayMode: "hidden", thinkingDefaultExpanded: true, message: { role: "assistant", content: [{ type: "thinking", thinking: "private reasoning" }, { type: "text", text: "ordinary assistant prose" }, { type: "toolCall", toolCallId: "call-hidden", toolName: "read", input: { path: "x" } }] } }));
+  assert.match(assistant, /private reasoning/);
+  assert.match(assistant, /ordinary assistant prose/);
+  assert.doesNotMatch(assistant, /call-hidden/);
+});
+
+test("structured async task status is compact, expandable in full, and hidden without losing errors", () => {
+  const result = { role: "toolResult", toolCallId: "task-1", toolName: "task", content: [{ type: "text", text: "full task output" }], details: { async: { state: "completed", jobId: "Audit" } } };
+  assert.equal(getStructuredActivityStatus(result), "completed");
+  const message = { role: "assistant", content: [{ type: "toolCall", toolCallId: "task-1", toolName: "task", input: { task: "Audit" } }] };
+  const compact = renderToStaticMarkup(React.createElement(MessageView, { activityDisplayMode: "compact", message, toolResults: new Map([["task-1", result]]) }));
+  assert.match(compact, /completed/);
+  assert.doesNotMatch(compact, /full task output/);
+  const full = renderToStaticMarkup(React.createElement(MessageView, { activityDisplayMode: "full", message, toolResults: new Map([["task-1", result]]) }));
+  assert.match(full, /full task output/);
+  const hidden = renderToStaticMarkup(React.createElement(MessageView, { activityDisplayMode: "hidden", message, toolResults: new Map([["task-1", result]]) }));
+  assert.equal(hidden, "");
+  const error = { ...result, isError: true, content: [{ type: "text", text: "actionable tool failure" }] };
+  const visibleError = renderToStaticMarkup(React.createElement(MessageView, { activityDisplayMode: "hidden", message, toolResults: new Map([["task-1", error]]) }));
+  assert.match(visibleError, /actionable tool failure/);
+});

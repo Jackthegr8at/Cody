@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { UsageSnapshot } from "@/lib/usage/types";
+import type { ResetCreditOutcome, ResetCreditsSnapshot } from "@/lib/harness/reset-credits";
+import { STORAGE_KEYS } from "@/lib/storage-keys";
 
 // Demand-driven cadence: 90s while someone might actually be looking at the
 // usage meter, backed off to 5 minutes once the tab is hidden or unfocused.
@@ -171,4 +173,72 @@ export function useUsage(enabled = true): UseUsageResult {
   // caller that renders on `loading` must not spin forever on a hook that
   // will never fetch.
   return enabled ? { snapshot, loading, failed, refresh } : { snapshot: null, loading: false, failed: false, refresh };
+}
+export type { ResetCredit, ResetCreditAccount, ResetCreditOutcome, ResetCreditsSnapshot } from "@/lib/harness/reset-credits";
+export interface UseResetCreditsResult { snapshot: ResetCreditsSnapshot | null; loading: boolean; failed: boolean; redeeming: boolean; refresh: () => void; redeem: (accountId: string, creditId: string) => Promise<ResetCreditOutcome>; }
+function resetBalanceStorageKey(observerId: string, accountId: string): string { return STORAGE_KEYS.resetCreditBalancePrefix + ":" + observerId + ":" + accountId; }
+function observeResetCreditBalances(snapshot: ResetCreditsSnapshot): void {
+  if (typeof window === "undefined" || !snapshot.available || !snapshot.observerId) return;
+  for (const account of snapshot.accounts) {
+    if (account.error) continue;
+    const key = resetBalanceStorageKey(snapshot.observerId, account.id);
+    try {
+      const previousRaw = window.localStorage.getItem(key); const previous = previousRaw === null ? null : Number(previousRaw);
+      if (previous !== null && Number.isSafeInteger(previous) && account.availableCount > previous) window.dispatchEvent(new CustomEvent("cody:reset-credit-balance-increased", { detail: { accountId: account.id, label: account.label, delta: account.availableCount - previous } }));
+      window.localStorage.setItem(key, String(account.availableCount));
+    } catch { /* Storage can be disabled; missing baseline stays silent. */ }
+  }
+}
+export function useResetCredits(enabled = true): UseResetCreditsResult {
+  const [snapshot, setSnapshot] = useState<ResetCreditsSnapshot | null>(null);
+  const [loading, setLoading] = useState(enabled); const [failed, setFailed] = useState(false); const [redeeming, setRedeeming] = useState(false); const [refreshVersion, setRefreshVersion] = useState(0);
+  const redeemingRef = useRef(false);
+  const refresh = useCallback(() => { setRefreshVersion((version) => version + 1); }, []);
+  useEffect(() => {
+    if (!enabled) { setLoading(false); return; }
+    let cancelled = false;
+    let loadInFlight = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const load = async () => {
+      if (loadInFlight) return;
+      loadInFlight = true;
+      setLoading(true);
+      try {
+        const response = await fetch("/api/usage/reset-credits", { cache: "no-store" });
+        const value: unknown = await response.json();
+        if (!response.ok || !value || typeof value !== "object" || Array.isArray(value)) throw new Error("Reset-credit read failed.");
+        const next = value as ResetCreditsSnapshot;
+        if (!cancelled) { observeResetCreditBalances(next); setSnapshot(next); setFailed(false); }
+      } catch {
+        if (!cancelled) setFailed(true);
+      } finally {
+        loadInFlight = false;
+        if (!cancelled) {
+          setLoading(false);
+          timer = setTimeout(load, isPageActive() ? USAGE_ACTIVE_INTERVAL_MS : USAGE_BACKGROUND_INTERVAL_MS);
+        }
+      }
+    };
+    const refreshOnFocus = () => { void load(); };
+    void load();
+    window.addEventListener("focus", refreshOnFocus);
+    document.addEventListener("visibilitychange", refreshOnFocus);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      window.removeEventListener("focus", refreshOnFocus);
+      document.removeEventListener("visibilitychange", refreshOnFocus);
+    };
+  }, [enabled, refreshVersion]);
+  const redeem = useCallback(async (accountId: string, creditId: string): Promise<ResetCreditOutcome> => {
+    if (redeemingRef.current) return { outcome: "error", accountId, creditId, code: "in_flight" };
+    redeemingRef.current = true; setRedeeming(true);
+    try {
+      const response = await fetch("/api/usage/reset-credits", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ accountId, creditId, confirmed: true, idempotencyKey: crypto.randomUUID() }) }); const value: unknown = await response.json();
+      if (!value || typeof value !== "object" || Array.isArray(value)) return { outcome: "error", accountId, creditId, code: "http_" + response.status };
+      return value as ResetCreditOutcome;
+    } catch { return { outcome: "error", accountId, creditId, code: "http_0", message: "The redemption result is inconclusive; refresh before trying again." }; }
+    finally { redeemingRef.current = false; setRedeeming(false); refresh(); }
+  }, [refresh]);
+  return { snapshot, loading, failed, redeeming, refresh, redeem };
 }

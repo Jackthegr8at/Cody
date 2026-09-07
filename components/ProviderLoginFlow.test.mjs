@@ -79,7 +79,7 @@ function renderDirectory(overrides = {}) {
     harnessLabel: "OMP",
     sessionModels: null,
     callbacks: { onAdvisorChange() {}, onModelsSaved() {}, onPluginsReloaded() {}, onOmpUpdateAvailabilityChange() {}, onClose() {}, selectSection() {} },
-    prefs: { toolCallsDefaultCollapsed: false, setToolCallsDefaultCollapsed() {}, thinkingDefaultExpanded: false, setThinkingDefaultExpanded() {}, advisorEnabled: false },
+    prefs: { activityDisplayMode: "compact", setActivityDisplayMode() {}, thinkingDefaultExpanded: false, setThinkingDefaultExpanded() {}, advisorEnabled: false },
     isMobile: false,
     section: "providers",
     sub: null,

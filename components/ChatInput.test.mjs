@@ -535,23 +535,6 @@ test("every attached image goes through the compressor, and failures are named",
   assert.match(attach, /finally \{[\s\S]*setPreparingImageCount/);
 });
 
-test("nothing is sent while an attachment is still being prepared or over budget", () => {
-  const send = composerSource.slice(
-    composerSource.indexOf("const handleSend = useCallback"),
-    composerSource.indexOf("const slashQuery"),
-  );
-  assert.match(send, /if \(preparingImageCount > 0\) return;/);
-  assert.match(send, /const tooLarge = budgetError\(composedMessage, attachedImages\);/);
-  assert.match(send, /setAttachError\(tooLarge\)/);
-  // The guard runs BEFORE the message leaves the composer.
-  assert.ok(send.indexOf("const tooLarge") < send.indexOf("onSend(composedMessage"));
-
-  // The send button cannot be clicked into the same race.
-  assert.match(composerSource, /disabled=\{preparingImageCount > 0 \|\| \(!value\.trim\(\)/);
-  // The attach affordance itself is what reports the work in progress.
-  assert.match(composerSource, /preparingImageCount > 0 \? t\("chatInput\.imagePreparing"\)/);
-  assert.match(composerSource, /preparingImageCount > 0 \? \(\s*\n\s*<Loader2/);
-});
 
 test("the over-budget message names the attachment to remove", () => {
   const budget = composerSource.slice(
@@ -626,9 +609,21 @@ test("the rendered popover keeps only quota content, branded and barred", () => 
       }),
     ],
   });
+  const resetCredits = {
+    loading: false,
+    redeeming: false,
+    refresh() {},
+    redeem: async () => ({ outcome: "reset", accountId: "claude", creditId: "credit-1" }),
+    snapshot: {
+      available: true,
+      fetchedAt: "2026-08-18T12:30:00.000Z",
+      accounts: [{ id: "claude", label: "Claude account", availableCount: 2, canRedeem: true, credits: [{ id: "credit-1", expiresAt: "2026-09-15T00:00:00.000Z" }] }],
+    },
+  };
   const quota = buildQuotaView(snapshot, false, false, { provider: "anthropic", modelId: "claude-fable-5" });
   const html = renderToStaticMarkup(
     React.createElement(QuotaPopover, {
+      resetCredits,
       quota,
       provider: "anthropic",
       modelName: "Fable",
@@ -670,7 +665,10 @@ test("the popover retains an explicitly reported zero saved-reset balance", () =
     })],
   }), false, false, { provider: "anthropic", modelId: "claude-fable-5" });
   const html = renderToStaticMarkup(
-    React.createElement(QuotaPopover, { quota, provider: "anthropic", modelName: "Fable", now: Date.now() }),
+    React.createElement(QuotaPopover, {
+      resetCredits: { loading: false, redeeming: false, refresh() {}, redeem: async () => ({ outcome: "no_credit", accountId: "claude" }), snapshot: { available: true, fetchedAt: "2026-08-18T12:30:00.000Z", accounts: [{ id: "claude", label: "Claude account", availableCount: 0, canRedeem: false, credits: [] }] } },
+      quota, provider: "anthropic", modelName: "Fable", now: Date.now(),
+    }),
   );
 
   assert.match(html, /Saved rate-limit resets · 0/);

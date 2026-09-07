@@ -30,7 +30,7 @@ import { getInitialNavigation } from "@/lib/initial-navigation";
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { showCompletionNotification } from "@/lib/browser-notifications";
 import type { GitStatusResponse } from "@/lib/git-types";
-import type { SessionInfo, SessionTreeNode } from "@/lib/types";
+import type { ActivityDisplayMode, SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
 import { ProviderIcon } from "./ProviderIcon";
 import { providerBrand } from "@/lib/provider-brand";
@@ -104,6 +104,7 @@ function UpdateNoticeBody({ current, next, onOpen }: { current: string | null; n
 // Resizable desktop sidebar: the width is stored on the container as the
 // --sidebar-width CSS variable (globals.css) and persisted between sessions.
 const SIDEBAR_WIDTH_STORAGE_KEY = STORAGE_KEYS.sidebarWidth;
+const ACTIVITY_DISPLAY_MODE_STORAGE_KEY = STORAGE_KEYS.activityDisplayMode;
 const TOOL_CALLS_COLLAPSED_STORAGE_KEY = STORAGE_KEYS.toolCallsCollapsed;
 const THINKING_EXPANDED_STORAGE_KEY = STORAGE_KEYS.thinkingExpanded;
 const SIDEBAR_MIN_WIDTH = 200;
@@ -218,7 +219,7 @@ export function AppShell() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR_DEFAULT_WIDTH);
-  const [toolCallsDefaultCollapsed, setToolCallsDefaultCollapsed] = useState(true);
+  const [activityDisplayMode, setActivityDisplayMode] = useState<ActivityDisplayMode>("compact");
   const [thinkingDefaultExpanded, setThinkingDefaultExpanded] = useState(false);
   const [sidebarResizing, setSidebarResizing] = useState(false);
   // Active drag handlers so an unmount mid-drag can detach them.
@@ -229,16 +230,19 @@ export function AppShell() {
   useEffect(() => {
     setSidebarWidth(loadSidebarWidth());
     try {
-      setToolCallsDefaultCollapsed(window.localStorage.getItem(TOOL_CALLS_COLLAPSED_STORAGE_KEY) !== "false");
+      const storedMode = window.localStorage.getItem(ACTIVITY_DISPLAY_MODE_STORAGE_KEY);
+      if (storedMode === "compact" || storedMode === "full" || storedMode === "hidden") setActivityDisplayMode(storedMode);
+      else setActivityDisplayMode(window.localStorage.getItem(TOOL_CALLS_COLLAPSED_STORAGE_KEY) === "false" ? "full" : "compact");
       setThinkingDefaultExpanded(window.localStorage.getItem(THINKING_EXPANDED_STORAGE_KEY) === "true");
     } catch {
       // Keep the compact default when storage is unavailable.
     }
   }, []);
-  const handleToolCallsDefaultCollapsedChange = useCallback((collapsed: boolean) => {
-    setToolCallsDefaultCollapsed(collapsed);
+  const handleActivityDisplayModeChange = useCallback((mode: ActivityDisplayMode) => {
+    setActivityDisplayMode(mode);
     try {
-      window.localStorage.setItem(TOOL_CALLS_COLLAPSED_STORAGE_KEY, String(collapsed));
+      window.localStorage.setItem(ACTIVITY_DISPLAY_MODE_STORAGE_KEY, mode);
+      window.localStorage.setItem(TOOL_CALLS_COLLAPSED_STORAGE_KEY, String(mode !== "full"));
     } catch {
       // The preference still applies for this page load.
     }
@@ -1882,13 +1886,12 @@ export function AppShell() {
               onModelUsageChange={handleModelUsageChange}
               onSessionModelsChange={setSessionModels}
               onOpenFile={handleOpenLinkedFile}
-              onOpenModels={() => openSettings("models", { highlight: "model-curation" })}
               onOpenPreview={handleAgentOpenPreview}
               onPreviewUrlsSeen={handlePreviewUrlsSeen}
               advisorEnabled={advisorEnabled}
               capabilities={capabilities}
               engine={activeEngine}
-              toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
+              activityDisplayMode={activityDisplayMode}
               thinkingDefaultExpanded={thinkingDefaultExpanded}
             />
           ) : initialCwdStatus === "validating" ? (
@@ -2231,7 +2234,7 @@ export function AppShell() {
         capabilities={capabilities}
         engine={activeEngine}
         sessionModels={sessionModels}
-        prefs={{ toolCallsDefaultCollapsed, setToolCallsDefaultCollapsed: handleToolCallsDefaultCollapsedChange, thinkingDefaultExpanded, setThinkingDefaultExpanded: handleThinkingDefaultExpandedChange, advisorEnabled }}
+        prefs={{ activityDisplayMode, setActivityDisplayMode: handleActivityDisplayModeChange, thinkingDefaultExpanded, setThinkingDefaultExpanded: handleThinkingDefaultExpandedChange, advisorEnabled }}
         callbacks={settingsCallbacks}
       />
     )}

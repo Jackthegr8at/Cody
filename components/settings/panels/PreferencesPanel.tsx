@@ -14,9 +14,12 @@ import { getSubmitDuringRunBehavior, setSubmitDuringRunBehavior, type SubmitDuri
 import { LOCALES, useI18n, type Locale } from "@/lib/i18n";
 import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
 import { readTerminalSoftKeyIds, TERMINAL_SOFT_KEYS, writeTerminalSoftKeyIds, type TerminalSoftKeyId } from "@/lib/terminal-preferences";
+import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-preset-preference";
+import type { ToolPreset } from "@/lib/tool-presets";
 import { THEMES, type ThemeId } from "@/lib/theme-catalog";
 import { useTheme } from "@/hooks/useTheme";
 import type { EngineCapabilities } from "../../SettingsTabs";
+import type { ActivityDisplayMode } from "@/lib/types";
 import { NativeSetting, ToggleSwitch, nativeOptionStyle, nativeSelectStyle, slugify } from "../primitives";
 import { SaveStatusCorner, useSaveStatus } from "../SaveStatus";
 import type { SearchEntry } from "../search-index";
@@ -37,10 +40,11 @@ export interface PreferenceCard {
 export const PREFERENCE_CARDS: readonly PreferenceCard[] = [
   { id: "theme", label: "Theme", description: "Colour theme for this account, applied on every device you sign in from. The title-bar picker changes the same setting.", scope: "Cody only", keywords: ["dark", "light", "colour", "color"] },
   { id: "language", label: "Language", description: "Interface language. Auto-detected from the browser until chosen here.", scope: "Cody only", keywords: ["locale", "english", "japanese", "chinese"] },
-  { id: "tool-calls", label: "Keep tool calls collapsed", description: "Show only compact headers while tools execute.", scope: "Cody only" },
+  { id: "activity", label: "Tool and background activity", description: "Choose whether tool calls, results and structured background work stay compact, open in full, or disappear from the transcript. User and assistant conversation and thinking are unchanged.", scope: "Cody only", keywords: ["tools", "results", "async", "background", "transcript", "compact", "full", "hidden"] },
   { id: "thinking", label: "Expand thinking blocks", description: "Show the model's reasoning open by default instead of behind a collapsed header.", scope: "Cody only" },
   { id: "sound", label: "Completion sound", description: "Play a tone when the agent completes a run.", scope: "Cody only", keywords: ["notification", "chime"] },
   { id: "submit", label: "Message during active run", description: "What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish.", scope: "Cody only", needsCapability: "chatExtras", keywords: ["steer", "queue"] },
+  { id: "agent-tools", label: "Agent tools", description: "Choose the built-in tools given to new sessions. Core keeps read, bash, edit and write; No tools starts with none. Changes affect new sessions only.", scope: "Cody only", needsCapability: "chatExtras", keywords: ["tools", "core", "subagents", "tasks", "github", "web search", "new sessions"] },
   { id: "soft-keys", label: "Terminal soft keys", description: "Choose the buttons shown below the terminal on touch devices. Shift Tab moves backward through terminal UI modes.", scope: "Cody only", keywords: ["touch", "keyboard"] },
 ];
 
@@ -62,6 +66,12 @@ function card(id: string): PreferenceCard {
   return found;
 }
 
+function agentToolsDescription(hasSubagents: boolean): string {
+  return hasSubagents
+    ? "Core disables subagents, task lists, GitHub and web search; No tools starts with none. Changes affect new sessions only."
+    : "Core disables task lists, GitHub and web search and keeps only read, bash, edit and write. No tools starts with none. Changes affect new sessions only.";
+}
+
 function readSoundEnabled(): boolean {
   if (typeof window === "undefined") return true;
   try {
@@ -78,6 +88,7 @@ export function PreferencesPanel() {
   const { themeId, setTheme } = useTheme();
   const { track } = useSaveStatus(PREFERENCES_PANEL_ID);
   const [submitBehavior, setSubmitBehavior] = useState<SubmitDuringRunBehavior>(() => getSubmitDuringRunBehavior());
+  const [toolPreset, setToolPreset] = useState<ToolPreset>(() => getPreferredToolPreset());
   const [terminalSoftKeyIds, setTerminalSoftKeyIds] = useState<TerminalSoftKeyId[]>(() => readTerminalSoftKeyIds());
   const [soundEnabled, setSoundEnabled] = useState<boolean>(readSoundEnabled);
 
@@ -146,8 +157,17 @@ export function PreferencesPanel() {
         </NativeSetting>
       </div>
       <div style={grid}>
-        <NativeSetting label={card("tool-calls").label} description={card("tool-calls").description} scope="Cody only">
-          <ToggleSwitch checked={prefs.toolCallsDefaultCollapsed} onChange={(next) => saved(() => prefs.setToolCallsDefaultCollapsed(next))} />
+        <NativeSetting label={card("activity").label} description={card("activity").description} scope="Cody only">
+          <select
+            style={nativeSelectStyle}
+            value={prefs.activityDisplayMode}
+            aria-label="Tool and background activity"
+            onChange={(event) => saved(() => prefs.setActivityDisplayMode(event.target.value as ActivityDisplayMode))}
+          >
+            <option value="compact" style={nativeOptionStyle}>Compact</option>
+            <option value="full" style={nativeOptionStyle}>Full</option>
+            <option value="hidden" style={nativeOptionStyle}>Hidden</option>
+          </select>
         </NativeSetting>
         <NativeSetting label={card("thinking").label} description={card("thinking").description} scope="Cody only">
           <ToggleSwitch checked={prefs.thinkingDefaultExpanded} onChange={(next) => saved(() => prefs.setThinkingDefaultExpanded(next))} />
@@ -182,6 +202,24 @@ export function PreferencesPanel() {
             >
               <option value="steer" style={nativeOptionStyle}>Steer current run</option>
               <option value="queue" style={nativeOptionStyle}>Queue follow-up</option>
+            </select>
+          </NativeSetting>
+        )}
+        {capabilities.chatExtras && (
+          <NativeSetting label={card("agent-tools").label} description={agentToolsDescription(capabilities.subagents)} scope="Cody only">
+            <select
+              style={nativeSelectStyle}
+              value={toolPreset}
+              aria-label="Agent tools"
+              onChange={(event) => {
+                const next = event.target.value as ToolPreset;
+                setToolPreset(next);
+                saved(() => setPreferredToolPreset(next));
+              }}
+            >
+              <option value="full" style={nativeOptionStyle}>All built-in tools</option>
+              <option value="default" style={nativeOptionStyle}>Core</option>
+              <option value="none" style={nativeOptionStyle}>No tools</option>
             </select>
           </NativeSetting>
         )}

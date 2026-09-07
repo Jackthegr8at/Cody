@@ -1,4 +1,4 @@
-import type { AgentMessage, AssistantContentBlock, AssistantMessage, ThinkingContent, ToolCallContent } from "./types";
+import type { AgentMessage, AssistantContentBlock, AssistantMessage, ThinkingContent, ToolCallContent, ToolResultMessage, ActivityDisplayMode } from "./types";
 
 interface DisplayOptions {
   isStreaming?: boolean;
@@ -59,5 +59,22 @@ export function groupHasThinking(
     if (message?.role !== "assistant") continue;
     if (getDisplayableAssistantBlocks(message as AssistantMessage).some((block) => block.type === "thinking")) return true;
   }
+  return false;
+}
+
+/** Shared visibility boundary so hidden activity leaves no transcript wrapper. */
+export function isVisibleTranscriptMessage(message: AgentMessage, mode: ActivityDisplayMode, results?: Map<string, ToolResultMessage>): boolean {
+  if (message.role === "toolResult") return false;
+  if (message.role === "custom" && message.customType === "xdev-mount-notice") return false;
+  if (mode !== "hidden" || message.role === "user") return true;
+  if (message.role === "assistant") {
+    return message.content.some(block => block.type === "toolCall"
+      ? Boolean(results?.get(block.toolCallId)?.isError)
+      : !isEmptyThinkingBlock(block));
+  }
+  if (message.role === "custom") {
+    return message.customType === "compaction" || Boolean(message.details && typeof message.details === "object" && "notifyType" in message.details && message.details.notifyType === "error");
+  }
+  if (message.role === "bashExecution") return Boolean(message.cancelled || (message.exitCode !== undefined && message.exitCode !== 0));
   return false;
 }

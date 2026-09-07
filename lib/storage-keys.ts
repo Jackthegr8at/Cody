@@ -13,7 +13,11 @@ export const STORAGE_KEYS = {
   /** Sidebar width in pixels. */
   sidebarWidth: "cody:sidebar-width",
   /** Whether tool-call cards render collapsed by default. */
+  /** Browser-local baseline used by reset-credit balance UI. */
+  resetCreditBalancePrefix: "cody:reset-credit-balance",
   toolCallsCollapsed: "cody:tool-calls-collapsed",
+  /** Transcript activity presentation: compact, full, or hidden. */
+  activityDisplayMode: "cody:activity-display-mode",
   /** Whether thinking blocks render expanded by default. */
   thinkingExpanded: "cody:thinking-expanded",
   /** Project folders left expanded in the session tree. */
@@ -107,6 +111,8 @@ export const SESSION_STORAGE_PREFIXES = {
   queue: "cody:queue:",
   /** The active goal parsed out of the running turn. */
   goal: "cody:goal:",
+  /** Explicit Smart model provenance, never inferred from a resolved model. */
+  smartModel: "cody:smart-model:",
 } as const;
 
 /** Same-window notifications between components that share a stored value. */
