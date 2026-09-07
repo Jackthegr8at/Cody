@@ -72,10 +72,14 @@ export interface OmpSettingsSchema {
   source: { packagePath: string; version: string | null };
 }
 
+export function getOmpPackageRoot(): string | null {
+  return findOmpPackageRoot();
+}
+
 /** The installed omp package's CHANGELOG.md, when the package ships one
  * (it is in omp's npm `files` list; a future omp dropping it fails soft). */
 export function getOmpChangelogPath(): string | null {
-  const root = findOmpPackageRoot();
+  const root = getOmpPackageRoot();
   if (!root) return null;
   const file = path.join(root, "CHANGELOG.md");
   try {
@@ -84,6 +88,7 @@ export function getOmpChangelogPath(): string | null {
     return null;
   }
 }
+
 
 function isPlainValue(value: unknown): value is boolean | number | string {
   return typeof value === "boolean" || typeof value === "number" || typeof value === "string";
@@ -194,7 +199,7 @@ let cached: { key: string; schema: OmpSettingsSchema | null } | null = null;
  * settings UI rather than breaking it. Cached per package path + version.
  */
 export function getOmpSettingsSchema(): OmpSettingsSchema | null {
-  const packageRoot = findOmpPackageRoot();
+  const packageRoot = getOmpPackageRoot();
   if (!packageRoot) return null;
   const version = ompPackageVersion(packageRoot);
   const cacheKey = `${packageRoot}@${version ?? "unknown"}`;

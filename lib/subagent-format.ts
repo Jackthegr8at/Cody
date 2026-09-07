@@ -1,4 +1,5 @@
 // Small number/telemetry formatters shared by subagent UI surfaces
+import { formatModelDisplayName } from "./model-display";
 // (composer chips, transcript dialog, task-tool-result panel).
 
 export function formatTokens(tokens: number | undefined): string | null {
@@ -27,7 +28,7 @@ export function shortModel(model: string | undefined): string | null {
   if (!model) return null;
   const separator = model.lastIndexOf("/");
   const id = separator >= 0 ? model.slice(separator + 1) : model;
-  return id.replace(/:.*$/, "") || null;
+  return formatModelDisplayName(id.replace(/:.*$/, "")) || null;
 }
 
 /** Count of nested (grandchild) subagents an agent currently has in flight. */

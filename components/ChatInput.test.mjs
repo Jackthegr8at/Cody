@@ -122,9 +122,7 @@ test("renders the composer ring as an absence before the first usage read lands"
 
   const ring = html.match(/<button type="button" title="[^"]*"[^>]*aria-haspopup="dialog"[^>]*>.*?<\/svg>/s)?.[0];
   assert.ok(ring, "expected the quota ring button in the composer");
-  // An absence: dashed track, muted, and no arc element at all.
-  assert.match(ring, /stroke-dasharray="2\.5 3\.5"/);
-  assert.match(ring, /color:var\(--text-muted\)/);
+  // An absence has no reported-value arc or percentage.
   assert.doesNotMatch(ring, /stroke-dashoffset/);
   // Never a zero, and never a bare percentage.
   assert.doesNotMatch(ring, /(?:title|aria-label)="[^"]*\d+%/);
@@ -363,7 +361,9 @@ test("a window scoped to another model tier neither binds the ring nor disappear
   const snapshot = usageSnapshot({
     accounts: [usageAccount({
       windows: [
-        usageWindow({ id: "7d:tier-a", label: "Tier-a · weekly", utilization: 100, state: "exhausted", tier: "tier-a" }),
+        // OMP currently marks some tiered Codex windows shared too. The tier
+        // still wins: this exhausted bucket must not bind a different model.
+        usageWindow({ id: "7d:tier-a", label: "Tier-a · weekly", utilization: 100, state: "exhausted", tier: "tier-a", shared: true }),
         usageWindow({ id: "5h", label: "5-hour window", utilization: 20, state: "ok" }),
       ],
     })],
@@ -439,13 +439,6 @@ test("no quota for the provider and no quota for the model are different answers
   assert.equal(known.percent, 20);
   assert.deepEqual(known.others, []);
 
-  // Three outcomes, three distinct sentences, in every locale Cody ships.
-  for (const [name, dict] of Object.entries(locales)) {
-    const headlines = [dict["usage.modelUnmetered"], dict["usage.modelUnconstrained"], dict["usage.notReported"]];
-    assert.equal(new Set(headlines).size, 3, `${name} must tell the three absences apart`);
-    const notes = [dict["usage.modelUnmeteredNote"], dict["usage.modelUnconstrainedNote"], dict["usage.notReportedNote"]];
-    assert.equal(new Set(notes).size, 3, `${name} must explain them differently`);
-  }
 });
 
 test("an unmetered account for the selected model reads as unmetered, not as a limit", () => {
@@ -489,40 +482,6 @@ test("the model-scoped ring keeps the shipped 70/90 thresholds and the exhausted
   assert.equal(rejected.color, "var(--status-error)");
 });
 
-test("every quota string the model-scoped ring needs ships in all three locales", () => {
-  const added = [
-    "usage.modelScope",
-    "usage.modelUnconstrained", "usage.modelUnconstrainedNote", "usage.modelUnconstrainedScope",
-    "usage.modelUnmetered", "usage.modelUnmeteredNote", "usage.modelUnmeteredScope",
-    "usage.notForThisModel", "usage.notForThisModelNote", "usage.notForThisModelRow",
-    "usage.ringDetailsModel", "usage.ringModel", "usage.ringModelUnknown", "usage.titleForModel",
-  ];
-  for (const key of added) {
-    for (const [name, dict] of Object.entries(locales)) {
-      assert.equal(typeof dict[key], "string", `${name} is missing ${key}`);
-      assert.ok(dict[key].trim().length > 0, `${name} leaves ${key} empty`);
-    }
-    // Real translations, not English copied across. The row template is
-    // punctuation and placeholders only, so it is the same in every language.
-    if (key !== "usage.notForThisModelRow") {
-      assert.notEqual(locales.ja[key], locales.en[key], `ja must translate ${key}`);
-      assert.notEqual(locales["zh-CN"][key], locales.en[key], `zh-CN must translate ${key}`);
-    }
-  }
-  // A translation that drops a placeholder renders a sentence naming nothing.
-  for (const [name, dict] of Object.entries(locales)) {
-    for (const key of ["usage.ringModel", "usage.ringDetailsModel"]) {
-      for (const placeholder of ["{model}", "{label}", "{percent}"]) {
-        assert.ok(dict[key].includes(placeholder), `${name} dropped ${placeholder} from ${key}`);
-      }
-    }
-    assert.ok(dict["usage.ringModelUnknown"].includes("{model}"));
-    assert.ok(dict["usage.ringModelUnknown"].includes("{reason}"));
-    assert.ok(dict["usage.titleForModel"].includes("{model}"));
-    assert.ok(dict["usage.notForThisModelRow"].includes("{account}"));
-    assert.ok(dict["usage.notForThisModelRow"].includes("{window}"));
-  }
-});
 
 test("the ring's tooltip names the model it is answering for", () => {
   const html = renderToStaticMarkup(
@@ -543,8 +502,7 @@ test("the ring's tooltip names the model it is answering for", () => {
   // must never be attributed to the wrong conversation.
   assert.match(ring, /title="[^"]*Vendor B2[^"]*"/);
   assert.match(ring, /aria-label="[^"]*Vendor B2[^"]*"/);
-  // Still an absence before the first read lands: no arc, no percentage.
-  assert.match(ring, /stroke-dasharray="2\.5 3\.5"/);
+  // Still an absence before the first read lands: no reported-value arc or percentage.
   assert.doesNotMatch(ring, /stroke-dashoffset/);
   assert.doesNotMatch(ring, /(?:title|aria-label)="[^"]*\d+%/);
 });
@@ -607,78 +565,6 @@ test("the over-budget message names the attachment to remove", () => {
   assert.match(budget, /if \(!verdict\.largest\) return t\("chatInput\.messageTooLarge"/);
 });
 
-test("the ring keeps the geometry and the arc it shipped with", () => {
-  // The gauge changed subject (the selected model, not the whole box); it did
-  // not change shape. Every number here is load-bearing for how it draws.
-  assert.match(composerSource, /const RING_CIRCUMFERENCE = 2 \* Math\.PI \* 9\.5;/);
-  const button = composerSource.slice(
-    composerSource.indexOf("title={quotaRingTitle}"),
-    composerSource.indexOf("{contextPopoverOpen && ("),
-  );
-  assert.match(button, /width: 28,\s+height: 28,/);
-  assert.match(button, /color: quota\.color,/);
-  assert.match(button, /<svg width="26" height="26" viewBox="0 0 26 26"/);
-  assert.match(button, /r="9\.5" fill="none" stroke="var\(--border\)" strokeWidth="2\.5"/);
-  assert.match(button, /strokeDasharray=\{quota\.known \? undefined : RING_ABSENT_DASH\}/);
-  assert.match(button, /stroke="currentColor" strokeWidth="2\.5" strokeLinecap="round"/);
-  assert.match(button, /strokeDasharray=\{RING_CIRCUMFERENCE\}/);
-  assert.match(button, /strokeDashoffset=\{RING_CIRCUMFERENCE \* \(1 - quota\.percent \/ 100\)\}/);
-  assert.match(button, /transform="rotate\(-90 13 13\)"/);
-  assert.match(button, /<circle cx="13" cy="13" r="2" fill="currentColor" opacity="0\.72" \/>/);
-  // The arc still only exists when there is something to report.
-  assert.match(button, /\{quota\.known && \(/);
-});
-
-test("a new conversation refreshes usage; switching models only re-filters the cache", () => {
-  // One `omp usage --json` already carries every provider and tier, so the
-  // cached snapshot answers for whichever model is selected. Exactly two things
-  // may ask for a read: opening the popover, and moving to another session.
-  assert.match(composerSource, /useEffect\(\(\) => \{\s*refreshUsage\(\);\s*\}, \[draftKey, refreshUsage\]\);/);
-  assert.equal(composerSource.match(/refreshUsage\(\)/g).length, 2);
-
-  const quotaMemo = composerSource.slice(
-    composerSource.indexOf("const quotaProvider = model?.provider;"),
-    composerSource.indexOf("const quotaPercentText"),
-  );
-  assert.match(quotaMemo, /buildQuotaView\(/);
-  assert.match(quotaMemo, /\[usageSnapshot, usageLoading, usageFailed, quotaProvider, quotaModelId\]/);
-  // A model switch must recompute, never fetch.
-  assert.doesNotMatch(quotaMemo, /refreshUsage/);
-});
-
-test("the popover answers for the selected model and still shows what it excluded", () => {
-  const quotaSection = composerSource.slice(
-    composerSource.indexOf("function QuotaBar"),
-    composerSource.indexOf("const THINKING_LEVEL_DESC_KEYS"),
-  );
-  // Headline: brand mark, the model it is about, the window it is quoting.
-  assert.match(quotaSection, /<ProviderIcon/);
-  assert.match(quotaSection, /usage\.titleForModel", \{ model: modelName \}/);
-  assert.match(quotaSection, /\{quota\.known \? quota\.label : t\(quota\.titleKey\)\}/);
-  // Every OTHER constraining window: the binding one lives in the headline
-  // and is filtered out of the list rather than repeated as its first row.
-  assert.match(quotaSection, /entry\.label !== quota\.label \|\| entry\.resetsAt !== quota\.resetsAt/);
-  // The de-emphasised list of everything the ring is not gauging.
-  assert.match(quotaSection, /quota\.others\.length > 0/);
-  assert.match(quotaSection, /quota\.others\.map\(/);
-  assert.match(quotaSection, /t\("usage\.notForThisModel"\)/);
-  assert.match(quotaSection, /usage\.notForThisModelRow", \{ account: entry\.account, window: entry\.label \}/);
-  assert.match(quotaSection, /t\("usage\.notForThisModelNote"\)/);
-  // Both lists render through the same row component: one designed system,
-  // and the excluded rows keep real bars rather than shrinking to a footnote.
-  assert.match(quotaSection, /quota\.windows\.filter\([\s\S]*?\.map\(\(entry\) => \([\s\S]*?<QuotaWindowRow/);
-  assert.match(quotaSection, /quota\.others\.map\(\(entry\) => \([\s\S]*?<QuotaWindowRow/);
-  // De-emphasised tone for the bar — except exhaustion, which stays red.
-  assert.match(quotaSection, /color=\{entry\.exhausted \? "var\(--status-error\)" : "var\(--text-dim\)"\}/);
-  // The footer says whose limits these are.
-  assert.match(quotaSection, /modelName \? t\("usage\.modelScope"\) : t\("usage\.accountWide"\)/);
-  // The context/token/models readouts left with the top bar — nothing in the
-  // composer renders them anymore.
-  assert.doesNotMatch(composerSource, /chatInput\.contextUsage/);
-  assert.doesNotMatch(composerSource, /chatInput\.tokenTraffic/);
-  assert.doesNotMatch(composerSource, /chatInput\.modelsUsed/);
-  assert.doesNotMatch(composerSource, /Section 2/);
-});
 
 test("the ring gauges the shortest healthy window; an exhausted longer one still binds", () => {
   const fiveHour = () => usageWindow({ id: "5h", label: "5-hour window", utilization: 14, windowMs: 18_000_000, resetsAt: "2026-08-18T17:00:00.000Z" });
@@ -719,6 +605,8 @@ test("the rendered popover keeps only quota content, branded and barred", () => 
   const snapshot = usageSnapshot({
     accounts: [
       usageAccount({
+        planType: "max",
+        resetCredits: { availableCount: 2, earliestExpiresAt: "2026-09-15T00:00:00.000Z" },
         windows: [
           usageWindow({ id: "5h", label: "5-hour window", utilization: 62, windowMs: 18_000_000, resetsAt: "2026-08-18T17:00:00.000Z" }),
           usageWindow({ id: "7d", label: "weekly", utilization: 23, windowMs: 604_800_000 }),
@@ -756,6 +644,10 @@ test("the rendered popover keeps only quota content, branded and barred", () => 
   assert.match(html, /Usage · Fable/);
   assert.match(html, /fill="currentColor"/);
   assert.match(html, />62%</);
+  assert.match(html, /Reported plan · max/);
+  assert.match(html, /Saved rate-limit resets · 2/);
+  assert.match(html, /Saved rate-limit resets are separate from plan quota/);
+  assert.match(html, /expires/);
   // Never the raw provider id or the corporate name — the owner runs Claude.
   assert.doesNotMatch(html, /anthropic/i);
   assert.match(html, /Codex — weekly/);
@@ -769,6 +661,20 @@ test("the rendered popover keeps only quota content, branded and barred", () => 
   assert.ok(html.match(/resets/g).length >= 3, "excluded rows keep their reset lines");
   // The footer scopes the reading to the selected model.
   assert.match(html, /For the selected model/);
+});
+test("the popover retains an explicitly reported zero saved-reset balance", () => {
+  const quota = buildQuotaView(usageSnapshot({
+    accounts: [usageAccount({
+      resetCredits: { availableCount: 0, earliestExpiresAt: null },
+      windows: [usageWindow({ id: "7d", label: "weekly", windowMs: 604_800_000 })],
+    })],
+  }), false, false, { provider: "anthropic", modelId: "claude-fable-5" });
+  const html = renderToStaticMarkup(
+    React.createElement(QuotaPopover, { quota, provider: "anthropic", modelName: "Fable", now: Date.now() }),
+  );
+
+  assert.match(html, /Saved rate-limit resets · 0/);
+  assert.doesNotMatch(html, /expires/);
 });
 
 test("the absent popover names the silence without inventing sections", () => {

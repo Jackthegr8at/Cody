@@ -145,6 +145,7 @@ function buildAccount(
   const metadata = isRecord(report.metadata) ? report.metadata : {};
   const limits = Array.isArray(report.limits) ? report.limits.filter(isRecord) : [];
   const unlimited = limits.length > 0 && limits.every(isUnlimitedLimit);
+  const resetCredits = buildResetCredits(report.resetCredits);
 
   const windows: UsageWindow[] = [];
   const seenIds = new Set<string>();
@@ -163,7 +164,29 @@ function buildAccount(
     planType: readString(metadata.planType) ?? null,
     unlimited,
     windows,
+    ...(resetCredits ? { resetCredits } : {}),
   };
+}
+/**
+ * OMP's resetCredits is a bank of saved rate-limit resets, not a plan limit or
+ * a flexible-usage dollar balance. Preserve it only when the engine gives a
+ * count; an unrecognized provider payload must not turn into a zero balance.
+ */
+function buildResetCredits(value: unknown): UsageAccount["resetCredits"] {
+  if (!isRecord(value)) return undefined;
+  const availableCount = readNumber(value.availableCount);
+  if (availableCount === undefined) return undefined;
+
+  let earliestExpiresAt: string | null = null;
+  for (const credit of Array.isArray(value.credits) ? value.credits : []) {
+    if (!isRecord(credit)) continue;
+    const expiresAt = toIsoString(readString(credit.expiresAt));
+    if (expiresAt && (earliestExpiresAt === null || expiresAt < earliestExpiresAt)) {
+      earliestExpiresAt = expiresAt;
+    }
+  }
+
+  return { availableCount: Math.max(0, Math.trunc(availableCount)), earliestExpiresAt };
 }
 
 function buildWindow(

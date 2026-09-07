@@ -114,7 +114,7 @@ test("task tool results render a per-subagent summary panel", () => {
   assert.match(html, /Write the code/);
   assert.match(html, /2 subagents/);
   assert.match(html, /999k tok/);
-  assert.match(html, /gpt-5.6/);
+  assert.match(html, /GPT-5.6/);
   assert.match(html, /\u23a4|⤴/);
 });
 

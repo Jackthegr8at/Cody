@@ -33,9 +33,17 @@ export interface UsageWindow {
    * that tier, so it must not be charged against a model of another one.
    */
   tier?: string | null;
-  /** True when the engine reports this window as shared across every model on
-   * the account, which makes it binding no matter which model is selected. */
+  /** Whether the engine marks this bucket shared. A reported tier remains the
+   * authoritative model scope: current OMP reports some tiered buckets as
+   * shared too. */
   shared?: boolean;
+}
+/** A banked rate-limit reset balance actually reported by the engine. This is
+ * separate from subscription quota and from any pay-as-you-go credit balance. */
+export interface UsageResetCredits {
+  availableCount: number;
+  /** Earliest valid reported expiry, or null when no usable expiry was reported. */
+  earliestExpiresAt: string | null;
 }
 
 /** One authenticated account, with every quota window it reports. */
@@ -49,6 +57,8 @@ export interface UsageAccount {
   /** True when every limit on the account is reported as unmetered. */
   unlimited: boolean;
   windows: UsageWindow[];
+  /** Saved rate-limit resets, when the provider explicitly reports them. */
+  resetCredits?: UsageResetCredits;
 }
 
 /** A point-in-time view of every quota-reporting account. */

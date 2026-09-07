@@ -95,20 +95,19 @@ NVIDIA GPU is optional, for local models running inside the distro.
 | **Hermes** | Experimental | ACP chat with approvals, modes and a model picker; memory browser, skills, a settings panel from Hermes' own defaults; sign in with Nous Portal, Claude Pro/Max, ChatGPT and more |
 
 - **Install & update from the UI**: the onboarding picker and
-  Settings → User Accounts → Agent engine install engines on demand and give
-  each an **Update** button (omp also gets one-click "Update now" in the
-  Updates panel and System tab, next to its version check). Updating the
+  Settings → System → Engines install engines on demand and give
+  each an **Update** button, next to its version check. Updating the
   active engine restarts live sessions so nothing runs a stale binary.
-- **One place for API keys**: Settings → API Keys & Providers takes a provider
+- **One place for API keys**: Settings → Providers takes a provider
   key once (Anthropic, OpenAI, OpenRouter, Gemini, Bedrock, …) and hands it to
   every engine as an environment variable, the same way a key set on the
   container would reach it — so switching engines never means re-entering
-  credentials. Subscriptions sign in on the same tab: a Claude Pro/Max
+  credentials. Subscriptions sign in from the same hub: a Claude Pro/Max
   account, ChatGPT for Codex, Nous Portal for Hermes, GitHub Copilot and the
   rest run the engine's OWN login headless — Cody shows the URL, and when the
   browser cannot reach the container you paste the code or the final
   redirect URL back (or type a device code where the provider uses one).
-  omp's model registry lives on the same tab.
+  omp's model registry lives in the same hub, in a provider's own detail view.
 - **Local models stay reachable**: omp's model registry takes custom
   providers; Codex supports `--oss`/custom `model_provider` endpoints; the
   Claude engine honors `ANTHROPIC_BASE_URL`. Any OpenAI/Anthropic-compatible
@@ -164,6 +163,8 @@ updates.
 - **The agent reads its app's console**: the preview Chromium's uncaught exceptions, `console.error` output, failed fetches and 4xx/5xx responses are captured into a bounded per-session ring, and a `read_app_logs` tool hands the model a deduped digest — a render loop logging thousands of identical lines arrives as one entry with a count. When something new breaks, a single line is appended to the next preview tool result rather than streaming logs into the conversation.
 - **Streaming that reads like typing, not teleporting**: replies render through a buffered reveal that absorbs token bursts and stalls into a steady cadence — tool-call boxes and their streaming input included — with shipped defaults and a `/dev/stream-tuner` playground for retuning the feel.
 - **See session state clearly**: context usage, cost, compaction state, and system prompt details in the top bar (engine-dependent), plus an icon-only context ring in the composer that shifts color as usage crosses thresholds and clicks open to a compact summary of used/available/limit, token traffic, and models used.
+- **Pick models without surprise state**: readable names stay consistent across the composer and transcript; the Manage models gear beside Fast opens Settings → Models, while the normal picker remains non-sticky.
+- **See plan limits accurately**: quota follows the selected model's reported bucket (including tier-scoped buckets), saved reset credits are shown separately even at zero, and the reported plan is not reinterpreted.
 - **Configure less from the terminal**: models, provider auth, native omp controls (advisor, approvals, thinking, compaction, memory, retry/fallback), skills, plugins, and project MCP servers — all from Settings when the engine supports them.
 - **Discover skills in-app**: search the public [skills.sh](https://skills.sh) registry from Settings and install skills into your project or user scope without leaving the workspace.
 - **Stay current in-app**: version checks and one-click updates for the engine; Cody itself updates with the container image.

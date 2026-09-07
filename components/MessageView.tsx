@@ -15,6 +15,7 @@ import { useSmoothStreamText, shouldPaceStream, splitMarkdownReveal, splitPlainR
 import { useStreamTuning } from "@/hooks/useStreamTuning";
 import { SubagentStatusIcon } from "./SubagentStatusIcon";
 import { formatCost, formatDuration, formatTokens, shortModel } from "@/lib/subagent-format";
+import { formatModelDisplayName } from "@/lib/model-display";
 import type {
   AgentMessage,
   UserMessage,
@@ -551,7 +552,7 @@ function AssistantMessageView({
         }}
       >
         {message.provider && (
-          <span>{modelNames?.[`${message.provider}:${message.model}`] ?? modelNames?.[message.model] ?? message.model}</span>
+          <span>{formatModelDisplayName(message.model, modelNames?.[`${message.provider}:${message.model}`] ?? modelNames?.[message.model])}</span>
         )}
         {isStreaming && (() => {
           let chars = 0;
