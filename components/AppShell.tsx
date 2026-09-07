@@ -4,7 +4,7 @@ import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
-import { SessionSidebar } from "./SessionSidebar";
+import { SessionSidebar, type DesktopActivity } from "./SessionSidebar";
 import { ToastProvider } from "./ui/toast";
 import { toast } from "./ui/toast";
 import { ChatWindow, type SessionModelUsage } from "./ChatWindow";
@@ -13,7 +13,7 @@ import { TabBar, type Tab } from "./TabBar";
 import { BranchNavigator } from "./BranchNavigator";
 import { ThemePicker } from "./ThemePicker";
 import { TitleBar } from "./TitleBar";
-import { useDesktopShell } from "@/hooks/useDesktopShell";
+import { useDesktopShell, type DesktopStatusUpdate } from "@/hooks/useDesktopShell";
 import { AppWindow, Check, Copy, ExternalLink, Files, GitBranch, History, Info, ListTodo, Menu, PanelLeft, ScrollText, Settings, Terminal, TriangleAlert } from "lucide-react";
 import { formatApiCost, formatCompactNumber, formatPercent, usageToneColor } from "@/lib/format";
 import { translate, useI18n } from "@/lib/i18n";
@@ -191,7 +191,7 @@ export function AppShell() {
   // Phones only: keep the top bar and the docked composer on screen while the
   // soft keyboard is up (see the hook for why 100dvh alone cannot).
   useVisualViewportHeight(isMobile);
-  const { isDesktop } = useDesktopShell();
+  const { isDesktop, updateDesktopStatus } = useDesktopShell();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   // When user clicks +, we only store the cwd — no fake session id
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
@@ -438,13 +438,43 @@ export function AppShell() {
     setSessionStats(stats);
   }, []);
   const [activeSessionCount, setActiveSessionCount] = useState(0);
-  const handleRunningSessionCountChange = useCallback((count: number) => {
-    setActiveSessionCount(count);
+  const [desktopUnreadSessionIds, setDesktopUnreadSessionIds] = useState<string[]>([]);
+  const [desktopActivityReady, setDesktopActivityReady] = useState(false);
+  const handleDesktopActivityChange = useCallback((activity: DesktopActivity) => {
+    setDesktopActivityReady(activity.ready);
+    if (!activity.ready) {
+      setActiveSessionCount(0);
+      setDesktopUnreadSessionIds([]);
+      return;
+    }
+    setActiveSessionCount(activity.activeSessionCount);
+    setDesktopUnreadSessionIds(activity.unreadSessionIds);
   }, []);
   const [activeSubagentCount, setActiveSubagentCount] = useState(0);
   const handleActiveSubagentCountChange = useCallback((count: number) => {
     setActiveSubagentCount(count);
   }, []);
+
+  useEffect(() => {
+    if (!isDesktop || !desktopActivityReady) return;
+    const status: DesktopStatusUpdate = {
+      activeSessions: activeSessionCount,
+      activeSubagents: activeSubagentCount,
+      unread: desktopUnreadSessionIds.length,
+      completed: false,
+      unreadIds: desktopUnreadSessionIds,
+      completionId: null,
+      completionKind: null,
+    };
+    updateDesktopStatus(status);
+  }, [
+    isDesktop,
+    desktopActivityReady,
+    activeSessionCount,
+    activeSubagentCount,
+    desktopUnreadSessionIds,
+    updateDesktopStatus,
+  ]);
   const [copiedSessionField, setCopiedSessionField] = useState<SessionCopyField | null>(null);
   const sessionCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleCopySessionField = useCallback((field: SessionCopyField, value: string) => {
@@ -1165,7 +1195,7 @@ export function AppShell() {
         onInitialRestoreDone={handleInitialRestoreDone}
         refreshKey={refreshKey}
         onSessionDeleted={handleSessionDeleted}
-        onRunningSessionCountChange={handleRunningSessionCountChange}
+        onDesktopActivityChange={handleDesktopActivityChange}
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
         onCwdChange={handleCwdChange}
         onOpenFile={handleOpenFile}

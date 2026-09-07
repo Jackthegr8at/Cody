@@ -125,8 +125,17 @@ Tauri commands, granted to the remote origin `http://localhost:<port>` only:
 | `window_minimize` / `window_toggle_maximize` / `window_close` | titlebar buttons |
 | `window_is_maximized` | initial titlebar state (then event-driven) |
 | `desktop_info` | `{ shellVersion, runtimeVersion, port, gpu: {vendor, name} \| null }` |
+| `desktop_status` | Read the current taskbar/tray activity metadata |
+| `desktop_status_update` | Update active-session, active-subagent, and unread completion metadata |
+| `desktop_mark_read` | Clear the native unread completion marker |
 | `open_external` | open a URL in the default browser |
 | `runtime_update_check` / `runtime_update_apply` | rootfs update flow |
+
+The desktop activity bridge reports the authoritative cross-session running set
+and the persisted unread-completion set. Native indicators stay green while
+any session or subagent is active; once all work is idle, a completion that has
+not been selected again is shown as the pink/number unread marker. Streamed
+messages do not create completion markers individually.
 
 Plus core window events for maximize/unmaximize. Exact capability JSON per
 Tauri research report. External navigation is confined: non-app origins open

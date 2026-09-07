@@ -37,6 +37,12 @@ declare global {
  */
 const ActiveEngineContext = createContext<ActiveEngineInfo | null>(null);
 
+export interface DesktopActivity {
+  activeSessionCount: number;
+  unreadSessionIds: string[];
+  ready: boolean;
+}
+
 interface Props {
   selectedSessionId: string | null;
   /** The active session can exist in memory before its JSONL file is flushed. */
@@ -48,8 +54,8 @@ interface Props {
   onInitialRestoreDone?: () => void;
   refreshKey?: number;
   onSessionDeleted?: (sessionId: string) => void;
-  /** Reports the authoritative cross-session running count to the desktop shell. */
-  onRunningSessionCountChange?: (count: number) => void;
+  /** Reports authoritative cross-session running/unread state to the desktop shell. */
+  onDesktopActivityChange?: (activity: DesktopActivity) => void;
   selectedCwd?: string | null;
   onCwdChange?: (cwd: string | null, projectRoot?: string | null) => void;
   onOpenFile?: (filePath: string, fileName: string) => void;
@@ -539,7 +545,7 @@ function CodyTitle() {
     </button>
   );
 }
-export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, onRunningSessionCountChange, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, onAtMentions, engine = null }: Props) {
+export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, onDesktopActivityChange, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, onAtMentions, engine = null }: Props) {
   const engineId = engine?.id ?? null;
   // Import writes an omp .jsonl into omp's sessions layout and Archive moves
   // one with omp's gc layout; both routes answer 400 "unsupported" under any
@@ -582,6 +588,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
+  const [runningStateReady, setRunningStateReady] = useState(false);
   // Starts empty and hydrates once the engine identity arrives: the stored set
   // is addressed per engine, so before /api/info answers there is no honest
   // key to read. Hydration MERGES rather than replaces — a session that
@@ -622,6 +629,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
         const next = new Set([...prev].filter((id) => existingIds.has(id)));
         return next.size === prev.size ? prev : next;
       });
+      setRunningStateReady(true);
       setError(null);
       if (!showLoading) {
         setSessionRefreshDone(true);
@@ -687,8 +695,12 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   }, [engineId, unreadSessionIds]);
 
   useEffect(() => {
-    onRunningSessionCountChange?.(runningSessionIds.size);
-  }, [onRunningSessionCountChange, runningSessionIds]);
+    onDesktopActivityChange?.({
+      activeSessionCount: runningStateReady ? runningSessionIds.size : 0,
+      unreadSessionIds: runningStateReady ? [...unreadSessionIds] : [],
+      ready: runningStateReady,
+    });
+  }, [onDesktopActivityChange, runningSessionIds, unreadSessionIds, runningStateReady]);
 
   useEffect(() => {
     // Live running status and session-list invalidations arrive via SSE; the
@@ -725,6 +737,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
         if (data.type === "running") {
           sseAuthoritativeRef.current = true;
           setRunningSessionIds(new Set(data.runningSessionIds ?? []));
+          setRunningStateReady(true);
           if (data.refreshSessionList) void loadSessions(false);
         }
       } catch {
@@ -738,23 +751,28 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
 
   useEffect(() => {
     const previous = previousRunningSessionIdsRef.current;
-    const completedInBackground = [...previous].filter((id) => !runningSessionIds.has(id) && id !== selectedSessionId);
+    // Completion is unread until the user selects that session again. The
+    // selected session is included here deliberately: its final response can
+    // arrive after the user has moved away, and the native shell needs the
+    // same completion signal as the sidebar. The selected-session read effect
+    // below still clears a marker when selection changes.
+    const completedSessionIds = [...previous].filter((id) => !runningSessionIds.has(id));
     const newlyRunning = [...runningSessionIds];
 
-    if (completedInBackground.length > 0 || newlyRunning.length > 0) {
+    if (completedSessionIds.length > 0 || newlyRunning.length > 0) {
       setUnreadSessionIds((prev) => {
         const next = new Set(prev);
         newlyRunning.forEach((id) => next.delete(id));
-        completedInBackground.forEach((id) => next.add(id));
+        completedSessionIds.forEach((id) => next.add(id));
         return next;
       });
     }
-    if (completedInBackground.length > 0) {
+    if (completedSessionIds.length > 0) {
       loadSessions(false);
     }
 
     previousRunningSessionIdsRef.current = runningSessionIds;
-  }, [runningSessionIds, selectedSessionId, loadSessions]);
+  }, [runningSessionIds, loadSessions]);
 
   useEffect(() => {
     if (!selectedSessionId) return;
