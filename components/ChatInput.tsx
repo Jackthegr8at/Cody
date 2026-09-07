@@ -40,6 +40,8 @@ import {
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useResetCredits, useUsage } from "@/hooks/useUsage";
+import { useOpenRouterAccount, type UseOpenRouterAccountResult } from "@/hooks/useOpenRouterAccount";
+import { OpenRouterCredits } from "./OpenRouterCredits";
 import { selectBindingWindow, selectWindowsForModel, type ModelRef } from "@/lib/usage/select";
 import type { UsageAccount, UsageSnapshot, UsageWindow, UsageWindowState } from "@/lib/usage/types";
 import { brandAccountLabel } from "@/lib/provider-brand";
@@ -290,6 +292,30 @@ const QUOTA_MODEL_UNMETERED: QuotaAbsentView = {
   others: [],
 };
 
+/** The provider meters spend as a PREPAID BALANCE rather than a refilling
+ *  window (OpenRouter). Saying "no plan limits" here would be false — money
+ *  runs out, and it is the hardest limit there is — so the ring stays blank
+ *  (there is no honest percentage of a balance the user can top up) while the
+ *  credit section below states the real number. */
+const QUOTA_MODEL_PREPAID: QuotaAbsentView = {
+  known: false,
+  color: "var(--text-muted)",
+  titleKey: "usage.prepaidTitle",
+  noteKey: null,
+  scopeKey: "usage.prepaidScope",
+  reason: null,
+  others: [],
+};
+
+/** Providers that bill a prepaid balance instead of a refilling plan window,
+ *  and therefore have a credit balance worth reading. Exported so the composer
+ *  gates its OpenRouter poll on the SAME predicate the quota view branches on:
+ *  a model that shows the prepaid state must be a model whose balance was
+ *  fetched, or the popover says "prepaid" and then shows nothing. */
+export function isPrepaidProvider(provider: string | null | undefined): boolean {
+  return typeof provider === "string" && provider.trim().toLowerCase() === "openrouter";
+}
+
 /** The provider DOES report quota and none of it constrains this model (every
  *  window it reports is scoped to another model tier). Emphatically not the
  *  same as "no limits reported": the quota exists, it just cannot stop this
@@ -451,6 +477,11 @@ export function buildQuotaView(
     const reason = readableReason(snapshot.reason);
 
     if (!match || !modelBinding) {
+      // A prepaid gateway is not a silence at all — it meters spend, just not
+      // in windows. It has to be checked BEFORE the unmetered fallback, which
+      // would otherwise claim "nothing it runs counts against a quota" about
+      // an account that is literally spending money per token.
+      if (isPrepaidProvider(model.provider)) return { ...QUOTA_MODEL_PREPAID, others };
       // Three different silences, and the copy has to tell them apart: no
       // account serves this provider / the account is unmetered / the account
       // reports quota that all belongs to other models.
@@ -645,6 +676,7 @@ function QuotaWindowRow({
  *  SSR tests can render it open, which the composer's own state never is. */
 export function QuotaPopover({
   resetCredits,
+  openRouter,
   quota,
   provider,
   modelName,
@@ -653,6 +685,10 @@ export function QuotaPopover({
   anchorRight = null,
 }: {
   resetCredits?: ReturnType<typeof useResetCredits>;
+  /** OpenRouter's prepaid balance, passed only when an OpenRouter model is
+   * selected. Absent for every other provider — a subscription has no
+   * balance, and the section must not appear for one. */
+  openRouter?: UseOpenRouterAccountResult;
   quota: QuotaView;
   /** Selected model's provider, naming the header before anything binds. */
   provider: string | null;
@@ -763,6 +799,11 @@ export function QuotaPopover({
             {t("usage.reportedPlan", { plan: quota.planType })}
           </div>
         )}
+        {/* The balance sits directly under the headline, before banked resets
+            and other providers' windows: for an OpenRouter model it is THE
+            number that decides whether the next turn runs, so it must not be
+            below the fold of a 320px popover. */}
+        {openRouter && <OpenRouterCredits account={openRouter} />}
         {resetCredits && (
           <section style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
             <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text)" }}>
@@ -2442,6 +2483,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     ),
     [usageSnapshot, usageLoading, usageFailed, quotaProvider, quotaModelId],
   );
+  // The balance is only read when an OpenRouter model is actually selected.
+  // Gating on the same predicate `buildQuotaView` branches on keeps the two
+  // in lockstep: the popover can never say "prepaid" and then have no balance
+  // to show. An Anthropic-only user never issues one of these requests.
+  const openRouterSelected = isPrepaidProvider(quotaProvider);
+  const openRouterAccount = useOpenRouterAccount(openRouterSelected);
   const quotaPercentText = quota.known ? `${Math.round(quota.percent)}%` : "—";
   // The tooltip names the window AND the model it is about, so a ring read at a
   // glance can never be attributed to the wrong conversation.
@@ -2467,11 +2514,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     return () => clearInterval(timer);
   }, [contextPopoverOpen]);
   // Opening the popover is the one moment the number is being read closely.
+  const refreshOpenRouter = openRouterAccount.refresh;
   useEffect(() => {
     if (!contextPopoverOpen) return;
     refreshUsage();
     refreshResetCredits();
-  }, [contextPopoverOpen, refreshUsage, refreshResetCredits]);
+    if (openRouterSelected) refreshOpenRouter();
+  }, [contextPopoverOpen, refreshUsage, refreshResetCredits, openRouterSelected, refreshOpenRouter]);
   // A brand-new conversation must open with an honest ring, and the composer
   // may have been idle for a whole background poll before it. Keyed on the
   // session (draftKey), never on the model: switching models re-filters the
@@ -3720,9 +3769,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             {/* Icon-only plan-quota gauge. The arc tracks the binding quota
                 window; context usage lives in the top bar and, in detail,
                 below the divider inside this popover. Hidden entirely on an
-                engine that reports no plan quota — there the ring could only
-                ever be an empty dashed circle. */}
-              {(quotaReported || Boolean(resetCredits.snapshot?.available)) && (
+                engine that reports no plan quota AND has no prepaid balance to
+                report — there the ring could only ever be an empty dashed
+                circle. An OpenRouter model is a reason to show it even when
+                the engine reports no windows: the popover then carries the
+                credit balance, which is the only spend signal that exists. */}
+              {(quotaReported || openRouterSelected || Boolean(resetCredits.snapshot?.available)) && (
               <div
                 ref={contextPopoverRef}
                 // marginRight doubles the visual space between the gauge and
@@ -3781,6 +3833,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 {contextPopoverOpen && (
                   <QuotaPopover
                     resetCredits={resetCredits}
+                    openRouter={openRouterSelected ? openRouterAccount : undefined}
                     quota={quota}
                     provider={quotaProvider ?? null}
                     modelName={displayModelName}

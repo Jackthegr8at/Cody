@@ -38,6 +38,7 @@ import { ProviderLoginFlow, type ProviderLoginRow } from "../ProviderLoginFlow";
 import { useSaveStatus } from "../SaveStatus";
 import { useSettingsShell } from "../shell-context";
 import { buttonStyle, cardStyle, dangerButtonStyle, describeModels, describeWinning, invalidateProviderReads, missingOptionalHint, pluralModels, primaryButtonStyle, ProviderTile, quietButtonStyle, sectionTitleStyle } from "./controls";
+import { OpenRouterCreditsSection, OpenRouterKeyLimitsSection, OpenRouterRoutingSection } from "./OpenRouterSettings";
 
 export const PROVIDERS_PANEL_ID = "providers";
 
@@ -640,6 +641,10 @@ export function ProviderDetail({ row, response, open, onClose, initialLoginId = 
   const loginMethods = row.methods.filter((method) => method.loginId);
   const keyMethod = row.methods.find((method) => method.kind === "key" || method.kind === "env");
   const custom = row.methods.some((method) => method.kind === "custom");
+  // OpenRouter's extra surface keys off the row id, which is the key-catalogue
+  // id for a joined row — never the brand, which a custom endpoint pointed at
+  // OpenRouter could also wear without being the account this reads.
+  const isOpenRouter = row.id === "openrouter" && !custom;
   const [selectedLogin, setSelectedLogin] = useState<string>(() => initialLoginId ?? loginMethods.find((method) => method.state === "connected")?.loginId ?? loginMethods[0]?.loginId ?? "");
   const currentLogin = loginMethods.find((method) => method.loginId === selectedLogin) ?? loginMethods[0];
   const status = describeWinning(row, shortName);
@@ -798,6 +803,28 @@ export function ProviderDetail({ row, response, open, onClose, initialLoginId = 
         <Section title={custom ? "Verify" : "Check"}>
           <VerifyControl row={row} custom={custom} />
         </Section>
+      )}
+
+      {/* OpenRouter's own surface. Placed after the key (the balance is
+          meaningless without one) and before curation, because "how much is
+          left" and "where does this route" are what people open this drawer
+          for once the key is saved. */}
+      {isOpenRouter && (
+        <>
+          <Section title="Credits">
+            <OpenRouterCreditsSection canEdit={canEdit} />
+          </Section>
+          {canEdit && (
+            <Section title="Key limits">
+              <OpenRouterKeyLimitsSection />
+            </Section>
+          )}
+          {capabilities.models && capabilities.configEditor && canEdit && (
+            <Section title="Routing">
+              <OpenRouterRoutingSection readOnly={readOnly} />
+            </Section>
+          )}
+        </>
       )}
 
       {showCuration && (

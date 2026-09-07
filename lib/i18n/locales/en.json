@@ -1471,5 +1471,21 @@
   "workspace.preview": "Preview",
   "workspace.tasks": "Tasks",
   "workspace.terminal": "Terminal",
-  "workspace.tools": "Workspace tools"
+  "workspace.tools": "Workspace tools",
+  "usage.prepaidTitle": "Pay-as-you-go credits",
+  "usage.prepaidScope": "Prepaid balance · all sessions",
+  "openrouter.creditsTitle": "OpenRouter credits",
+  "openrouter.checking": "Checking credits…",
+  "openrouter.creditsRemaining": "Remaining balance",
+  "openrouter.creditsLow": "Running low — top up to avoid interruptions",
+  "openrouter.creditsEmpty": "Out of credits — requests will fail until you top up",
+  "openrouter.creditsCycle": "{used} spent of {total} purchased",
+  "openrouter.spentToday": "Spent today",
+  "openrouter.keyLimit": "Key limit",
+  "openrouter.keyLimitRemaining": "{remaining} of {limit} left",
+  "openrouter.addCredits": "Add credits",
+  "openrouter.recheck": "Re-check balance",
+  "openrouter.topUpNote": "Credits are purchased on openrouter.ai. Cody re-checks your balance when you come back.",
+  "openrouter.topUpLanded": "{amount} in credits added",
+  "openrouter.topUpNotYet": "No change yet — your balance may take a moment to update."
 }

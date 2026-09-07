@@ -1471,5 +1471,21 @@
   "workspace.preview": "プレビュー",
   "workspace.tasks": "タスク",
   "workspace.terminal": "ターミナル",
-  "workspace.tools": "ワークスペースツール"
+  "workspace.tools": "ワークスペースツール",
+  "usage.prepaidTitle": "従量課金クレジット",
+  "usage.prepaidScope": "プリペイド残高 · すべてのセッション",
+  "openrouter.creditsTitle": "OpenRouter クレジット",
+  "openrouter.checking": "クレジットを確認中…",
+  "openrouter.creditsRemaining": "残高",
+  "openrouter.creditsLow": "残高が少なくなっています — 中断を避けるにはチャージしてください",
+  "openrouter.creditsEmpty": "クレジットが不足しています — チャージするまでリクエストは失敗します",
+  "openrouter.creditsCycle": "購入額 {total} のうち {used} を使用",
+  "openrouter.spentToday": "本日の使用額",
+  "openrouter.keyLimit": "キーの上限",
+  "openrouter.keyLimitRemaining": "{limit} のうち {remaining} が残っています",
+  "openrouter.addCredits": "クレジットを追加",
+  "openrouter.recheck": "残高を再確認",
+  "openrouter.topUpNote": "クレジットは openrouter.ai で購入します。戻ってくると Cody が残高を再確認します。",
+  "openrouter.topUpLanded": "{amount} のクレジットが追加されました",
+  "openrouter.topUpNotYet": "まだ変化がありません — 残高の更新には少し時間がかかる場合があります。"
 }

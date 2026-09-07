@@ -1471,5 +1471,21 @@
   "workspace.preview": "预览",
   "workspace.tasks": "任务",
   "workspace.terminal": "终端",
-  "workspace.tools": "工作区工具"
+  "workspace.tools": "工作区工具",
+  "usage.prepaidTitle": "按量付费额度",
+  "usage.prepaidScope": "预付余额 · 所有会话",
+  "openrouter.creditsTitle": "OpenRouter 额度",
+  "openrouter.checking": "正在查询额度…",
+  "openrouter.creditsRemaining": "剩余余额",
+  "openrouter.creditsLow": "余额不足 — 请充值以避免中断",
+  "openrouter.creditsEmpty": "额度已用尽 — 充值前请求将会失败",
+  "openrouter.creditsCycle": "已用 {used}，共购买 {total}",
+  "openrouter.spentToday": "今日消费",
+  "openrouter.keyLimit": "密钥限额",
+  "openrouter.keyLimitRemaining": "限额 {limit} 中剩余 {remaining}",
+  "openrouter.addCredits": "充值额度",
+  "openrouter.recheck": "重新查询余额",
+  "openrouter.topUpNote": "额度需在 openrouter.ai 购买。返回后 Cody 会重新查询你的余额。",
+  "openrouter.topUpLanded": "已添加 {amount} 额度",
+  "openrouter.topUpNotYet": "暂无变化 — 余额可能需要一点时间才会更新。"
 }
