@@ -14,6 +14,7 @@
 import { createContext, useContext, type ReactNode } from "react";
 import type { ActiveEngineInfo, EngineCapabilities, PlatformInfo, SettingsTab } from "../SettingsTabs";
 import type { SettingsSectionId } from "./registry";
+import type { ActivityDisplayMode } from "@/lib/types";
 
 /** One model as the open session reports it (`availableModels` off get_state):
  * the catalog an ACP engine has, since it keeps no global registry. */
@@ -78,8 +79,8 @@ export interface SettingsShellCallbacks {
 /** Browser-local UI preferences AppShell owns because ChatWindow reads them
  * every render; Preferences edits them through these setters. */
 export interface SettingsShellPrefs {
-  toolCallsDefaultCollapsed: boolean;
-  setToolCallsDefaultCollapsed: (collapsed: boolean) => void;
+  activityDisplayMode: ActivityDisplayMode;
+  setActivityDisplayMode: (mode: ActivityDisplayMode) => void;
   thinkingDefaultExpanded: boolean;
   setThinkingDefaultExpanded: (expanded: boolean) => void;
   /** The browser-side advisor default, the fallback the Enable Advisor card

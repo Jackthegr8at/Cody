@@ -25,8 +25,24 @@ export function siblingDirForSession(sessionFilePath: string): string {
   return join(dirname(sessionFilePath), basename(sessionFilePath, ".jsonl"));
 }
 
+/** User supplied task names are permissive, but remain one safe filesystem
+ * component: no separators/control characters/traversal and a bounded UTF-8
+ * filename length. */
+export const MAX_SUBAGENT_ID_BYTES = 255;
+
+export function isSafeSubagentId(value: string): boolean {
+  if (typeof value !== "string" || value.length === 0 || value === "." || value === "..") return false;
+  if (value.includes("/") || value.includes(String.fromCharCode(92))) return false;
+  if ([...value].some((char) => {
+    const code = char.codePointAt(0) ?? 0;
+    return code < 0x20 || (code >= 0x7f && code <= 0x9f);
+  })) return false;
+  return Buffer.byteLength(value, "utf8") <= MAX_SUBAGENT_ID_BYTES;
+}
+
 /** Subagent transcript path for a roster id within a parent session. */
 export function subagentTranscriptPath(sessionFilePath: string, subagentId: string): string {
+  if (!isSafeSubagentId(subagentId)) throw new Error("Invalid subagent id");
   return join(siblingDirForSession(sessionFilePath), `${subagentId}.jsonl`);
 }
 
@@ -41,6 +57,7 @@ export function resolveSubagentArtifact(
   subagentId: string,
   extension: ".jsonl" | ".md",
 ): string | null {
+  if (!isSafeSubagentId(subagentId)) return null;
   let realDir: string;
   try {
     realDir = realpathSync(siblingDirForSession(sessionFilePath));
@@ -263,19 +280,28 @@ export interface SubagentTranscriptPage {
   error?: string;
   /** Full file size — lets the dialog hide Load more once fully read. */
   totalBytes?: number;
+  previousByte?: number;
+  hasEarlier?: boolean;
+}
+
+interface TranscriptPageOptions {
+  tail?: boolean;
+  before?: boolean;
 }
 
 /**
  * Byte-window transcript paging mirroring omp's readRpcSubagentTranscript:
  * parse complete lines from `fromByte`, return UI messages + nextByte.
  */
-export function readSubagentTranscriptPage(sessionFilePath: string, fromByte = 0): SubagentTranscriptPage {
+export function readSubagentTranscriptPage(sessionFilePath: string, fromByte = 0, options: TranscriptPageOptions = {}): SubagentTranscriptPage {
+  const normalizedFrom = typeof fromByte === "number" && Number.isFinite(fromByte) ? Math.max(0, Math.trunc(fromByte)) : 0;
   const empty: SubagentTranscriptPage = {
     sessionFile: sessionFilePath,
-    fromByte: typeof fromByte === "number" && Number.isFinite(fromByte) ? Math.max(0, Math.trunc(fromByte)) : 0,
-    nextByte: typeof fromByte === "number" && Number.isFinite(fromByte) ? Math.max(0, Math.trunc(fromByte)) : 0,
+    fromByte: normalizedFrom,
+    nextByte: normalizedFrom,
     reset: false,
     messages: [],
+    hasEarlier: false,
   };
   let size: number;
   try {
@@ -283,37 +309,52 @@ export function readSubagentTranscriptPage(sessionFilePath: string, fromByte = 0
   } catch {
     return empty;
   }
-  let startByte = empty.fromByte;
+  let startByte = normalizedFrom;
   let reset = false;
-  if (startByte > size) {
+  if (!options.before && startByte > size) {
     startByte = 0;
     reset = true;
   }
   if (size > MAX_SUBAGENT_TRANSCRIPT_BYTES) {
     return { ...empty, fromByte: startByte, nextByte: startByte, reset, error: "Subagent transcript exceeds the readable size limit" };
   }
-  const endByte = Math.min(size, startByte + SUBAGENT_TRANSCRIPT_PAGE_BYTES);
-  let body: string;
+  let full: Buffer;
   try {
-    // Slice the BYTE buffer, not the decoded string: `startByte` is a UTF-8
-    // offset, while string indices are UTF-16 code units — slicing the string
-    // misaligns every later page once non-ASCII text precedes the offset.
-    body = readFileSync(sessionFilePath).subarray(startByte, endByte).toString("utf8");
+    full = readFileSync(sessionFilePath);
   } catch {
     return { ...empty, fromByte: startByte, nextByte: startByte, reset };
   }
-  const lastNewline = body.lastIndexOf("\n");
-  const completeText = lastNewline >= 0 ? body.slice(0, lastNewline + 1) : "";
+  // Callers normally pass offsets returned by this helper, but normalize an
+  // arbitrary byte offset too: every decoded page starts at a complete JSONL
+  // record and therefore at a UTF-8 character boundary.
+  if (startByte > 0 && full[startByte - 1] !== 0x0a) {
+    startByte = full.lastIndexOf(0x0a, startByte - 1) + 1;
+  }
+  if (options.tail && startByte === 0 && size > SUBAGENT_TRANSCRIPT_PAGE_BYTES) {
+    const tailBoundary = full.lastIndexOf(0x0a, Math.max(0, size - SUBAGENT_TRANSCRIPT_PAGE_BYTES) - 1);
+    if (tailBoundary >= 0) startByte = tailBoundary + 1;
+  }
+  if (options.before) {
+    const requestedEnd = Math.min(size, startByte);
+    const endByte = requestedEnd > 0 && full[requestedEnd - 1] === 0x0a
+      ? requestedEnd
+      : full.lastIndexOf(0x0a, Math.max(0, requestedEnd - 1)) + 1;
+    const candidateStart = Math.max(0, endByte - SUBAGENT_TRANSCRIPT_PAGE_BYTES);
+    const breakAt = candidateStart === 0 ? -1 : full.lastIndexOf(0x0a, candidateStart - 1);
+    const pageStart = breakAt >= 0 ? breakAt + 1 : 0;
+    const body = full.subarray(pageStart, endByte).toString("utf8");
+    const entries = body.length > 0 ? parseJsonlLenient<SessionEntry>(body) : [];
+    const messages = entries.map((entry) => entryToUiMessage(entry, {})).filter((message): message is AgentMessage => message !== null);
+    return { sessionFile: sessionFilePath, fromByte: pageStart, nextByte: endByte, previousByte: pageStart, hasEarlier: pageStart > 0, reset: false, messages, totalBytes: size };
+  }
+  const windowEnd = options.tail && normalizedFrom === 0 ? size : Math.min(size, startByte + SUBAGENT_TRANSCRIPT_PAGE_BYTES);
+  let newline = full.lastIndexOf(0x0a, Math.max(startByte, windowEnd - 1));
+  if (newline < startByte) newline = full.indexOf(0x0a, startByte);
+  const endByte = newline >= startByte ? newline + 1 : startByte;
+  const completeText = full.subarray(startByte, endByte).toString("utf8");
   const entries = completeText.length > 0 ? parseJsonlLenient<SessionEntry>(completeText) : [];
-  const messages = entries
-    .map((entry) => entryToUiMessage(entry, {}))
-    .filter((message): message is AgentMessage => message !== null);
-  let nextByte = startByte + Buffer.byteLength(completeText, "utf8");
-  // Guarantee forward progress: when the window ends mid-line and more
-  // content remains, the partial line has no newline to complete it — skip
-  // it instead of returning the same offset forever.
-  if (nextByte === startByte && endByte < size) nextByte = endByte;
-  return { sessionFile: sessionFilePath, fromByte: startByte, nextByte, reset, messages, totalBytes: size };
+  const messages = entries.map((entry) => entryToUiMessage(entry, {})).filter((message): message is AgentMessage => message !== null);
+  return { sessionFile: sessionFilePath, fromByte: startByte, nextByte: endByte, previousByte: startByte, hasEarlier: startByte > 0, reset, messages, totalBytes: size };
 }
 
 /**

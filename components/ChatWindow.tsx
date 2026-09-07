@@ -2,9 +2,9 @@
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ChevronDown, TriangleAlert, X } from "lucide-react";
-import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, ImageContent, SessionInfo, SessionTreeNode, TextContent, ToolCallContent, ToolResultMessage } from "@/lib/types";
+import type { ActivityDisplayMode, AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, ImageContent, SessionInfo, SessionTreeNode, TextContent, ToolCallContent, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
-import { countToolCallBlocks, getDisplayableAssistantBlocks, groupHasThinking, splitFinalAssistantBlocks } from "@/lib/message-display";
+import { countToolCallBlocks, getDisplayableAssistantBlocks, isVisibleTranscriptMessage, groupHasThinking, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { estimateTurnHeight, type TurnContentSignal } from "@/lib/turn-height-estimate";
 import { imageSource, MessageView } from "./MessageView";
 import { ClickableImage } from "./ImageLightbox";
@@ -48,8 +48,8 @@ interface Props {
   /** Who the active engine is, for labels that used to say "omp" whatever
    * was running. Null until `/api/info` answers. */
   engine?: ActiveEngineInfo | null;
-  toolCallsDefaultCollapsed?: boolean;
   thinkingDefaultExpanded?: boolean;
+  activityDisplayMode?: ActivityDisplayMode;
   onAgentEnd?: () => void;
   /** The server gave a nameless session a name — reload the session list. */
   onSessionNamed?: () => void;
@@ -68,8 +68,6 @@ interface Props {
    * session popover. Null on unmount so a closed chat clears the readout. */
   onModelUsageChange?: (usage: SessionModelUsage[] | null) => void;
   onOpenFile?: (filePath: string) => void;
-  /** Opens model catalog and curation from the composer. */
-  onOpenModels?: () => void;
   onOpenPreview?: (url: string, sessionId?: string) => void;
   onPreviewUrlsSeen?: (urls: string[], sessionId?: string) => void;
   /** The open session's own model catalog, for engines that publish models
@@ -405,8 +403,8 @@ interface CommittedTranscriptProps {
   messageCwd: string | undefined;
   onOpenFile?: (filePath: string) => void;
   sessionId: string | undefined;
-  toolCallsDefaultCollapsed: boolean;
   thinkingDefaultExpanded: boolean;
+  activityDisplayMode: ActivityDisplayMode;
   visibleCount: number;
   /** True while the viewport is near the bottom of the conversation. When
    *  false (user is reading history), the render window anchors its top so
@@ -528,7 +526,7 @@ function turnClassName(live: boolean, compact: boolean): string {
 const CommittedTranscript = memo(function CommittedTranscript({
   messages, entryIds, conversationMeta, messageRefs, isStreaming, sessionBusy, isNew, forkingEntryId,
   canFork, handleFork, handleNavigate, handleEditContent, modelNames, messageCwd, onOpenFile, sessionId,
-  toolCallsDefaultCollapsed, thinkingDefaultExpanded, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
+  activityDisplayMode, thinkingDefaultExpanded, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
 }: CommittedTranscriptProps) {
   const { t } = useI18n();
   const { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage } = conversationMeta;
@@ -585,8 +583,8 @@ const CommittedTranscript = memo(function CommittedTranscript({
         showTimestamp={showTimestamp}
         prevTimestamp={idx > 0 ? (messages[idx - 1] as AgentMessage & { timestamp?: number }).timestamp : undefined}
         sessionId={sessionId}
-        toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
         thinkingDefaultExpanded={thinkingDefaultExpanded}
+        activityDisplayMode={activityDisplayMode}
       />
     );
   };
@@ -615,8 +613,9 @@ const CommittedTranscript = memo(function CommittedTranscript({
           <ProcessDetailsGroup
             messageCount={unit.processIndices.length + (unit.finalProcessMessage ? 1 : 0)}
             toolCallCount={countToolCalls(messages, unit.processIndices) + countToolCallBlocks(processBlocks)}
-            resultImages={collectGroupResultImages(messages, unit.processIndices, toolResultsMap, processBlocks)}
-            defaultExpanded={thinkingDefaultExpanded && groupHasThinking(messages, unit.processIndices, processBlocks)}
+            resultImages={activityDisplayMode === "full" ? collectGroupResultImages(messages, unit.processIndices, toolResultsMap, processBlocks) : undefined}
+            key={activityDisplayMode}
+            defaultExpanded={activityDisplayMode === "full" || (thinkingDefaultExpanded && groupHasThinking(messages, unit.processIndices, processBlocks))}
           >
             {unit.processIndices.map((processIdx) => renderMessage(processIdx, { keyPrefix: "process" }))}
             {unit.finalProcessMessage && renderMessage(unit.finalAssistantIdx, { keyPrefix: "process-final", messageOverride: unit.finalProcessMessage, showTimestamp: false })}
@@ -639,8 +638,27 @@ const CommittedTranscript = memo(function CommittedTranscript({
   };
 
   const units = useMemo(
-    () => buildTranscriptUnits(messages, lastAnchorIdx, sessionBusy || isStreaming),
-    [messages, lastAnchorIdx, sessionBusy, isStreaming],
+    () => {
+      const planned = buildTranscriptUnits(messages, lastAnchorIdx, sessionBusy || isStreaming);
+      if (activityDisplayMode !== "hidden") return planned;
+      const visible: TranscriptUnit[] = [];
+      for (const unit of planned) {
+        if (unit.kind === "process") {
+          for (const idx of unit.processIndices) {
+            if (isVisibleTranscriptMessage(messages[idx], activityDisplayMode, toolResultsMap)) {
+              visible.push({ kind: "message", idx, estimatedHeight: estimateTurnHeight(turnContentSignal(messages[idx])) });
+            }
+          }
+          if (unit.finalProcessMessage && isVisibleTranscriptMessage(unit.finalProcessMessage, activityDisplayMode, toolResultsMap)) {
+            visible.push({ kind: "answer", idx: unit.finalAssistantIdx, message: unit.finalProcessMessage, estimatedHeight: estimateTurnHeight(turnContentSignal(unit.finalProcessMessage)) });
+          }
+        } else if (isVisibleTranscriptMessage(unit.kind === "answer" ? unit.message : messages[unit.idx], activityDisplayMode, toolResultsMap)) {
+          visible.push(unit);
+        }
+      }
+      return visible;
+    },
+    [messages, lastAnchorIdx, sessionBusy, isStreaming, activityDisplayMode, toolResultsMap],
   );
 
   // Anchor the render window while the user is reading history: the plain
@@ -682,11 +700,10 @@ const CommittedTranscript = memo(function CommittedTranscript({
     </>
   );
 });
-
 /** Memoized: AppShell holds ~60 state values (git badge polls, update checks,
  *  the context-usage tick ChatWindow itself pushes up), and each of those
  *  re-renders would otherwise rebuild this whole tree. */
-export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, advisorEnabled: advisorPreferred, capabilities = ALL_CAPABILITIES, engine = null, toolCallsDefaultCollapsed = true, thinkingDefaultExpanded = false, onAgentEnd, onSessionNamed, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onActiveSubagentCountChange, onSessionStatsPanelOpen, onContextUsageChange, onModelUsageChange, onOpenFile, onOpenModels, onOpenPreview, onPreviewUrlsSeen, onSessionModelsChange }: Props) {
+export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, advisorEnabled: advisorPreferred, capabilities = ALL_CAPABILITIES, engine = null, activityDisplayMode = "compact", thinkingDefaultExpanded = false, onAgentEnd, onSessionNamed, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onActiveSubagentCountChange, onSessionStatsPanelOpen, onContextUsageChange, onModelUsageChange, onOpenFile, onOpenPreview, onPreviewUrlsSeen, onSessionModelsChange }: Props) {
   const { t, tn } = useI18n();
   // The three flags this file reasons about most, unpacked once. They are
   // derived from the prop rather than passed as separate props so that every
@@ -720,14 +737,14 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
 
   const {
     loading, error, messages, entryIds, streamState,
-    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelSelectable, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, fastModeEnabled, fastModeActive, toolPreset,
+    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelSelectable, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, fastModeEnabled, fastModeActive, promptCapabilities, steeringSupported,
     liveModelMeta, availableModes, currentModeId,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactResult, displayModel: displayModelValue, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
     notices, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     permissionRequests, respondToPermission,
-    isAutoModelSelection, autoModelSwitch, markSmartPinnedModel,
+    isAutoModelSelection, autoModelSwitch,
     agentPhase, streamDegraded, streamAlert, dismissStreamAlert, retryEventStream, activeGoal, activePlan,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
     isNew,
@@ -736,7 +753,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     removeQueuedMessage, promoteQueuedToSteer,
     handleBuiltinSlashCommand,
-    handleThinkingLevelChange, handleModeChange, handleFastModeChange, handleToolPresetChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
+    handleThinkingLevelChange, handleModeChange, handleFastModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
   } = useAgentSession({
     session, newSessionCwd, advisorEnabled, subagentsCapable, engineName: engine?.shortName, thinkingDefaultExpanded, onAgentEnd: wrappedOnAgentEnd, onSessionNamed, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
@@ -1098,10 +1115,12 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       ref={chatInputRef}
       onSend={handleSend}
       onAbort={handleAbort}
-      onSteer={chatExtras && agentRunning ? handleSteer : undefined}
+      onSteer={(chatExtras || steeringSupported) && agentRunning ? handleSteer : undefined}
       onFollowUp={chatExtras && agentRunning ? handleFollowUp : undefined}
       onPromptWithStreamingBehavior={chatExtras && agentRunning ? handlePromptWithStreamingBehavior : undefined}
       isStreaming={sessionBusy}
+      canAttachWhileStreaming={(chatExtras || steeringSupported) && agentRunning}
+      canAttachImagesWhileStreaming={(chatExtras || (steeringSupported && promptCapabilities.imageSupported)) && agentRunning}
       capabilities={capabilities}
       engine={engine}
       model={displayModelValue}
@@ -1113,7 +1132,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       modelsRefreshKey={modelsRefreshKey}
       onModelChange={canChangeModel ? handleModelChange : undefined}
       onSelectSmartModel={smartModelCapable && isNew ? selectSmartModel : undefined}
-      onSmartModelPinned={smartModelCapable ? markSmartPinnedModel : undefined}
       autoModelSwitch={autoModelSwitch}
       onAbortCompaction={handleAbortCompaction}
       isCompacting={isCompacting}
@@ -1125,11 +1143,9 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       onModeChange={availableModes.length > 0 ? handleModeChange : undefined}
       fastModeEnabled={fastModeEnabled}
       fastModeActive={fastModeActive}
-      fastModeSupported={fastModeCapable && chatExtras && Boolean(displayModelValue && modelList.some((entry) => entry.provider === displayModelValue.provider && entry.id === displayModelValue.modelId && entry.supportsFastMode))}
-      onFastModeChange={session || isNew ? handleFastModeChange : undefined}
-      onOpenModels={onOpenModels}
-      toolPreset={toolPreset}
-      onToolPresetChange={chatExtras ? handleToolPresetChange : undefined}
+      fastModeCapable={fastModeCapable}
+      fastModeSupported={Boolean(displayModelValue && modelList.some((entry) => entry.provider === displayModelValue.provider && entry.id === displayModelValue.modelId && entry.supportsFastMode))}
+      onFastModeChange={fastModeCapable && (session || isNew) ? handleFastModeChange : undefined}
       onAbortRetry={session ? handleAbortRetry : undefined}
       availableThinkingLevels={availableThinkingLevels}
       thinkingLevelMap={currentThinkingLevelMap}
@@ -1342,7 +1358,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
               messageCwd={messageCwd}
               onOpenFile={onOpenFile}
               sessionId={session?.id ?? sessionIdRef.current ?? undefined}
-              toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
+              activityDisplayMode={activityDisplayMode}
               thinkingDefaultExpanded={thinkingDefaultExpanded}
               visibleCount={visibleCount}
               nearBottom={nearBottom}
@@ -1350,10 +1366,10 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
               handleLoadMoreClick={handleLoadMoreClick}
             />
             {streamState.isStreaming && streamState.streamingMessage && (
-              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} thinkingDefaultExpanded={thinkingDefaultExpanded} />
+              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} />
             )}
 
-            {toolCallsDefaultCollapsed && pendingToolHeaders.map((tool) => (
+            {activityDisplayMode === "compact" && pendingToolHeaders.map((tool) => (
               <div
                 key={tool.id}
                 className="chat-block-in"

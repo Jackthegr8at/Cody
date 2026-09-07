@@ -7,6 +7,7 @@ import type { EngineEvent, EngineSession, EngineSessionOptions, EngineUsage } fr
 import { getEngineSession, upsertEngineSession } from "./engine-sessions";
 import { EngineCommandError } from "./errors";
 import { engineChildEnv } from "./provider-keys";
+import { validateAgentImages } from "../image-attachments";
 
 /**
  * A live chat session driven over the Agent Client Protocol.
@@ -94,7 +95,22 @@ export interface AcpMcpServer {
  * "unsupported" per session when the agent published no model selector (see
  * setModel). A command in this set is a promise about Cody, not about the
  * engine on the other end of the pipe. */
-const SUPPORTED_COMMANDS = new Set(["prompt", "abort", "get_state", "get_messages", "respond_permission", "set_model", "set_mode"]);
+const SUPPORTED_COMMANDS = new Set(["prompt", "steer", "abort", "get_state", "get_messages", "respond_permission", "set_model", "set_mode"]);
+interface AcpPromptCapabilities {
+  image: boolean;
+  steering: boolean;
+}
+
+/** Read only the two extension capabilities Cody can faithfully implement.
+ * Both are negotiated at initialize, before a session exists. */
+export function readPromptCapabilities(raw: unknown): AcpPromptCapabilities {
+  if (!raw || typeof raw !== "object") return { image: false, steering: false };
+  const response = raw as { agentCapabilities?: { promptCapabilities?: { image?: unknown } }; _meta?: { steering?: { supported?: unknown } } };
+  return {
+    image: response.agentCapabilities?.promptCapabilities?.image === true,
+    steering: response._meta?.steering?.supported === true,
+  };
+}
 
 /** One choice the AGENT offered for a permission request. Cody renders the
  * agent's own options rather than inventing Allow/Deny buttons: only the agent
@@ -311,9 +327,22 @@ const KILL_GRACE_MS = 3_000;
 /** How much agent stderr is kept to explain a failed start. */
 const STDERR_TAIL_LIMIT = 4_000;
 
+type AcpPromptContent = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
+
 interface AcpMessage {
   role: "user" | "assistant";
-  content: Array<{ type: "text"; text: string }>;
+  content: AcpPromptContent[];
+}
+
+/** The steering extension's public response vocabulary. Both published
+ * adapters return these values; unknown results are rejected rather than
+ * guessed into a successful send. */
+function readSteeringOutcome(raw: unknown): "injected" | "startedNewTurn" | "promptRequired" | "failed" | null {
+  if (!raw || typeof raw !== "object") return null;
+  const outcome = (raw as { outcome?: unknown }).outcome;
+  return outcome === "injected" || outcome === "startedNewTurn" || outcome === "promptRequired" || outcome === "failed"
+    ? outcome
+    : null;
 }
 
 /** Node streams → the Web streams the SDK's ndJsonStream expects. */
@@ -531,6 +560,8 @@ export class AcpEngineSession implements EngineSession {
   private models: AcpModelSurface | null = null;
   /** The session's modes, when the agent offers any (see readModeSurface). */
   private modes: AcpModeSurface | null = null;
+  /** Capabilities advertised by this particular ACP server at initialize. */
+  private promptCapabilities: AcpPromptCapabilities = { image: false, steering: false };
   /** Recent agent stderr, reported only if the connection fails. */
   private stderrTail = "";
   destroyPromise: Promise<void> | null = null;
@@ -601,6 +632,8 @@ export class AcpEngineSession implements EngineSession {
     switch (type) {
       case "prompt":
         return this.prompt(command);
+      case "steer":
+        return this.steer(command);
       case "abort":
         return this.abort();
       case "respond_permission":
@@ -731,7 +764,8 @@ export class AcpEngineSession implements EngineSession {
       // terminals land here when phase 2 wires their handlers.
       clientCapabilities: {},
     });
-    await initialized;
+    const initializedResponse = await initialized;
+    this.promptCapabilities = readPromptCapabilities(initializedResponse);
     // The agent is up and speaking ACP. Everything past this point can need
     // the user's account, so this is the last point a check can reach without
     // one.
@@ -1045,6 +1079,7 @@ export class AcpEngineSession implements EngineSession {
    * than that surface as a FAILED send: the user's message rolled back out
    * of the transcript and into the composer, under a banner promising the
    * prompt never started, while the agent carried on working. The turn
+
    * engines return as soon as the turn is launched; this now matches them.
    */
   private async prompt(command: Record<string, unknown>): Promise<null> {
@@ -1060,23 +1095,76 @@ export class AcpEngineSession implements EngineSession {
         "session_busy",
       );
     }
-    const text = typeof command.message === "string" ? command.message : "";
-    this.messages.push({ role: "user", content: [{ type: "text", text }] });
+    const prompt = this.promptContent(command, "prompt");
+    this.messages.push({ role: "user", content: prompt });
     this.emit({ type: "agent_start" });
     this.emit({ type: "turn_start" });
-    this.turn = this.runTurn(connection, text).finally(() => {
+    this.turn = this.runTurn(connection, prompt).finally(() => {
       this.turn = null;
     });
     return null;
   }
+  /** Build the exact ACP content array sent on a prompt or steering request.
+   * Image bytes are never converted to text or dropped: an agent that did not
+   * advertise image input is told the command is unsupported instead. */
+  private promptContent(command: Record<string, unknown>, commandType: "prompt" | "steer"): AcpPromptContent[] {
+    const imageError = validateAgentImages(command.images);
+    if (imageError) throw new EngineCommandError(commandType, imageError, "invalid_images");
+    const images = Array.isArray(command.images)
+      ? command.images as Extract<AcpPromptContent, { type: "image" }>[]
+      : [];
+    if (images.length > 0 && !this.promptCapabilities.image) {
+      throw new EngineCommandError(commandType, this.spec.name + " did not advertise image prompt support", "unsupported");
+    }
+    const text = typeof command.message === "string" ? command.message : "";
+    return [{ type: "text", text }, ...images.map(({ data, mimeType }) => ({ type: "image" as const, data, mimeType }))];
+  }
+
+  /** Inject content into the active ACP turn. This intentionally neither
+   * replaces nor settles this.turn: the original session/prompt owns its
+   * terminal events, including a pre-empted agent cycle. */
+  private async steer(command: Record<string, unknown>): Promise<unknown> {
+    await this.ensureReady();
+    if (!this.promptCapabilities.steering) {
+      throw new EngineCommandError("steer", this.spec.name + " did not advertise steering support", "unsupported");
+    }
+    if (!this.turn) {
+      throw new EngineCommandError("steer", this.spec.name + " has no active turn to steer", "session_idle");
+    }
+    const connection = this.connection;
+    if (!connection || !this.acpSessionId) {
+      throw new EngineCommandError("steer", this.spec.name + " session is not ready", "session_dead");
+    }
+    const result = await connection.agent.request("_session/steering", {
+      sessionId: this.acpSessionId,
+      prompt: this.promptContent(command, "steer"),
+      // Agents that implement the extension's idle opt-in return
+      // promptRequired instead of quietly starting an unowned turn.
+      _meta: { steering: { idleBehavior: "promptRequired" } },
+    });
+    const outcome = readSteeringOutcome(result);
+    if (outcome === "injected") return result;
+    if (outcome === "startedNewTurn") {
+      // A server ignored the idle opt-in and raced the original prompt's
+      // completion. It has begun a turn Cody cannot own a prompt response
+      // for, so stop it rather than leave the UI permanently running.
+      await connection.agent.notify("session/cancel", { sessionId: this.acpSessionId }).catch(() => {});
+      throw new EngineCommandError("steer", this.spec.name + " started an untracked turn while steering", "session_idle");
+    }
+    if (outcome === "promptRequired") {
+      throw new EngineCommandError("steer", this.spec.name + " no longer has an active turn to steer", "session_idle");
+    }
+    throw new EngineCommandError("steer", this.spec.name + " did not accept the steering request", "steering_failed");
+  }
+
 
   /** The detached body of one turn. Never rejects: a failure is reported to
    * the session as events, because by now nobody is awaiting a promise. */
-  private async runTurn(connection: ClientConnection, text: string): Promise<void> {
+  private async runTurn(connection: ClientConnection, prompt: AcpPromptContent[]): Promise<void> {
     try {
       const result = await connection.agent.request("session/prompt", {
         sessionId: this.acpSessionId,
-        prompt: [{ type: "text", text }],
+        prompt,
       });
       const answered = this.stream.open;
       this.finishTurn();
@@ -1164,6 +1252,10 @@ export class AcpEngineSession implements EngineSession {
         }))
         : [],
       modelSelectable: this.models !== null,
+      // Input and steering are negotiated with THIS live ACP server at
+      // initialize. Absent capability advertisements are false, never guesses.
+      imageSupported: this.promptCapabilities.image,
+      steeringSupported: this.promptCapabilities.steering,
       // The agent's own permission postures, for a composer control that
       // exists only when the agent offers one — nothing here is invented.
       availableModes: this.modes ? this.modes.options.map((option) => ({ ...option })) : [],

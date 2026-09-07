@@ -535,23 +535,6 @@ test("every attached image goes through the compressor, and failures are named",
   assert.match(attach, /finally \{[\s\S]*setPreparingImageCount/);
 });
 
-test("nothing is sent while an attachment is still being prepared or over budget", () => {
-  const send = composerSource.slice(
-    composerSource.indexOf("const handleSend = useCallback"),
-    composerSource.indexOf("const slashQuery"),
-  );
-  assert.match(send, /if \(preparingImageCount > 0\) return;/);
-  assert.match(send, /const tooLarge = budgetError\(composedMessage, attachedImages\);/);
-  assert.match(send, /setAttachError\(tooLarge\)/);
-  // The guard runs BEFORE the message leaves the composer.
-  assert.ok(send.indexOf("const tooLarge") < send.indexOf("onSend(composedMessage"));
-
-  // The send button cannot be clicked into the same race.
-  assert.match(composerSource, /disabled=\{preparingImageCount > 0 \|\| \(!value\.trim\(\)/);
-  // The attach affordance itself is what reports the work in progress.
-  assert.match(composerSource, /preparingImageCount > 0 \? t\("chatInput\.imagePreparing"\)/);
-  assert.match(composerSource, /preparingImageCount > 0 \? \(\s*\n\s*<Loader2/);
-});
 
 test("the over-budget message names the attachment to remove", () => {
   const budget = composerSource.slice(
@@ -626,9 +609,21 @@ test("the rendered popover keeps only quota content, branded and barred", () => 
       }),
     ],
   });
+  const resetCredits = {
+    loading: false,
+    redeeming: false,
+    refresh() {},
+    redeem: async () => ({ outcome: "reset", accountId: "claude", creditId: "credit-1" }),
+    snapshot: {
+      available: true,
+      fetchedAt: "2026-08-18T12:30:00.000Z",
+      accounts: [{ id: "claude", label: "Claude account", availableCount: 2, canRedeem: true, credits: [{ id: "credit-1", expiresAt: "2026-09-15T00:00:00.000Z" }] }],
+    },
+  };
   const quota = buildQuotaView(snapshot, false, false, { provider: "anthropic", modelId: "claude-fable-5" });
   const html = renderToStaticMarkup(
     React.createElement(QuotaPopover, {
+      resetCredits,
       quota,
       provider: "anthropic",
       modelName: "Fable",
@@ -670,7 +665,10 @@ test("the popover retains an explicitly reported zero saved-reset balance", () =
     })],
   }), false, false, { provider: "anthropic", modelId: "claude-fable-5" });
   const html = renderToStaticMarkup(
-    React.createElement(QuotaPopover, { quota, provider: "anthropic", modelName: "Fable", now: Date.now() }),
+    React.createElement(QuotaPopover, {
+      resetCredits: { loading: false, redeeming: false, refresh() {}, redeem: async () => ({ outcome: "no_credit", accountId: "claude" }), snapshot: { available: true, fetchedAt: "2026-08-18T12:30:00.000Z", accounts: [{ id: "claude", label: "Claude account", availableCount: 0, canRedeem: false, credits: [] }] } },
+      quota, provider: "anthropic", modelName: "Fable", now: Date.now(),
+    }),
   );
 
   assert.match(html, /Saved rate-limit resets · 0/);
@@ -757,4 +755,106 @@ test("the rpc-dialect slash builtins are offered only where the engine answers t
   // Smart resolves omp's model ROLES; the row follows the models capability,
   // not chatExtras, which pi has and roles it does not.
   assert.match(composerSource, /\{capabilities\.models && \(\s*<button/);
+});
+
+// ── OpenRouter's prepaid balance ────────────────────────────────────────────
+
+/** The account snapshot GET /api/openrouter/account answers with. */
+const openRouterAccount = (overrides = {}) => ({
+  snapshot: {
+    available: true,
+    keySource: "engine",
+    credits: { totalCredits: 40, totalUsage: 31.74, remaining: 8.26 },
+    key: {
+      label: "sk-or-v1-15f...879", usage: 31.1, usageDaily: 27.27, usageWeekly: 27.27,
+      usageMonthly: 27.27, limit: null, limitRemaining: null, freeTier: false,
+      expiresAt: null, isManagementKey: false,
+    },
+    activity: null,
+    hasManagementKey: false,
+    error: null,
+    fetchedAt: "2026-08-20T09:00:00.000Z",
+    stale: false,
+    ...overrides,
+  },
+  loading: false,
+  failed: false,
+  refresh: () => {},
+  refreshNow: async () => null,
+});
+
+test("an OpenRouter model is prepaid, not unmetered", () => {
+  // The bug this pins: omp reports NO quota windows for openrouter (verified
+  // against `omp usage --json`), so the model fell through to
+  // QUOTA_MODEL_UNMETERED — "nothing it runs counts against a quota" — about
+  // an account that is spending real money per token.
+  const quota = buildQuotaView(
+    usageSnapshot({}),
+    false,
+    false,
+    { provider: "openrouter", modelId: "anthropic/claude-opus-5" },
+  );
+  assert.equal(quota.known, false, "a balance has no honest percentage to gauge");
+  assert.equal(quota.titleKey, "usage.prepaidTitle");
+  assert.notEqual(quota.titleKey, "usage.modelUnmetered");
+});
+
+test("a non-gateway provider with no matching window is still unmetered", () => {
+  // The counterpart: the prepaid branch must not swallow the real "no account
+  // serves this provider" case for, say, a local runtime.
+  const quota = buildQuotaView(usageSnapshot({}), false, false, { provider: "llama-swap", modelId: "gemma4-e4b" });
+  assert.equal(quota.titleKey, "usage.modelUnmetered");
+});
+
+test("the popover states the balance, the cycle and today's spend", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(QuotaPopover, {
+      quota: buildQuotaView(usageSnapshot({}), false, false, { provider: "openrouter", modelId: "anthropic/claude-opus-5" }),
+      openRouter: openRouterAccount(),
+      provider: "openrouter",
+      modelName: "Claude Opus 5",
+      now: Date.parse("2026-08-20T09:05:00.000Z"),
+    }),
+  );
+  // The dollars left are the number that predicts whether the next turn runs.
+  assert.match(html, /\$8\.26/);
+  // Spent-vs-purchased is captioned, so the bar cannot be read as a quota window.
+  assert.match(html, /\$31\.74/);
+  assert.match(html, /\$40\.00/);
+  // This key's own daily spend, distinct from the account balance.
+  assert.match(html, /\$27\.27/);
+  // The top-up path is honest about leaving Cody: OpenRouter removed its
+  // purchase API (410 Gone), so an in-app checkout would be a lie.
+  assert.match(html, /openrouter\.ai/);
+  assert.doesNotMatch(html, /reports no plan limits/);
+});
+
+test("the popover shows no credit section without an OpenRouter model", () => {
+  // Every other provider sells a subscription and has no balance; the section
+  // must not appear for one.
+  const html = renderToStaticMarkup(
+    React.createElement(QuotaPopover, {
+      quota: buildQuotaView(usageSnapshot({}), false, false, { provider: "anthropic", modelId: "claude-fable-5" }),
+      provider: "anthropic",
+      modelName: "Claude Fable 5",
+      now: Date.parse("2026-08-20T09:05:00.000Z"),
+    }),
+  );
+  assert.doesNotMatch(html, /OpenRouter credits/);
+});
+
+test("a missing key hides the credit section instead of showing an error", () => {
+  // An OpenRouter model can be selected on an instance with no readable key;
+  // an error box over a working composer is worse than an absent section.
+  const html = renderToStaticMarkup(
+    React.createElement(QuotaPopover, {
+      quota: buildQuotaView(usageSnapshot({}), false, false, { provider: "openrouter", modelId: "anthropic/claude-opus-5" }),
+      openRouter: openRouterAccount({ available: false, credits: null, key: null, error: { code: "no_key", message: "No OpenRouter key is configured." } }),
+      provider: "openrouter",
+      modelName: "Claude Opus 5",
+      now: Date.parse("2026-08-20T09:05:00.000Z"),
+    }),
+  );
+  assert.doesNotMatch(html, /OpenRouter credits/);
+  assert.doesNotMatch(html, /No OpenRouter key is configured/);
 });

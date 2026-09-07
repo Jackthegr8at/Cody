@@ -31,7 +31,16 @@ import {
   shouldGiveUpReconnecting,
 } from "@/lib/stream-recovery";
 import { getToolNamesForPreset, type ToolPreset } from "@/lib/tool-presets";
-import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-preset-preference";
+import { getPreferredToolPreset, subscribeToPreferredToolPreset } from "@/lib/tool-preset-preference";
+import {
+  advanceSmartModelForAutomaticChange,
+  clearSmartModelAfterManualSelection,
+  parseSmartModelProvenance,
+  resolveSmartModel,
+  smartModelForSession,
+  type SmartModelProvenance,
+} from "@/hooks/session-model-provenance";
+import { SESSION_PROMPT_IMAGE, SESSION_PROMPT_STEERING, sessionPromptCapabilityBits } from "@/hooks/session-prompt-capabilities";
 import { toast } from "@/components/ui/toast";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import { createActiveGoal, parseActiveGoal, type ActiveGoal, type ActivePlan } from "@/lib/web-mode-state";
@@ -186,6 +195,9 @@ type AgentStateResponse = {
   // and absent means "no picker" — there is no global fallback to consult.
   availableModes?: { id?: unknown; name?: unknown; description?: unknown }[];
   currentModeId?: string | null;
+  // ACP's _session/steering extension reports false when a feature is absent.
+  imageSupported?: boolean;
+  steeringSupported?: boolean;
 };
 
 /** Read a session-scoped catalog off get_state, dropping anything malformed
@@ -216,6 +228,10 @@ function readSessionModes(state: AgentStateResponse | null | undefined): Session
     return [description ? { id, name, description } : { id, name }];
   });
 }
+
+export type SessionPromptCapabilities = { imageSupported: boolean };
+
+
 
 function readLiveContextUsage(value: unknown): ContextUsageValue | null {
   if (!isRecord(value)) return null;
@@ -248,6 +264,7 @@ const EMPTY_QUEUE: QueuedMessages = { steering: [], followUp: [] };
 // state and would vanish on reload. Mirror them into sessionStorage (per
 // session, best-effort, size-bounded) so a reload can restore the queue panel.
 const QUEUE_STORAGE_PREFIX = SESSION_STORAGE_PREFIXES.queue;
+const SMART_MODEL_STORAGE_PREFIX = SESSION_STORAGE_PREFIXES.smartModel;
 const QUEUE_STORAGE_MAX_CHARS = 50_000;
 
 function isEmptyQueue(queue: QueuedMessages): boolean {
@@ -298,6 +315,32 @@ function clearPersistedQueue(sessionId: string | null): void {
   if (!sessionId) return;
   try {
     sessionStorage.removeItem(QUEUE_STORAGE_PREFIX + sessionId);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function readPersistedSmartModel(sessionId: string): SmartModelProvenance | null {
+  try {
+    const raw = sessionStorage.getItem(SMART_MODEL_STORAGE_PREFIX + sessionId);
+    return raw ? parseSmartModelProvenance(JSON.parse(raw)) : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistSmartModel(provenance: SmartModelProvenance): void {
+  try {
+    sessionStorage.setItem(SMART_MODEL_STORAGE_PREFIX + provenance.forSession, JSON.stringify(provenance));
+  } catch {
+    // Best-effort only (quota exceeded, private mode, SSR).
+  }
+}
+
+function clearPersistedSmartModel(sessionId: string | null): void {
+  if (!sessionId) return;
+  try {
+    sessionStorage.removeItem(SMART_MODEL_STORAGE_PREFIX + sessionId);
   } catch {
     // ignore storage errors
   }
@@ -460,7 +503,6 @@ export interface UseAgentSessionOptions {
   onBranchDataChange?: (tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => void;
   onSystemPromptChange?: (prompt: string | null) => void;
   onSessionStatsPanelOpen?: () => void;
-  setToolPreset?: (preset: "none" | "default" | "full") => void;
   /** Opens a file in the web UI's file viewer (used by the open_file host tool). */
   onOpenFile?: (filePath: string, name: string, sessionId?: string) => void;
   /** Shows a loopback URL in the workspace Preview panel (open_url calls that
@@ -767,9 +809,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [newSessionModel, setNewSessionModel] = useState<SelectedModel | null>(null);
   const [newSessionDefaultModel, setNewSessionDefaultModel] = useState<SelectedModel | null>(null);
   const [toolPreset, setToolPreset] = useState<ToolPreset>(() => getPreferredToolPreset());
+  useEffect(() => subscribeToPreferredToolPreset(setToolPreset), []);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
   const [fastModeEnabled, setFastModeEnabled] = useState(false);
   const [fastModeActive, setFastModeActive] = useState<boolean | undefined>(undefined);
+  const [promptCapabilities, setPromptCapabilities] = useState<SessionPromptCapabilities>({ imageSupported: false });
+  const [steeringSupported, setSteeringSupported] = useState(false);
   // Runtime session modes returned by get_state and changed via RPC
   // (set_interrupt_mode / set_auto_compaction).
   const [interruptMode, setInterruptMode] = useState<"immediate" | "wait">("immediate");
@@ -804,7 +849,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // to the session it was made for (loads and reconciles reuse loadSession,
   // so a reset there would wipe the pin mid-conversation); an engine switch
   // simply stops matching, which hands the label to the marker below.
-  const [smartPinnedModel, setSmartPinnedModel] = useState<{ provider: string; modelId: string; forSession: string } | null>(null);
+  const [smartPinnedModel, setSmartPinnedModel] = useState<SmartModelProvenance | null>(null);
   // The engine's last unprompted model switch (retry fallback, usage-aware
   // routing, an engine-side /model). The 10s toast announces it once; this
   // keeps a composer marker naming the switch until the model moves again —
@@ -813,7 +858,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // Session id of a spawning Smart new session: its first authoritative model
   // is Smart's own resolution and becomes smartPinnedModel. Id-keyed so a
   // sync for a different session (switched away mid-spawn) can never claim it.
-  const pendingSmartSpawnRef = useRef<string | null>(null);
+  const smartPinnedModelRef = useRef<SmartModelProvenance | null>(null);
+    const pendingSmartSpawnRef = useRef<string | null>(null);
   // The user's last explicit pick, so the model_changed echo of our own
   // set_model is never dressed up as an engine-initiated switch.
   const lastUserModelPickRef = useRef<{ provider: string; modelId: string; at: number } | null>(null);
@@ -871,6 +917,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // would cancel every send. Only an acknowledged run can be "lost".
   const runConfirmedRef = useRef(false);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
+    const setSmartModelProvenance = useCallback((provenance: SmartModelProvenance | null) => {
+      smartPinnedModelRef.current = provenance;
+      setSmartPinnedModel(provenance);
+      if (provenance) persistSmartModel(provenance);
+    }, []);
+    const clearSmartModelProvenance = useCallback((sessionId: string, accepted: boolean) => {
+      const next = clearSmartModelAfterManualSelection(smartPinnedModelRef.current, sessionId, accepted);
+      if (next === smartPinnedModelRef.current) return;
+      smartPinnedModelRef.current = next;
+      setSmartPinnedModel(next);
+      if (next) persistSmartModel(next);
+      else clearPersistedSmartModel(sessionId);
+    }, []);
   // Guards stale branch/leaf context responses: two rapid navigate clicks must
   // not let the older response overwrite the newer branch's messages.
   const contextRequestSeqRef = useRef(0);
@@ -942,7 +1001,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }
   const eventCoalescer = eventCoalescerRef.current;
 
-  const setToolPresetState = opts.setToolPreset ?? setToolPreset;
+
 
   const currentModel = currentModelOverride ?? data?.context.model ?? pendingModel ?? null;
   // For existing sessions, the live state's resolved model wins over the
@@ -1032,6 +1091,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // scoped to its session so switching conversations never leaks objectives.
   useEffect(() => {
     const sid = session?.id;
+    const smart = sid ? readPersistedSmartModel(sid) : null;
+    smartPinnedModelRef.current = smart;
+    setSmartPinnedModel(smart);
+    setPromptCapabilities((current) => current.imageSupported ? { imageSupported: false } : current);
+    setSteeringSupported((current) => current ? false : current);
     setActivePlan(null);
     if (!sid) {
       setActiveGoal(null);
@@ -1200,22 +1264,27 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // whether the snapshot was applied — callers must drop ALL state derived
   // from a stale response (including its thinking level), not just the model.
   const applyAuthoritativeModel = useCallback((model: ThinkingModelMeta | null, token?: number): boolean => {
-    if (token !== undefined && token !== authoritativeModelSeqRef.current) return false;
-    authoritativeModelSeqRef.current += 1;
-    setLiveModelMeta(model);
-    if (!model) return true;
-    lastAuthoritativeModelRef.current = { provider: model.provider, modelId: model.modelId };
-    // A Smart new session's first resolved model IS Smart's answer.
-    if (pendingSmartSpawnRef.current !== null && pendingSmartSpawnRef.current === sessionIdRef.current) {
-      const forSession = pendingSmartSpawnRef.current;
-      pendingSmartSpawnRef.current = null;
-      setSmartPinnedModel({ provider: model.provider, modelId: model.modelId, forSession });
-    }
-    setCurrentModelOverride((prev) =>
-      prev && (prev.provider !== model.provider || prev.modelId !== model.modelId) ? null : prev
-    );
-    return true;
-  }, []);
+      if (token !== undefined && token !== authoritativeModelSeqRef.current) return false;
+      authoritativeModelSeqRef.current += 1;
+      setLiveModelMeta(model);
+      if (!model) return true;
+      lastAuthoritativeModelRef.current = { provider: model.provider, modelId: model.modelId };
+      const sessionId = sessionIdRef.current;
+      const resolvedModel = { provider: model.provider, modelId: model.modelId };
+      // A Smart new session's first resolved model is explicit Smart provenance,
+      // even when ensure_session sent the configured default as a concrete model.
+      if (sessionId && pendingSmartSpawnRef.current === sessionId) {
+        pendingSmartSpawnRef.current = null;
+        setSmartModelProvenance(resolveSmartModel({ forSession: sessionId }, sessionId, resolvedModel));
+      } else if (sessionId) {
+        const smart = smartModelForSession(smartPinnedModelRef.current, sessionId);
+        if (smart) setSmartModelProvenance(advanceSmartModelForAutomaticChange(smart, sessionId, resolvedModel));
+      }
+      setCurrentModelOverride((prev) =>
+        prev && (prev.provider !== model.provider || prev.modelId !== model.modelId) ? null : prev
+      );
+      return true;
+    }, [setSmartModelProvenance]);
 
   // Lightweight live-state sync after composer commands. A command against an
   // idle-disposed session restarts omp, which re-resolves the model from the
@@ -1248,18 +1317,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // to the old mode until the next fetch.
   const modeSyncSeqRef = useRef(0);
   const adoptSessionModes = useCallback((state: AgentStateResponse | null | undefined, sid: string, seq: number) => {
-    if (seq !== modeSyncSeqRef.current) return;
-    const options = readSessionModes(state);
-    const reported = typeof state?.currentModeId === "string" ? state.currentModeId : null;
-    const current = reported && options.some((option) => option.id === reported) ? reported : (options[0]?.id ?? null);
-    setSessionModes((held) => {
-      if (held.forSession === sid && held.current === current
-        && held.options.length === options.length
-        && held.options.every((option, index) => option.id === options[index].id && option.name === options[index].name && option.description === options[index].description)) {
-        return held;
-      }
-      return { forSession: sid, options, current };
-    });
+      if (seq !== modeSyncSeqRef.current) return;
+      const options = readSessionModes(state);
+      const reported = typeof state?.currentModeId === "string" ? state.currentModeId : null;
+      const current = reported && options.some((option) => option.id === reported) ? reported : (options[0]?.id ?? null);
+      setSessionModes((held) => {
+        if (held.forSession === sid && held.current === current
+          && held.options.length === options.length
+          && held.options.every((option, index) => option.id === options[index].id && option.name === options[index].name && option.description === options[index].description)) {
+          return held;
+        }
+        return { forSession: sid, options, current };
+      });
+    }, []);
+  const adoptSessionPromptCapabilities = useCallback((state: AgentStateResponse | null | undefined) => {
+    const capabilities = sessionPromptCapabilityBits(state);
+    const imageSupported = (capabilities & SESSION_PROMPT_IMAGE) !== 0;
+    const steering = (capabilities & SESSION_PROMPT_STEERING) !== 0;
+    setPromptCapabilities((current) => current.imageSupported === imageSupported ? current : { imageSupported });
+    setSteeringSupported((current) => current === steering ? current : steering);
   }, []);
 
   const refreshLiveModelState = useCallback(async (sid: string) => {
@@ -1272,6 +1348,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (sessionIdRef.current !== sid) return;
       adoptSessionModels(agentState.state);
       adoptSessionModes(agentState.state, sid, modeSeq);
+      adoptSessionPromptCapabilities(agentState.state);
       const applied = applyAuthoritativeModel(toThinkingModelMeta(agentState.state?.model), token);
       if (!applied) return; // stale snapshot — drop its thinking level too
       if (agentState.state?.thinkingLevel !== undefined) {
@@ -1292,7 +1369,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch {
       // Best effort; the next loadSession/reconcile re-syncs.
     }
-  }, [applyAuthoritativeModel, beginAuthoritativeModelSync, adoptSessionModels, adoptSessionModes]);
+  }, [applyAuthoritativeModel, beginAuthoritativeModelSync, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities]);
 
   /**
    * Adopt a `get_state.pendingPermissions` snapshot.
@@ -1397,6 +1474,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const liveState = agentState.state;
         adoptSessionModels(liveState);
         adoptSessionModes(liveState, sid, modeSeq);
+        adoptSessionPromptCapabilities(liveState);
         const modelApplied = applyAuthoritativeModel(toThinkingModelMeta(liveState?.model), token);
         if (liveState) {
           if (liveState.contextUsage !== undefined) setLiveContextUsage(readLiveContextUsage(liveState.contextUsage));
@@ -1441,7 +1519,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, [refreshSubagentUsage, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptPermissionRequests, adoptSessionModels, adoptSessionModes]);
+  }, [refreshSubagentUsage, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptPermissionRequests, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
     const seq = ++contextRequestSeqRef.current;
@@ -1481,44 +1559,47 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [isNew, newSessionCwd, onSessionCreated]);
 
   const ensureNewSession = useCallback(async () => {
-    if (sessionIdRef.current) return sessionIdRef.current;
-    if (!isNew || !newSessionCwd) return sessionIdRef.current;
-    if (ensuringNewSessionRef.current) return ensuringNewSessionRef.current;
+      if (sessionIdRef.current) return sessionIdRef.current;
+      if (!isNew || !newSessionCwd) return sessionIdRef.current;
+      if (ensuringNewSessionRef.current) return ensuringNewSessionRef.current;
 
-    const promise = (async () => {
-      const selectedModel = newSessionModel ?? newSessionDefaultModel;
-      // No explicit pick = Smart: whatever model the spawned session first
-      // reports is Smart's resolution, and the composer should keep saying so.
-      const smartSpawn = newSessionModel === null;
-      if (selectedModel) setPendingModel(selectedModel);
-      const toolNames = getToolNamesForPreset(toolPreset);
-      const res = await fetch("/api/agent/new", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          cwd: newSessionCwd,
-          type: "ensure_session",
-          toolNames,
-          ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
-          ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
-          ...(advisorEnabled ? { advisor: true } : {}),
-        }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const result = await res.json() as { sessionId: string };
-      const realId = result.sessionId;
-      sessionIdRef.current = realId;
-      if (smartSpawn) pendingSmartSpawnRef.current = realId;
-      return realId;
-    })();
+      const promise = (async () => {
+        const selectedModel = newSessionModel ?? newSessionDefaultModel;
+        // No explicit pick is Smart. Persist that source against the real session
+        // identity before its first reconciliation can resolve a concrete model.
+        const smartSpawn = newSessionModel === null;
+        if (selectedModel) setPendingModel(selectedModel);
+        const toolNames = getToolNamesForPreset(toolPreset);
+        const res = await fetch("/api/agent/new", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            cwd: newSessionCwd,
+            type: "ensure_session",
+            toolNames,
+            ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
+            ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
+            ...(advisorEnabled ? { advisor: true } : {}),
+          }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const result = await res.json() as { sessionId: string };
+        const realId = result.sessionId;
+        sessionIdRef.current = realId;
+        if (smartSpawn) {
+          pendingSmartSpawnRef.current = realId;
+          setSmartModelProvenance({ forSession: realId });
+        }
+        return realId;
+      })();
 
-    ensuringNewSessionRef.current = promise;
-    try {
-      return await promise;
-    } finally {
-      ensuringNewSessionRef.current = null;
-    }
-  }, [advisorEnabled, isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel]);
+      ensuringNewSessionRef.current = promise;
+      try {
+        return await promise;
+      } finally {
+        ensuringNewSessionRef.current = null;
+      }
+    }, [advisorEnabled, isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, setSmartModelProvenance, thinkingLevel, toolPreset]);
 
   const loadSlashCommands = useCallback(async () => {
     const sid = sessionIdRef.current ?? await ensureNewSession();
@@ -2151,6 +2232,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // flight) — everything in it is stale, drop it.
       if (promptRunIdRef.current !== runId) return;
       const state = data.state;
+      adoptSessionPromptCapabilities(state);
       // Mirror compaction state unconditionally: a missed compaction_end
       // would otherwise leave the "Stop compaction" UI stuck. No state
       // (wrapper destroyed) means nothing is compacting.
@@ -2181,7 +2263,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch {
       // Network still down — the next poll / visibility / online tick retries.
     }
-  }, [finishPromptWithoutStream, refreshSubagentRoster, adoptPermissionRequests]);
+  }, [finishPromptWithoutStream, refreshSubagentRoster, adoptPermissionRequests, adoptSessionPromptCapabilities]);
 
   // A session with no name of its own shows a 50-character slice of its first
   // message in the sidebar — a sentence fragment, not a name. Once the first
@@ -2440,6 +2522,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               if (sessionIdRef.current !== endedSid || promptRunIdRef.current !== endedRunId) return;
               adoptSessionModels(d.state);
               adoptSessionModes(d.state, endedSid, endModeSeq);
+              adoptSessionPromptCapabilities(d.state);
               const applied = applyAuthoritativeModel(toThinkingModelMeta(d.state.model), endToken);
               if (!applied) return; // stale snapshot — drop everything derived from it
               if (d.state?.contextUsage !== undefined) setLiveContextUsage(readLiveContextUsage(d.state.contextUsage));
@@ -2980,7 +3063,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, consumeQueuedMessage, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, resetSubagentActivityState, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptSessionModels, adoptSessionModes]);
+  }, [addNotice, consumeQueuedMessage, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, resetSubagentActivityState, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {
@@ -3271,75 +3354,61 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     await loadContext(sid, leafId);
   }, [loadContext]);
 
-  const handleModelChange = useCallback(async (provider: string, modelId: string) => {
-    // An explicit pick: not Smart any more, and any auto-switch marker is
-    // answered. The echo of our own set_model (omp emits model_changed for
-    // it) must not be re-labelled as an engine-initiated switch.
-    lastUserModelPickRef.current = { provider, modelId, at: Date.now() };
-    setSmartPinnedModel(null);
-    setAutoModelSwitch(null);
-    pendingSmartSpawnRef.current = null;
+  const handleModelChange = useCallback(async (provider: string, modelId: string, selection: "manual" | "smart" = "manual"): Promise<boolean> => {
+    const pick = { provider, modelId, at: Date.now() };
+    lastUserModelPickRef.current = pick;
     if (isNew) {
       setNewSessionModel({ provider, modelId });
       setPendingModel({ provider, modelId });
-      const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
-      if (!sid) return;
-      try {
-        await sendAgentCommand(sid, { type: "set_model", provider, modelId });
-      } catch (e) {
-        console.error("Failed to set model:", e);
-      }
-      return;
     }
-    const sid = sessionIdRef.current;
-    if (!sid) return;
+    const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
+    if (!sid) return isNew;
     try {
       await sendAgentCommand(sid, { type: "set_model", provider, modelId });
-      setCurrentModelOverride({ provider, modelId });
+      if (sessionIdRef.current !== sid || lastUserModelPickRef.current !== pick) return false;
+      pendingSmartSpawnRef.current = null;
+      if (selection === "smart") {
+        setSmartModelProvenance(resolveSmartModel({ forSession: sid }, sid, { provider, modelId }));
+      } else {
+        clearSmartModelProvenance(sid, true);
+      }
+      setAutoModelSwitch(null);
+      if (!isNew) setCurrentModelOverride({ provider, modelId });
       void refreshLiveModelState(sid);
-    } catch (e) {
-      console.error("Failed to set model:", e);
+      return true;
+    } catch (error) {
+      addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+      return false;
     }
-  }, [isNew, setNewSessionModel, refreshLiveModelState]);
+  }, [addNotice, clearSmartModelProvenance, isNew, setNewSessionModel, setSmartModelProvenance, refreshLiveModelState]);
 
-  // Returns a brand-new session to auto ("Smart") model resolution: omp picks
-  // the model from the user's configured OMP roles plan instead of a pinned
-  // provider/modelId. Only meaningful before the session has spawned — on a
-  // live session the picker resolves the role itself and reports the pin
-  // through markSmartPinnedModel below.
+  // An unspawned session delegates the default choice to the engine's role plan.
   const selectSmartModel = useCallback(() => {
     setNewSessionModel(null);
-    setSmartPinnedModel(null);
-    pendingSmartSpawnRef.current = null;
+    pendingSmartSpawnRef.current = sessionIdRef.current;
   }, [setNewSessionModel]);
 
-  // A live-session Smart pick: the composer resolved the configured default
-  // role to a concrete model and pinned it via handleModelChange — record
-  // that the pin was Smart's answer so the label keeps saying "Smart · …"
-  // instead of reading like a manual pick.
-  const markSmartPinnedModel = useCallback((provider: string, modelId: string) => {
-    const forSession = sessionIdRef.current;
-    if (!forSession) return;
-    setSmartPinnedModel({ provider, modelId, forSession });
-    setAutoModelSwitch(null);
-  }, []);
-
   const handleFastModeChange = useCallback(async (enabled: boolean) => {
-    // A brand-new session has no runtime yet: the model picker updates local
-    // state (so the Fast button appears), but set_fast_mode is a live-process
-    // command — without spawning the session the click silently no-ops.
-    const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current ?? await ensureNewSession();
-    if (!sid) return;
-    try {
-      const result = await sendAgentCommand<{ enabled?: boolean; active?: boolean }>(sid, { type: "set_fast_mode", enabled });
-      setFastModeEnabled(result?.enabled ?? enabled);
-      setFastModeActive(result?.active);
-      void refreshLiveModelState(sid);
-    } catch (error) {
-      console.error("Failed to change Fast mode:", error);
-      addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
-    }
-  }, [addNotice, ensureNewSession, refreshLiveModelState]);
+      // set_fast_mode is live-process only; ensure a new session before sending.
+      const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current ?? await ensureNewSession();
+      if (!sid) return;
+      try {
+        const result = await sendAgentCommand<{ enabled?: boolean; active?: boolean }>(sid, { type: "set_fast_mode", enabled });
+        // The engine reply is authoritative. Never derive active state from the
+        // requested toggle: an enabled family may still have no active wire mode.
+        if (typeof result?.enabled === "boolean") setFastModeEnabled(result.enabled);
+        if (typeof result?.active === "boolean") {
+          setFastModeActive(result.active);
+          if (enabled && result.enabled && !result.active) {
+            addNotice({ type: "info", message: translate("agentSession.fastModeInactive") });
+          }
+        }
+        void refreshLiveModelState(sid);
+      } catch (error) {
+        console.error("Failed to change Fast mode:", error);
+        addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+      }
+    }, [addNotice, ensureNewSession, refreshLiveModelState]);
 
   /** Toggle automatic retry for transient model failures. */
   const handleAutoRetryChange = useCallback(async (enabled: boolean) => {
@@ -3641,70 +3710,80 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // optimistic chat bubble here would duplicate the queue panel and turn into
   // a ghost message if the queue is recalled.
   const handleSteer = useCallback(async (message: string, images?: AttachedImage[]) => {
-    const sid = sessionIdRef.current;
-    if (!sid) return;
-    const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
-    try {
-      await sendAgentCommand(sid, {
-        type: "steer",
-        message,
-        ...(piImages?.length ? { images: piImages } : {}),
-      });
-      // omp emits no queue snapshots; track the queued text locally until it
-      // is delivered (user message_end) or the queue count drops to zero.
-      queueMutatedAtRef.current = Date.now();
-      setQueuedMessages((prev) => ({ ...prev, steering: [...prev.steering, message] }));
-    } catch (e) {
-      console.error("Failed to steer:", e);
-      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
-      opts.chatInputRef?.current?.insertIfEmpty(message);
-    }
-  }, [addNotice, opts.chatInputRef]);
+      const sid = sessionIdRef.current;
+      if (!sid) {
+        const error = new Error("No active session.");
+        addNotice({ type: "error", message: error.message });
+        throw error;
+      }
+      const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
+      try {
+        await sendAgentCommand(sid, {
+          type: "steer",
+          message,
+          ...(piImages?.length ? { images: piImages } : {}),
+        });
+        queueMutatedAtRef.current = Date.now();
+        setQueuedMessages((prev) => ({ ...prev, steering: [...prev.steering, message] }));
+      } catch (error) {
+        console.error("Failed to steer:", error);
+        addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+        throw error;
+      }
+    }, [addNotice]);
 
   const handlePromptWithStreamingBehavior = useCallback(async (
-    message: string,
-    behavior: "steer" | "followUp",
-    images?: AttachedImage[],
-  ) => {
-    const sid = sessionIdRef.current;
-    if (!sid) return;
-    const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
-    try {
-      await sendAgentCommand(sid, {
-        type: "prompt",
-        message,
-        streamingBehavior: behavior,
-        ...(piImages?.length ? { images: piImages } : {}),
-      });
-      queueMutatedAtRef.current = Date.now();
-      setQueuedMessages((prev) => behavior === "steer"
-        ? { ...prev, steering: [...prev.steering, message] }
-        : { ...prev, followUp: [...prev.followUp, message] });
-    } catch (e) {
-      console.error("Failed to queue prompt:", e);
-      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
-      opts.chatInputRef?.current?.insertIfEmpty(message);
-    }
-  }, [addNotice, opts.chatInputRef]);
+      message: string,
+      behavior: "steer" | "followUp",
+      images?: AttachedImage[],
+    ) => {
+      const sid = sessionIdRef.current;
+      if (!sid) {
+        const error = new Error("No active session.");
+        addNotice({ type: "error", message: error.message });
+        throw error;
+      }
+      const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
+      try {
+        await sendAgentCommand(sid, {
+          type: "prompt",
+          message,
+          streamingBehavior: behavior,
+          ...(piImages?.length ? { images: piImages } : {}),
+        });
+        queueMutatedAtRef.current = Date.now();
+        setQueuedMessages((prev) => behavior === "steer"
+          ? { ...prev, steering: [...prev.steering, message] }
+          : { ...prev, followUp: [...prev.followUp, message] });
+      } catch (error) {
+        console.error("Failed to queue prompt:", error);
+        addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+        throw error;
+      }
+    }, [addNotice]);
 
   const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[]) => {
-    const sid = sessionIdRef.current;
-    if (!sid) return;
-    const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
-    try {
-      await sendAgentCommand(sid, {
-        type: "follow_up",
-        message,
-        ...(piImages?.length ? { images: piImages } : {}),
-      });
-      queueMutatedAtRef.current = Date.now();
-      setQueuedMessages((prev) => ({ ...prev, followUp: [...prev.followUp, message] }));
-    } catch (e) {
-      console.error("Failed to follow up:", e);
-      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
-      opts.chatInputRef?.current?.insertIfEmpty(message);
-    }
-  }, [addNotice, opts.chatInputRef]);
+      const sid = sessionIdRef.current;
+      if (!sid) {
+        const error = new Error("No active session.");
+        addNotice({ type: "error", message: error.message });
+        throw error;
+      }
+      const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
+      try {
+        await sendAgentCommand(sid, {
+          type: "follow_up",
+          message,
+          ...(piImages?.length ? { images: piImages } : {}),
+        });
+        queueMutatedAtRef.current = Date.now();
+        setQueuedMessages((prev) => ({ ...prev, followUp: [...prev.followUp, message] }));
+      } catch (error) {
+        console.error("Failed to follow up:", error);
+        addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+        throw error;
+      }
+    }, [addNotice]);
 
   const handleAbortCompaction = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -3746,16 +3825,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [refreshLiveModelState, addNotice]);
 
-  const handleToolPresetChange = useCallback(async (preset: ToolPreset) => {
-    setToolPresetState(preset);
-    setPreferredToolPreset(preset);
-    // The preset is applied at spawn time (--tools/--no-tools flags); omp's
-    // RPC protocol cannot change the toolset of an already-running session.
-    const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
-    if (sid) {
-      addNotice({ type: "info", message: translate("agentSession.toolPresetNotice") });
-    }
-  }, [setToolPresetState, addNotice]);
+
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     const container = scrollContainerRef.current;
@@ -4091,7 +4161,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   return {
     // State
     data, loading, error, activeLeafId, messages, entryIds, streamState,
-    agentRunning, modelNames: effectiveModelNames, modelList: effectiveModelList, modelSelectable, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel, fastModeEnabled, fastModeActive, autoRetryEnabled, interruptMode, autoCompactionEnabled, steeringMode, followUpMode,
+    agentRunning, modelNames: effectiveModelNames, modelList: effectiveModelList, modelSelectable, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel, fastModeEnabled, fastModeActive, promptCapabilities, steeringSupported, autoRetryEnabled, interruptMode, autoCompactionEnabled, steeringMode, followUpMode,
     liveModelMeta,
     // Mode list and current mode, only while they belong to THIS session.
     availableModes: sessionModes.forSession === (session?.id ?? sessionIdRef.current) ? sessionModes.options : NO_MODES,
@@ -4126,11 +4196,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     sessionIdRef, messagesEndRef, scrollContainerRef,
     pendingScrollToUserRef, initialScrollDoneRef,
     // Actions
-    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, selectSmartModel, markSmartPinnedModel, handleFastModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply,
+    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, selectSmartModel, handleFastModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply,
     handleCompact, handleHandoff, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     removeQueuedMessage, promoteQueuedToSteer,
     handleBuiltinSlashCommand,
-    handleToolPresetChange, handleThinkingLevelChange, handleModeChange, loadSlashCommands, setActiveLeafId, setData, setMessages,
+    handleThinkingLevelChange, handleModeChange, loadSlashCommands, setActiveLeafId, setData, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
     // Subscriptions

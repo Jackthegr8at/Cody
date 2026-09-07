@@ -6,7 +6,7 @@ import { MarkdownBody } from "./MarkdownBody";
 import { ClickableImage } from "./ImageLightbox";
 import { translate, useI18n, type Locale } from "@/lib/i18n";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
-import { isEmptyThinkingBlock } from "@/lib/message-display";
+import { isEmptyThinkingBlock, isVisibleTranscriptMessage } from "@/lib/message-display";
 import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
 import { Tooltip, Collapsible, CollapsibleTrigger, CollapsiblePanel } from "./ui/primitives";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
@@ -28,6 +28,7 @@ import type {
   ImageContent,
   ToolCallContent,
   ThinkingContent,
+  ActivityDisplayMode,
 } from "@/lib/types";
 
 const MAX_THINKING_CACHE_ENTRIES = 100;
@@ -114,8 +115,8 @@ interface Props {
   showTimestamp?: boolean;
   prevTimestamp?: number;
   sessionId?: string;
-  toolCallsDefaultCollapsed?: boolean;
   thinkingDefaultExpanded?: boolean;
+  activityDisplayMode?: ActivityDisplayMode;
 }
 
 function formatTime(ts: number | undefined, locale: Locale): string | null {
@@ -145,28 +146,25 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, thinkingDefaultExpanded = false }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId, thinkingDefaultExpanded = false, activityDisplayMode = "compact" }: Props) {
+  if (!isVisibleTranscriptMessage(message, activityDisplayMode, toolResults)) return null;
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onNavigate={onNavigate} prevAssistantEntryId={prevAssistantEntryId} onEditContent={onEditContent} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} thinkingDefaultExpanded={thinkingDefaultExpanded} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
     return null;
   }
   if (message.role === "custom") {
-    if ((message as CustomMessage).customType === "xdev-mount-notice") {
-      return null;
-    }
-    if ((message as CustomMessage).customType === "compaction") {
-      return <CompactionMessageView message={message as CustomMessage} />;
-    }
-    return <CustomMessageView message={message as CustomMessage} cwd={cwd} onOpenFile={onOpenFile} />;
+    if ((message as CustomMessage).customType === "xdev-mount-notice") return null;
+    if ((message as CustomMessage).customType === "compaction") return <CompactionMessageView message={message as CustomMessage} />;
+    return <CustomMessageView message={message as CustomMessage} cwd={cwd} onOpenFile={onOpenFile} activityDisplayMode={activityDisplayMode} />;
   }
   if (message.role === "bashExecution") {
-    return <BashExecutionView message={message as BashExecutionMessage} sessionId={sessionId} />;
+    return <BashExecutionView message={message as BashExecutionMessage} sessionId={sessionId} activityDisplayMode={activityDisplayMode} />;
   }
   return null;
 }, (prev, next) => {
@@ -185,8 +183,8 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.showTimestamp === next.showTimestamp
     && prev.prevTimestamp === next.prevTimestamp
     && prev.sessionId === next.sessionId
-    && prev.toolCallsDefaultCollapsed === next.toolCallsDefaultCollapsed
-    && prev.thinkingDefaultExpanded === next.thinkingDefaultExpanded;
+    && prev.thinkingDefaultExpanded === next.thinkingDefaultExpanded
+    && prev.activityDisplayMode === next.activityDisplayMode;
 });
 
 function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent }: {  message: UserMessage;
@@ -393,11 +391,12 @@ function AssistantMessageView({
   prevTimestamp,
   sessionId,
   entryId,
-  toolCallsDefaultCollapsed,
   thinkingDefaultExpanded,
+  activityDisplayMode,
 }: {
   message: AssistantMessage;
   isStreaming?: boolean;
+  activityDisplayMode: ActivityDisplayMode;
   toolResults?: Map<string, ToolResultMessage>;
   modelNames?: Record<string, string>;
   cwd?: string;
@@ -406,7 +405,6 @@ function AssistantMessageView({
   prevTimestamp?: number;
   sessionId?: string;
   entryId?: string;
-  toolCallsDefaultCollapsed: boolean;
   thinkingDefaultExpanded: boolean;
 }) {
   const { t, locale } = useI18n();
@@ -414,7 +412,12 @@ function AssistantMessageView({
   const blockItems = (message.content ?? [])
     .map((block, originalIndex) => ({ block, originalIndex }))
     .filter(({ block }) => !isEmptyThinkingBlock(block, { isStreaming }));
-  const blocks = blockItems.map(({ block }) => block);
+  const visibleBlockItems = blockItems.filter(({ block }) => (
+    activityDisplayMode !== "hidden"
+    || block.type !== "toolCall"
+    || Boolean(toolResults?.get((block as ToolCallContent).toolCallId)?.isError)
+  ));
+  const blocks = visibleBlockItems.map(({ block }) => block);
   // Only the last block of the live message is still growing; earlier blocks
   // became final the moment a successor appeared and must render (and flush)
   // as settled text, so pacing and word entrances apply to exactly one block.
@@ -526,7 +529,7 @@ function AssistantMessageView({
     return () => clearInterval(id);
   }, [isStreaming]);
 
-  if (blocks.length === 0 && !isStreaming) return null;
+  if (blocks.length === 0) return null;
 
   // The --live bar is an unboxed-text affordance: boxed blocks (tool calls,
   // thinking) carry their own borders, and the full-height accent bar would
@@ -592,8 +595,8 @@ function AssistantMessageView({
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {blockItems.map(({ block, originalIndex }) => (
-          <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block} toolResults={toolResults} isStreaming={isStreaming} isActiveStreamBlock={originalIndex === activeStreamIndex} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} thinkingDefaultExpanded={thinkingDefaultExpanded} />
+          {visibleBlockItems.map(({ block, originalIndex }) => (
+          <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block} toolResults={toolResults} isStreaming={isStreaming} isActiveStreamBlock={originalIndex === activeStreamIndex} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} />
         ))}
       </div>
 
@@ -642,7 +645,7 @@ function AssistantMessageView({
   );
 }
 
-function BlockView({ block, toolResults, isStreaming, isActiveStreamBlock, streamingDuration, toolCallDurations, cwd, onOpenFile, sessionId, entryId, blockIndex, toolCallsDefaultCollapsed, thinkingDefaultExpanded }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; isActiveStreamBlock?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number; toolCallsDefaultCollapsed: boolean; thinkingDefaultExpanded: boolean }) {
+function BlockView({ block, toolResults, isStreaming, isActiveStreamBlock, streamingDuration, toolCallDurations, cwd, onOpenFile, sessionId, entryId, blockIndex, thinkingDefaultExpanded, activityDisplayMode }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; isActiveStreamBlock?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number; thinkingDefaultExpanded: boolean; activityDisplayMode: ActivityDisplayMode }) {
   if (block.type === "text") {
     return <TextBlock block={block as TextContent} isStreaming={isStreaming} isActiveStreamBlock={isActiveStreamBlock} cwd={cwd} onOpenFile={onOpenFile} />;
   }
@@ -653,7 +656,7 @@ function BlockView({ block, toolResults, isStreaming, isActiveStreamBlock, strea
     const tc = block as ToolCallContent;
     const result = toolResults?.get(tc.toolCallId);
     const duration = toolCallDurations?.get(tc.toolCallId);
-    return <ToolCallBlock block={tc} result={result} duration={duration} isStreaming={isStreaming} isActiveStreamBlock={isActiveStreamBlock} defaultCollapsed={toolCallsDefaultCollapsed} />;
+    return <ToolCallBlock block={tc} result={result} duration={duration} isStreaming={isStreaming} isActiveStreamBlock={isActiveStreamBlock} activityDisplayMode={activityDisplayMode} />;
   }
   return null;
 }
@@ -935,11 +938,17 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
 ));
 
 
-const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isStreaming, isActiveStreamBlock, defaultCollapsed = true }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; isStreaming?: boolean; isActiveStreamBlock?: boolean; defaultCollapsed?: boolean }) {
+const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isStreaming, isActiveStreamBlock, activityDisplayMode = "compact" }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; isStreaming?: boolean; isActiveStreamBlock?: boolean; activityDisplayMode?: ActivityDisplayMode }) {
   const { t } = useI18n();
-  const [expanded, setExpanded] = useState(Boolean(isStreaming) && !defaultCollapsed);
-  const { animating, beginToggle, onPanelTransitionEnd } = useCollapseMotion();
+  const isError = result?.isError ?? false;
+  const hidden = activityDisplayMode === "hidden" && !isError;
+  const [expanded, setExpanded] = useState(activityDisplayMode === "full" || isError);
   const prefersReducedMotion = usePrefersReducedMotion();
+  useEffect(() => {
+    if (activityDisplayMode === "full" || isError) setExpanded(true);
+    else if (activityDisplayMode === "compact") setExpanded(false);
+  }, [activityDisplayMode, isError]);
+  const { animating, beginToggle, onPanelTransitionEnd } = useCollapseMotion();
   const tuning = useStreamTuning();
   // Streaming tool input arrives as raw network bursts (the input JSON and
   // the header preview repaint per frame). When the knob is on, both run
@@ -952,6 +961,7 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
   const displayedPreview = useSmoothStreamText(getToolPreview(block), inputLive ? "pace" : "snap", toolPaceOptions);
   const isEditTool = isEditToolName(block.toolName);
   const resultDiff = result && !result.isError ? getResultDiff(result) : null;
+  const activityStatus = getStructuredActivityStatus(result);
 
   // Result display
   const resultText = result
@@ -963,7 +973,6 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
             .join("\n"))
     : null;
   const resultIsEmpty = resultText === null ? false : (resultText.trim() === "(no output)" || resultText.trim() === "");
-  const isError = result?.isError ?? false;
   // Tool-result images (preview_screenshot and friends) render as
   // always-visible thumbnails, not behind the collapse — a screenshot the
   // agent took of its work is the point of the tool call.
@@ -971,6 +980,7 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
     ? result.content.filter((b): b is ImageContent => b.type === "image")
     : [];
 
+  if (hidden) return null;
   return (
     <div
       className="collapse-box chat-block-in"
@@ -1011,6 +1021,7 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
           <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, maxWidth: "64ch", marginRight: "auto" }}>
             {displayedPreview}
           </span>
+          {activityStatus && <span style={{ color: activityStatus === "error" ? "var(--status-error)" : "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, flexShrink: 0 }}>{activityStatus}</span>}
           {duration !== undefined && (
             <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{t("messageView.durationSeconds", { seconds: duration })}</span>
           )}
@@ -1071,7 +1082,7 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
           </div>
         </CollapsiblePanel>
       </Collapsible>
-      {resultImages.length > 0 && (
+      {(expanded || isError) && resultImages.length > 0 && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "8px 10px", borderTop: "1px solid color-mix(in srgb, var(--status-success) 20%, transparent)" }}>
           {resultImages.map((img, i) => {
             const src = imageSource(img);
@@ -1099,7 +1110,7 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
   && prev.duration === next.duration
   && prev.isStreaming === next.isStreaming
   && prev.isActiveStreamBlock === next.isActiveStreamBlock
-  && prev.defaultCollapsed === next.defaultCollapsed
+  && prev.activityDisplayMode === next.activityDisplayMode
 ));
 
 interface ResultDiff {
@@ -1453,6 +1464,14 @@ function isEditToolName(toolName: string): boolean {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+export function getStructuredActivityStatus(result?: ToolResultMessage): string | null {
+  if (!result) return null;
+  if (result.isError) return "error";
+  if (!isRecord(result.details)) return null;
+  const asyncDetails = result.details.async;
+  if (isRecord(asyncDetails) && typeof asyncDetails.state === "string") return asyncDetails.state;
+  return null;
+}
 
 function PairedResult({ text, isEmpty, isError }: {
   text: string;
@@ -1601,7 +1620,7 @@ function CompactionFileList({ title, files }: { title: string; files: string[] }
   );
 }
 
-function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessage; cwd?: string; onOpenFile?: (filePath: string) => void }) {
+function CustomMessageView({ message, cwd, onOpenFile, activityDisplayMode }: { message: CustomMessage; cwd?: string; onOpenFile?: (filePath: string) => void; activityDisplayMode: ActivityDisplayMode }) {
   const { t, locale } = useI18n();
   const isHiddenDisplay = message.display === false;
   const [contentExpanded, setContentExpanded] = useState(!isHiddenDisplay);
@@ -1612,6 +1631,8 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
   const hasDetails = message.details !== undefined;
   const detailsText = hasDetails ? safeJson(message.details) : "";
   const isIrc = IRC_CUSTOM_TYPES.has(message.customType);
+  const actionableError = isRecord(message.details) && message.details.notifyType === "error";
+  if (activityDisplayMode === "hidden" && !actionableError) return null;
   const ircEnvelope = isIrc ? parseIrcEnvelope(text) : null;
   const displayText = ircEnvelope ? ircEnvelope.body : text;
   const title = isIrc
@@ -1868,7 +1889,7 @@ function formatUsage(
   return parts.join(" · ");
 }
 
-function BashExecutionView({ message, sessionId }: { message: BashExecutionMessage; sessionId?: string }) {
+function BashExecutionView({ message, sessionId, activityDisplayMode = "compact" }: { message: BashExecutionMessage; sessionId?: string; activityDisplayMode?: ActivityDisplayMode }) {
   const { t } = useI18n();
   const [fullOutput, setFullOutput] = useState<{ phase: "loading" } | { phase: "error"; message: string } | { phase: "ready"; output: string } | null>(null);
   // Bumped on every message change; an in-flight fetch from the previous
@@ -1928,9 +1949,10 @@ function BashExecutionView({ message, sessionId }: { message: BashExecutionMessa
     ? `/api/agent/${encodeURIComponent(sessionId)}/bash-output?path=${encodeURIComponent(message.fullOutputPath)}&download=1`
     : null;
 
+  if (activityDisplayMode === "hidden" && !isError) return null;
   return (
     <div className="chat-message collapse-scope" style={{ margin: "6px 0" }}>
-      <ToolCallBlock block={block} result={result} />
+      <ToolCallBlock block={block} result={result} activityDisplayMode={activityDisplayMode} />
       {downloadUrl && (
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 6 }}>
           {fullOutput?.phase !== "ready" && (

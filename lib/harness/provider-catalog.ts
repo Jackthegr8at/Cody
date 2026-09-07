@@ -65,7 +65,22 @@ const ALL = ["omp", "pi", "hermes"] as const;
 export const PROVIDER_CATALOG: readonly ProviderDefinition[] = [
   { id: "anthropic", name: "Anthropic", engines: [...ALL, "claude"], variables: [{ name: "ANTHROPIC_API_KEY", label: "API key", secret: true }], loginIds: ["anthropic", "claude", "anthropic-console"] },
   { id: "openai", name: "OpenAI", engines: [...ALL, "codex"], variables: [{ name: "OPENAI_API_KEY", label: "API key", secret: true }], loginIds: ["openai-codex", "openai-codex-device", "chatgpt"] },
-  { id: "openrouter", name: "OpenRouter", engines: ALL, variables: [{ name: "OPENROUTER_API_KEY", label: "API key", secret: true }], loginIds: ["openrouter"] },
+  // The management key is OPTIONAL and Cody-only: no engine reads it (it is
+  // deliberately absent from `engineChildEnv`), and OpenRouter is fully
+  // configured without one. It exists so Cody can read the account's daily
+  // activity and set per-key spend caps — both of which OpenRouter gates
+  // behind a provisioning-scoped credential. Marking it optional keeps its
+  // absence a row hint rather than an unconfigured provider.
+  {
+    id: "openrouter",
+    name: "OpenRouter",
+    engines: ALL,
+    variables: [
+      { name: "OPENROUTER_API_KEY", label: "API key", secret: true },
+      { name: "OPENROUTER_MANAGEMENT_KEY", label: "Management key", secret: true, hint: "Optional — unlocks daily spend and key limits", optional: true },
+    ],
+    loginIds: ["openrouter"],
+  },
   { id: "google", name: "Google Gemini", engines: ALL, variables: [{ name: "GEMINI_API_KEY", label: "API key", secret: true }], loginIds: ["google-gemini-cli", "google-antigravity"] },
   { id: "xai", name: "xAI", engines: ALL, variables: [{ name: "XAI_API_KEY", label: "API key", secret: true }], loginIds: ["xai", "xai-oauth"] },
   { id: "deepseek", name: "DeepSeek", engines: ALL, variables: [{ name: "DEEPSEEK_API_KEY", label: "API key", secret: true }], loginIds: ["deepseek"] },

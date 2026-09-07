@@ -108,7 +108,9 @@ export interface ToolResultMessage {
   details?: unknown;
   timestamp?: number;
 }
-
+/** How transcript activity (tool calls/results and structured background work)
+ * is presented. Ordinary user/assistant content and thinking are unaffected. */
+export type ActivityDisplayMode = "compact" | "full" | "hidden";
 export interface CustomMessage {
   role: "custom";
   customType: string;

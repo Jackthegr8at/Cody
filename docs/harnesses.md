@@ -83,6 +83,17 @@ interactive CLI for you — for an ACP engine that is the adapter's passthrough
 `model_provider` overrides in its own config), and omp's model registry
 supports custom providers — local inference stays reachable on both paths.
 
+### ACP images and live steering
+
+`initialize` advertises image input through `agentCapabilities.promptCapabilities.image`
+and steering through `_meta.steering.supported`. Cody exposes these as session
+state, never inferring them from an engine name. Image prompts use inline ACP
+image blocks; live steering uses the advertised `_session/steering` extension.
+Only an `injected` result is accepted; failure or an idle-session race preserves
+the draft. The original prompt owns terminal events. ACP steering does not imply
+`follow_up` or concurrent `prompt` support. Native rpc-dialect engines retain
+their existing `chatExtras` steering/follow-up path.
+
 ### Pi rides the RPC pipeline, not the turn seam
 
 Pi is omp's ancestor: `pi --mode rpc` speaks the same NDJSON dialect
@@ -340,11 +351,11 @@ That 1 MiB ceiling is also why `lib/image-compress.ts` exists. An attached image
 travels as base64 *inside* the prompt command — omp's `ImageContent` is
 `{type, data, mimeType}`, with no file-path alternative — so a phone photo
 (3–8 MB, i.e. 4–11 MB base64) could never be delivered as-is. The composer
-passes anything ≤600 KB of base64 through untouched (screenshots stay crisp) and
-otherwise downscales to 2048px and re-encodes JPEG down a quality ladder, then
-1568px, until it fits; a message whose assembled frame would still exceed
-~900 KB is refused in the composer, naming the attachment to remove, rather than
-being bounced by the transport. Host-tool results (a `preview_screenshot`
+retains original files and budgets the complete batch against a 900 KiB
+serialized prompt ceiling. Originals remain untouched when the batch fits;
+otherwise adaptive WebP encoding redistributes the available space across up to
+ten images. The same preparation runs for prompt, steer, and follow-up. A batch
+that cannot fit is rejected without dropping files or clearing the draft. Host-tool results (a `preview_screenshot`
 image, say) ride the same one-line limit, and there is no pending command to
 reject — so `rpc-manager` measures every `host_tool_result` before writing it
 (`guardHostToolResultFrame`) and, when it would not fit, sends a small error

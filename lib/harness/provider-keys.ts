@@ -86,6 +86,9 @@ export interface ProviderVariableStatus {
   label: string;
   secret: boolean;
   hint?: string;
+  /** The engine works without it, so its absence must not make the provider
+   * read as unconfigured. */
+  optional?: boolean;
   /** Saved through Cody. */
   stored: boolean;
   /** Present in Cody's own environment (set on the container), which the
@@ -115,6 +118,7 @@ export function describeProviders(engineId?: string): ProviderStatus[] {
       label: variable.label,
       secret: variable.secret,
       ...(variable.hint ? { hint: variable.hint } : {}),
+      ...(variable.optional ? { optional: true } : {}),
       stored: variable.name in stored,
       fromEnvironment: typeof process.env[variable.name] === "string" && process.env[variable.name] !== "",
     }));
@@ -123,10 +127,22 @@ export function describeProviders(engineId?: string): ProviderStatus[] {
       name: provider.name,
       engines: provider.engines,
       variables,
-      configured: variables.every((variable) => variable.stored || variable.fromEnvironment),
+      // OPTIONAL variables must not gate this. The engine works without them
+      // (Bedrock falls back to a default region; OpenRouter needs no
+      // management key), so counting them would report a fully working
+      // provider as unconfigured — and `provider-directory` already treats
+      // their absence as a row hint rather than a missing credential.
+      configured: variables.every((variable) => variable.optional || variable.stored || variable.fromEnvironment),
     };
   });
 }
+
+/** Variables Cody stores for its OWN use and must never hand to an engine
+ * child. `OPENROUTER_MANAGEMENT_KEY` is provisioning-scoped: it can mint and
+ * revoke API keys for the whole OpenRouter account, while an engine only ever
+ * needs the inference key. Putting it in the child's environment would expose
+ * it to the agent's own bash and file tools for no benefit. */
+const CODY_ONLY_VARIABLES: Record<string, true> = { OPENROUTER_MANAGEMENT_KEY: true };
 
 /**
  * The environment an engine child runs with: Cody's own, the stored keys on
@@ -137,9 +153,17 @@ export function describeProviders(engineId?: string): ProviderStatus[] {
  * (lib/omp/rpc-process.ts), ACP (lib/harness/acp-session.ts) and Cody
  * terminals (lib/terminal-manager.ts), so a key typed into Settings reaches a
  * `pi /login` prompt exactly as it reaches a chat session.
+ *
+ * `CODY_ONLY_VARIABLES` are withheld — see that set for why.
  */
 export function engineChildEnv(extra?: Record<string, string | undefined> | ReadonlyArray<{ name: string; value: string }>): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, ...readProviderKeys() };
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const [name, value] of Object.entries(readProviderKeys())) {
+    if (!CODY_ONLY_VARIABLES[name]) env[name] = value;
+  }
+  // A Cody-only variable set on the CONTAINER is inherited through
+  // `process.env` above, so it has to be removed explicitly too.
+  for (const name of Object.keys(CODY_ONLY_VARIABLES)) delete env[name];
   if (Array.isArray(extra)) {
     for (const { name, value } of extra as ReadonlyArray<{ name: string; value: string }>) env[name] = value;
   } else if (extra) {

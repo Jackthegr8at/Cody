@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { sendAgentCommand } from "@/lib/agent-client";
@@ -19,6 +19,8 @@ interface SubagentMessagesPage {
   reset?: boolean;
   messages: AgentMessage[];
   totalBytes?: number;
+  previousByte?: number;
+  hasEarlier?: boolean;
 }
 
 /** Compact, defensive row for one raw transcript message (content may be a
@@ -219,43 +221,73 @@ function ActivityIndicator({ reducedMotion }: { reducedMotion: boolean }) {
  * re-engages it. Programmatic scrolls coalesce into one rAF and jump
  * instantly (plain scrollTop assignment), so rapid streaming cannot hitch and
  * there is no smooth scroll to gate on prefers-reduced-motion. */
-const TranscriptPanel = memo(function TranscriptPanel({ messages, loading, error, exhausted, followContent, onLoadMore }: {
+const TranscriptPanel = memo(function TranscriptPanel({ messages, loading, error, exhausted, hasEarlier, followContent, reducedMotion, prependVersion, onLoadMore }: {
   messages: AgentMessage[];
   loading: boolean;
   error: string | null;
   exhausted: boolean;
-  /** Live subagent: keep a fixed-height viewport so streaming appends scroll
-   * inside the panel instead of resizing (and re-centering) the dialog. */
+  hasEarlier: boolean;
   followContent: boolean;
+  reducedMotion: boolean;
+  prependVersion: number;
   onLoadMore: () => void;
 }) {
   const { t } = useI18n();
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const pinnedRef = useRef(true);
+  const programmaticScrollRef = useRef(false);
+  const programmaticTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const followFrameRef = useRef<number | null>(null);
+  const previousHeightRef = useRef(0);
+  const previousPrependVersionRef = useRef(prependVersion);
 
+  const disengage = useCallback(() => {
+    pinnedRef.current = false;
+    programmaticScrollRef.current = false;
+  }, []);
   const handleScroll = useCallback(() => {
+    if (programmaticScrollRef.current) return;
     const el = scrollRef.current;
     if (!el) return;
     pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= FOLLOW_REENGAGE_PX;
   }, []);
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (prependVersion !== previousPrependVersionRef.current) {
+      const delta = el.scrollHeight - previousHeightRef.current;
+      if (delta > 0) {
+        el.scrollTop += delta;
+        pinnedRef.current = false;
+      }
+      previousPrependVersionRef.current = prependVersion;
+    }
+    previousHeightRef.current = el.scrollHeight;
+  }, [messages, prependVersion]);
 
   useEffect(() => {
     if (!pinnedRef.current || followFrameRef.current !== null) return;
     followFrameRef.current = requestAnimationFrame(() => {
       followFrameRef.current = null;
       const el = scrollRef.current;
-      if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
+      if (!el || !pinnedRef.current) return;
+      programmaticScrollRef.current = true;
+      el.scrollTo({ top: el.scrollHeight, behavior: reducedMotion ? "auto" : "smooth" });
+      if (programmaticTimerRef.current) clearTimeout(programmaticTimerRef.current);
+      programmaticTimerRef.current = setTimeout(() => {
+        programmaticScrollRef.current = false;
+        programmaticTimerRef.current = null;
+      }, reducedMotion ? 40 : 500);
     });
-  }, [messages]);
-  // The ref MUST be nulled with the cancel: StrictMode's dev double-mount
-  // (and any real remount) otherwise leaves a stale frame id that makes the
-  // one-frame guard above skip every future follow.
+  }, [messages, reducedMotion]);
+
   useEffect(() => () => {
     if (followFrameRef.current !== null) {
       cancelAnimationFrame(followFrameRef.current);
       followFrameRef.current = null;
     }
+    if (programmaticTimerRef.current) clearTimeout(programmaticTimerRef.current);
   }, []);
 
   return (
@@ -263,34 +295,26 @@ const TranscriptPanel = memo(function TranscriptPanel({ messages, loading, error
       id="subagent-transcript-panel"
       ref={scrollRef}
       onScroll={handleScroll}
+      onWheel={disengage}
+      onTouchMove={disengage}
       style={{
-        display: "grid",
-        gap: 8,
-        alignContent: "start",
-        padding: "10px 12px",
-        border: "1px solid var(--border)",
-        borderRadius: "var(--radius-card)",
-        background: "var(--bg-panel)",
-        ...(followContent ? { height: "50dvh" } : { maxHeight: "50dvh" }),
+        display: "grid", gap: 8, alignContent: "start", padding: "10px 12px",
+        border: "1px solid var(--border)", borderRadius: "var(--radius-card)",
+        background: "var(--bg-panel)", ...(followContent ? { height: "50dvh" } : { maxHeight: "50dvh" }),
         overflowY: "auto",
       }}
     >
-      {error ? (
-        <div style={{ fontSize: 12, color: "var(--status-error)" }}>{error}</div>
-      ) : messages.length === 0 ? (
-        <div style={{ fontSize: 12, color: "var(--text-dim)", fontStyle: "italic" }}>
-          {loading ? t("subagentTranscript.loading") : t("subagentTranscript.noMessages")}
-        </div>
-      ) : (
-        messages.map((message, i) => <SubagentTranscriptRow key={i} message={message} />)
+      {error && <div style={{ fontSize: 12, color: "var(--status-error)" }}>{error}</div>}
+      {messages.length === 0 ? (
+        <div style={{ fontSize: 12, color: "var(--text-dim)", fontStyle: "italic" }}>{loading ? t("subagentTranscript.loading") : t("subagentTranscript.noMessages")}</div>
+      ) : messages.map((message, i) => <SubagentTranscriptRow key={i} message={message} />)}
+      {hasEarlier && (
+        <button type="button" disabled={loading} onClick={onLoadMore} style={{ justifySelf: "start", background: "none", border: "none", color: "var(--accent)", cursor: loading ? "default" : "pointer", fontSize: 12, fontFamily: "inherit", padding: 0, opacity: loading ? 0.5 : 1 }}>
+          {t("subagentTranscript.loadMore")}
+        </button>
       )}
-      {!exhausted && (
-        <button
-          type="button"
-          disabled={loading}
-          onClick={onLoadMore}
-          style={{ justifySelf: "start", background: "none", border: "none", color: "var(--accent)", cursor: loading ? "default" : "pointer", fontSize: 12, fontFamily: "inherit", padding: 0, opacity: loading ? 0.5 : 1 }}
-        >
+      {!exhausted && !hasEarlier && messages.length > 0 && (
+        <button type="button" disabled={loading} onClick={onLoadMore} style={{ justifySelf: "start", background: "none", border: "none", color: "var(--accent)", cursor: loading ? "default" : "pointer", fontSize: 12, fontFamily: "inherit", padding: 0, opacity: loading ? 0.5 : 1 }}>
           {t("subagentTranscript.loadMore")}
         </button>
       )}
@@ -315,12 +339,15 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [transcriptMessages, setTranscriptMessages] = useState<AgentMessage[]>([]);
   const [transcriptNextByte, setTranscriptNextByte] = useState(0);
+  const [transcriptBeforeByte, setTranscriptBeforeByte] = useState(0);
+  const [transcriptHasEarlier, setTranscriptHasEarlier] = useState(false);
+  const [transcriptPrependVersion, setTranscriptPrependVersion] = useState(0);
   const [transcriptLoading, setTranscriptLoading] = useState(false);
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
   const [transcriptExhausted, setTranscriptExhausted] = useState(false);
   // True once the first load settles: revalidation cycles triggered by live
   // frames must never regress already-rendered content to a placeholder.
-  const [loadedOnce, setLoadedOnce] = useState(false);
+  const [loadedForSubagent, setLoadedForSubagent] = useState<string | null>(null);
   const requestSeqRef = useRef(0);
   const transcriptRequestSeqRef = useRef(0);
   const refetchedVersionRef = useRef(0);
@@ -343,13 +370,17 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
 
   // Full transcript page (RPC registry first, disk fallback) — mirrors the
   // get_subagent_messages response shape so both sources are interchangeable.
-  const fetchTranscriptPage = useCallback(async (startByte: number, preferDisk: boolean): Promise<SubagentMessagesPage> => {
+  const fetchTranscriptPage = useCallback(async (startByte: number, preferDisk: boolean, direction: "forward" | "before", tail = false): Promise<SubagentMessagesPage> => {
     if (!sessionId || !subagent?.id) throw new Error("No session");
     if (preferDisk) {
-      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(subagent.id)}?fromByte=${startByte}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const params = new URLSearchParams(direction === "before" ? { beforeByte: String(startByte) } : { fromByte: String(startByte) });
+      if (tail) params.set("tail", "1");
+      const url = "/api/sessions/" + encodeURIComponent(sessionId) + "/subagents/" + encodeURIComponent(subagent.id) + "?" + params.toString();
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("HTTP " + res.status);
       return await res.json() as SubagentMessagesPage;
     }
+    if (direction === "before") throw new Error("Earlier transcript pages require the disk reader");
     return await sendAgentCommand<SubagentMessagesPage>(sessionId, {
       type: "get_subagent_messages",
       subagentId: subagent.id,
@@ -358,32 +389,38 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
     });
   }, [sessionId, subagent?.id, subagent?.sessionFile]);
 
-  const loadTranscriptPage = useCallback(async (startByte: number) => {
+  const loadTranscriptPage = useCallback(async (startByte: number, direction: "forward" | "before" = "forward", tail = false) => {
     if (!sessionId || !subagent?.id) return;
-    // Own sequence ref: the completion fetch and the transcript pager must not
-    // invalidate each other (a shared ref would wedge `loading` forever).
     const seq = ++transcriptRequestSeqRef.current;
     setTranscriptLoading(true);
     setTranscriptError(null);
     try {
       let page: SubagentMessagesPage;
       try {
-        page = await fetchTranscriptPage(startByte, fromDisk);
+        page = await fetchTranscriptPage(startByte, fromDisk || tail, direction, tail);
       } catch (rpcError) {
-        // The RPC registry only knows subagents of the current process; a
-        // live entry whose session restarted falls back to the disk reader.
-        if (fromDisk || !subagent.id) throw rpcError;
-        page = await fetchTranscriptPage(startByte, true);
+        if (fromDisk || direction === "before" || !subagent.id) throw rpcError;
+        page = await fetchTranscriptPage(startByte, false, direction, false);
       }
       if (seq !== transcriptRequestSeqRef.current) return;
       if (page.reset) {
         setTranscriptMessages(page.messages);
+      } else if (direction === "before") {
+        setTranscriptMessages((prev) => [...page.messages, ...prev]);
       } else {
         setTranscriptMessages((prev) => [...prev, ...page.messages]);
       }
-      setTranscriptNextByte(page.nextByte);
-      const complete = typeof page.totalBytes === "number" ? page.nextByte >= page.totalBytes : page.messages.length === 0;
-      setTranscriptExhausted(complete || page.nextByte <= page.fromByte);
+      if (direction === "before") {
+        setTranscriptBeforeByte(page.fromByte);
+        setTranscriptHasEarlier(page.hasEarlier ?? page.fromByte > 0);
+        setTranscriptPrependVersion((version) => version + 1);
+      } else {
+        setTranscriptNextByte(page.nextByte);
+        if (tail || page.reset) setTranscriptHasEarlier(page.hasEarlier ?? page.fromByte > 0);
+        const complete = typeof page.totalBytes === "number" ? page.nextByte >= page.totalBytes : page.messages.length === 0;
+        setTranscriptExhausted(complete || page.nextByte <= page.fromByte);
+        if (tail || page.reset) setTranscriptBeforeByte(page.fromByte);
+      }
     } catch (e) {
       if (seq !== transcriptRequestSeqRef.current) return;
       setTranscriptError(e instanceof Error ? e.message : String(e));
@@ -393,8 +430,12 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
   }, [sessionId, subagent?.id, fromDisk, fetchTranscriptPage]);
 
   const handleLoadMore = useCallback(() => {
-    void loadTranscriptPage(transcriptNextByte);
-  }, [loadTranscriptPage, transcriptNextByte]);
+    if (transcriptHasEarlier) {
+      void loadTranscriptPage(transcriptBeforeByte, "before");
+    } else {
+      void loadTranscriptPage(transcriptNextByte);
+    }
+  }, [loadTranscriptPage, transcriptBeforeByte, transcriptHasEarlier, transcriptNextByte]);
 
   const load = useCallback(async () => {
     if (!sessionId || !subagent?.id) return;
@@ -420,7 +461,7 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
     } finally {
       if (seq === requestSeqRef.current) {
         setLoading(false);
-        setLoadedOnce(true);
+        setLoadedForSubagent(subagent.id);
       }
     }
   }, [sessionId, subagent?.id, live, fetchCompletion]);
@@ -434,15 +475,26 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
     setCompletionTruncated(false);
     setError(null);
     setDetail(null);
-    setLoadedOnce(false);
+    setLoadedForSubagent(null);
     setTranscriptOpen(false);
     setTranscriptMessages([]);
     setTranscriptNextByte(0);
+    setTranscriptBeforeByte(0);
+    setTranscriptHasEarlier(false);
+    setTranscriptPrependVersion(0);
     setTranscriptExhausted(false);
     setTranscriptError(null);
     // The bumped seq invalidates an in-flight request whose finally will skip
     // clearing this — reset it here or the next open shows Loading forever.
     setTranscriptLoading(false);
+    refetchedVersionRef.current = 0;
+    refetchedTranscriptVersionRef.current = 0;
+    latestVersionRef.current = 0;
+    versionLastFiredRef.current = 0;
+    if (versionDebounceTimerRef.current) {
+      clearTimeout(versionDebounceTimerRef.current);
+      versionDebounceTimerRef.current = null;
+    }
     void load();
   }, [open, sessionId, load]);
 
@@ -455,7 +507,7 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
   // for the window remainder — and the already-processed guard prevents
   // same-version loops.
   useEffect(() => {
-    if (!open || !sessionId || transcriptVersion === 0 || loading) return;
+    if (!open || !sessionId || transcriptVersion === 0) return;
     const completionDone = transcriptVersion === refetchedVersionRef.current && transcriptVersion === latestVersionRef.current;
     const transcriptDone = transcriptVersion === refetchedTranscriptVersionRef.current;
     if (completionDone && transcriptDone) return;
@@ -471,11 +523,10 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
         refetchedVersionRef.current = latestVersionRef.current;
         void load();
       }
-      // Open transcript append: if an older page is still in flight, DO NOT
-      // consume the version — when transcriptLoading flips false this effect
-      // re-runs and pages the latest (a consumed version would leave the
-      // open transcript stale forever with no Load-more button).
-      if (transcriptOpen && !transcriptLoading && refetchedTranscriptVersionRef.current !== latestVersionRef.current) {
+      // Paging has its own sequence guard, so a busy request may safely be
+      // superseded by the newest coalesced version instead of re-running this
+      // timer whenever loading state changes.
+      if (transcriptOpen && refetchedTranscriptVersionRef.current !== latestVersionRef.current) {
         refetchedTranscriptVersionRef.current = latestVersionRef.current;
         void loadTranscriptPage(transcriptNextByte);
       }
@@ -483,11 +534,13 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
     return () => {
       if (versionDebounceTimerRef.current) clearTimeout(versionDebounceTimerRef.current);
     };
-  }, [open, sessionId, transcriptVersion, loading, transcriptOpen, transcriptLoading, load, loadTranscriptPage, transcriptNextByte]);
+  }, [open, sessionId, transcriptVersion, transcriptOpen, load, loadTranscriptPage, transcriptNextByte]);
 
-  const agent = detail?.agent ?? subagent?.agent ?? "";
-  const description = detail?.description ?? subagent?.description ?? "";
-  const task = detail?.task ?? subagent?.task ?? subagent?.assignment ?? "";
+  const currentDetail = detail?.id === subagent?.id ? detail : null;
+  const contentReady = loadedForSubagent === subagent?.id;
+  const agent = currentDetail?.agent ?? subagent?.agent ?? "";
+  const description = currentDetail?.description ?? subagent?.description ?? "";
+  const task = currentDetail?.task ?? subagent?.task ?? subagent?.assignment ?? "";
   const progress = subagent?.progress;
   const historyTokens = formatTokens(progress?.tokens);
   const historyMeta = subagent?.source === "history"
@@ -505,7 +558,7 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
   // with a frozen status, so get_subagents refreshes (detail) carry the live
   // one. Terminal states hide the live-activity indicator; a landed
   // completion is terminal regardless of how stale the status still is.
-  const currentStatus = detail?.status ?? subagent?.status;
+  const currentStatus = currentDetail?.status ?? subagent?.status;
   const subagentActive = live && !completion
     && (currentStatus === "started" || currentStatus === "pending" || currentStatus === "running");
   const recentEvents = live && !completion && events && events.length > 0 ? events.slice(-4) : null;
@@ -542,7 +595,7 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
                   </div>
                 )}
                 <div style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {detail?.sessionFile ?? subagent.sessionFile ?? subagent.id}
+                  {currentDetail?.sessionFile ?? subagent.sessionFile ?? subagent.id}
                 </div>
                 {historyMeta && (
                   <div style={{ fontSize: 10.5, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginTop: 2 }}>
@@ -596,13 +649,13 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
 
             {/* Errors render alongside whatever already loaded: a failed
                 revalidation must not blank out rendered content. */}
-            {error && (
+            {contentReady && error && (
               <div style={{ fontSize: 12, color: "var(--status-error)", padding: "8px 2px" }}>{error}</div>
             )}
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <TaskBlock task={task} />
-              <CompletionBlock completion={completion} truncated={completionTruncated} />
-              {loading && !loadedOnce && <div style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("subagentTranscript.loading")}</div>}
+              <CompletionBlock completion={contentReady ? completion : null} truncated={contentReady && completionTruncated} />
+              {loading && !contentReady && <div style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("subagentTranscript.loading")}</div>}
               <button
                 type="button"
                 aria-expanded={transcriptOpen}
@@ -611,7 +664,7 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
                   const next = !transcriptOpen;
                   setTranscriptOpen(next);
                   if (next && transcriptMessages.length === 0 && !transcriptLoading) {
-                    void loadTranscriptPage(0);
+                    void loadTranscriptPage(0, "forward", true);
                   }
                 }}
                 style={{
@@ -633,7 +686,10 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
                   loading={transcriptLoading}
                   error={transcriptError}
                   exhausted={transcriptExhausted}
+                  hasEarlier={transcriptHasEarlier}
                   followContent={subagentActive}
+                  reducedMotion={reducedMotion}
+                  prependVersion={transcriptPrependVersion}
                   onLoadMore={handleLoadMore}
                 />
               )}

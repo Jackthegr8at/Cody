@@ -169,6 +169,8 @@ lib/
                         shared `omp plugin` execFile/JSON helpers)
   agent-client.ts      typed fetch helper for /api/agent commands
   draft-store.ts       local draft persistence helpers
+  image-compress.ts    browser-side source-first batch preparation: exact 900 KiB prompt-frame budget, adaptive WebP fallback, explicit decode/budget errors
+  image-attachments.ts defensive server validation for base64 image command payloads (10-image bound)
   context-usage.ts     derives idle/reconnect gauge usage from persisted messages
   env.ts               readEnv(): CODY_* config with OMP_WEB_* fallback
   display/             universal display/preview surface:
@@ -1552,12 +1554,13 @@ handled or safely ignored.
   (`extractSubagentHistory` still reads them for the route's roster payload
   and usage sum). The transcript route pages the sibling file byte-wise
   (mirroring `get_subagent_messages`, which is RPC-registry-gated and
-  refuses files it doesn't know). The dialog reads only the final output —
+  refuses files it doesn't know). The dialog initially reads the final output —
   `<id>.md` via `?mode=completion` (bounded tail read that also works for
   transcripts beyond the 16MB paging cap) with a live `get_subagents`
-  snapshot fallback for header enrichment; it never pages the raw
-  transcript. Subagent ids are `[A-Za-z0-9_-]{1,80}` — the route validates
-  before joining to confine reads to the sibling dir.
+  snapshot fallback for header enrichment. Show transcript opens a complete-line
+  tail page, supports earlier pages, and follows new output until manual scrolling.
+  IDs can be explicit task names with spaces/punctuation: validate a bounded safe
+  filename component and retain realpath confinement, not an AdjectiveNoun regex.
 - **In-message task summary** (`components/MessageView.tsx` TaskResultPanel):
   the session reader allowlists a SIZE-BOUNDED subset of `task` toolResult
   details (telemetry only — no `output`/`stderr`, long text truncated to

@@ -1,16 +1,12 @@
 import { NextResponse } from "next/server";
 import { resolveSessionPathOr404 } from "@/lib/api-utils";
-import { readCompletionArtifact, readSubagentTranscriptPage, resolveSubagentArtifact, subagentTranscriptPath } from "@/lib/subagent-history";
+import { isSafeSubagentId, readCompletionArtifact, readSubagentTranscriptPage, resolveSubagentArtifact, subagentTranscriptPath } from "@/lib/subagent-history";
 
 export const dynamic = "force-dynamic";
 
-// Subagent ids are AdjectiveNoun names, optionally dotted for nested spawns
-// (OMP allocates hierarchical ids like `Parent.Child`). The grammar bounds the
-// value, rejects empty segments and traversal forms, and guarantees the joined
-// path cannot escape the sibling dir; symlink escapes are additionally blocked
-// by realpath confinement (resolveSubagentArtifact).
-const SUBAGENT_ID_RE = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/;
-const SUBAGENT_ID_MAX_LENGTH = 100;
+// OMP task names are explicit user input and may contain spaces/punctuation.
+// The shared path-boundary validator permits those names while rejecting path
+// separators, controls, traversal components, and overlong UTF-8 filenames.
 
 /**
  * GET /api/sessions/[id]/subagents/[subagentId]?fromByte=N
@@ -29,7 +25,7 @@ export async function GET(
 ) {
   const { id, subagentId } = await params;
   try {
-    if (!SUBAGENT_ID_RE.test(subagentId) || subagentId.length > SUBAGENT_ID_MAX_LENGTH) {
+    if (!isSafeSubagentId(subagentId)) {
       return NextResponse.json({ error: "Invalid subagent id", code: "invalid_subagent_id" }, { status: 400 });
     }
     const sessionResolved = await resolveSessionPathOr404(id, req);
@@ -55,8 +51,12 @@ export async function GET(
       return NextResponse.json({ error: "Subagent transcript not found", code: "transcript_not_found" }, { status: 404 });
     }
     const fromByteRaw = searchParams.get("fromByte");
-    const fromByte = fromByteRaw !== null ? Number(fromByteRaw) : 0;
-    const page = readSubagentTranscriptPage(resolved, fromByte);
+    const beforeByteRaw = searchParams.get("beforeByte");
+    const fromByte = fromByteRaw !== null ? Number(fromByteRaw) : beforeByteRaw !== null ? Number(beforeByteRaw) : 0;
+    const page = readSubagentTranscriptPage(resolved, fromByte, {
+      tail: searchParams.get("tail") === "1" || searchParams.get("tail") === "true",
+      before: beforeByteRaw !== null,
+    });
     return NextResponse.json(page);
   } catch (error) {
     return NextResponse.json(

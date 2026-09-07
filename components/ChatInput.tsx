@@ -1,11 +1,11 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, Clock, ListChecks, Loader2, Paperclip, Pin, Search, Settings, ShieldCheck, SlidersHorizontal, Sparkles, Target, TriangleAlert, Wrench } from "lucide-react";
+import { ChevronDown, Clock, ListChecks, Loader2, Paperclip, Pin, Search, ShieldCheck, SlidersHorizontal, Sparkles, Target, TriangleAlert, Zap } from "lucide-react";
 import type { SessionModeOption } from "@/hooks/useAgentSession";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import { ALL_CAPABILITIES, OMP_ENGINE_ID, type ActiveEngineInfo, type EngineCapabilities } from "./SettingsTabs";
-import type { ToolPreset } from "@/lib/tool-presets";
+
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
 import { formatGoalElapsed } from "@/lib/web-mode-state";
@@ -28,6 +28,7 @@ import {
 import {
   checkPromptFrameBudget,
   formatAttachmentSize,
+  prepareImageBatchForAttachment,
   prepareImageForAttachment,
   SUPPORTED_IMAGE_FORMAT_LABEL,
   UnsupportedImageError,
@@ -38,7 +39,9 @@ import {
 } from "@/lib/file-fuzzy";
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { useUsage } from "@/hooks/useUsage";
+import { useResetCredits, useUsage } from "@/hooks/useUsage";
+import { useOpenRouterAccount, type UseOpenRouterAccountResult } from "@/hooks/useOpenRouterAccount";
+import { OpenRouterCredits } from "./OpenRouterCredits";
 import { selectBindingWindow, selectWindowsForModel, type ModelRef } from "@/lib/usage/select";
 import type { UsageAccount, UsageSnapshot, UsageWindow, UsageWindowState } from "@/lib/usage/types";
 import { brandAccountLabel } from "@/lib/provider-brand";
@@ -57,6 +60,8 @@ export interface AttachedImage {
   previewUrl: string; // object URL for display
   /** Original file name, when there was one — named in over-budget errors. */
   name?: string;
+  /** Original browser file retained for adaptive re-encoding at send time. */
+  source?: File;
 }
 
 export type AttachedTextFile = AttachedTextFileData;
@@ -77,6 +82,10 @@ interface Props {
   onFollowUp?: (message: string, images?: AttachedImage[]) => void;
   onPromptWithStreamingBehavior?: (message: string, behavior: "steer" | "followUp", images?: AttachedImage[]) => void;
   isStreaming: boolean;
+  /** The active session accepts a follow-up/steer while it is running. */
+  canAttachWhileStreaming?: boolean;
+  /** The active session also accepts image payloads while it is running. */
+  canAttachImagesWhileStreaming?: boolean;
   /** Everything the ACTIVE engine can serve. The composer gates on several
    * of these (chatExtras for the rpc-dialect affordances, models for omp's
    * role resolution, skills for the "/" palette lookup), so the whole set
@@ -95,29 +104,20 @@ interface Props {
   /** Bumped when models.yml or the curation changed: the picker re-reads
    * the new-models line and its visibility mirror. */
   modelsRefreshKey?: number;
-  onModelChange?: (provider: string, modelId: string) => void;
+  onModelChange?: (provider: string, modelId: string, selection?: "manual" | "smart") => void | boolean | Promise<boolean>;
   /** Return a NEW session to auto ("Smart") model resolution. Present only
    * for a new, not-yet-spawned session — on a live session the Smart row
    * resolves the OMP roles default itself and calls onModelChange instead. */
   onSelectSmartModel?: () => void;
-  /** Reports a live-session Smart pick after it resolved and pinned, so the
-   * session state remembers the pin was Smart's answer (keeps the label on
-   * "Smart · <model>" instead of reading like a manual pick). */
-  onSmartModelPinned?: (provider: string, modelId: string) => void;
   /** The engine's last unprompted model switch for this session (retry
    * fallback, usage-aware routing). Renders a persistent marker beside the
    * model control naming what moved and why — the switch outlives its toast. */
   autoModelSwitch?: { from: string; to: string; role?: string; reason?: string } | null;
   fastModeEnabled?: boolean;
   fastModeActive?: boolean;
+  fastModeCapable?: boolean;
   fastModeSupported?: boolean;
   onFastModeChange?: (enabled: boolean) => void;
-  /** Opens the Models catalog and curation hub. */
-  onOpenModels?: () => void;
-  /** Applied at spawn time only (--tools/--no-tools flags) — omp's RPC
-   * protocol cannot change an already-running session's toolset. */
-  toolPreset?: ToolPreset;
-  onToolPresetChange?: (preset: ToolPreset) => void;
   onAbortCompaction?: () => void;
   isCompacting?: boolean;
   compactResult?: CompactResultInfo | null;
@@ -162,21 +162,6 @@ export interface ChatInputHandle {
   addFiles: (files: File[]) => void;
 }
 
-// Most-to-least permissive, matching how a user thinks about "what am I
-// giving up": Full keeps omp's whole builtin toolset (subagents, task lists,
-// GitHub, web search, …); Core restricts to read/bash/edit/write only;
-// None disables tools entirely.
-const TOOL_PRESET_ORDER: ToolPreset[] = ["full", "default", "none"];
-const TOOL_PRESET_LABEL_KEY: Record<ToolPreset, string> = {
-  full: "chatInput.toolsFull",
-  default: "chatInput.toolsDefault",
-  none: "chatInput.toolsOff",
-};
-// Only the restrictive presets warn — Full loses nothing, so it gets no line.
-const TOOL_PRESET_WARNING_KEY: Partial<Record<ToolPreset, string>> = {
-  default: "chatInput.toolPresetCoreWarning",
-  none: "chatInput.toolPresetNoneWarning",
-};
 
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
 /** Circumference of the composer ring (r = 9.5). */
@@ -306,6 +291,30 @@ const QUOTA_MODEL_UNMETERED: QuotaAbsentView = {
   reason: null,
   others: [],
 };
+
+/** The provider meters spend as a PREPAID BALANCE rather than a refilling
+ *  window (OpenRouter). Saying "no plan limits" here would be false — money
+ *  runs out, and it is the hardest limit there is — so the ring stays blank
+ *  (there is no honest percentage of a balance the user can top up) while the
+ *  credit section below states the real number. */
+const QUOTA_MODEL_PREPAID: QuotaAbsentView = {
+  known: false,
+  color: "var(--text-muted)",
+  titleKey: "usage.prepaidTitle",
+  noteKey: null,
+  scopeKey: "usage.prepaidScope",
+  reason: null,
+  others: [],
+};
+
+/** Providers that bill a prepaid balance instead of a refilling plan window,
+ *  and therefore have a credit balance worth reading. Exported so the composer
+ *  gates its OpenRouter poll on the SAME predicate the quota view branches on:
+ *  a model that shows the prepaid state must be a model whose balance was
+ *  fetched, or the popover says "prepaid" and then shows nothing. */
+export function isPrepaidProvider(provider: string | null | undefined): boolean {
+  return typeof provider === "string" && provider.trim().toLowerCase() === "openrouter";
+}
 
 /** The provider DOES report quota and none of it constrains this model (every
  *  window it reports is scoped to another model tier). Emphatically not the
@@ -468,6 +477,11 @@ export function buildQuotaView(
     const reason = readableReason(snapshot.reason);
 
     if (!match || !modelBinding) {
+      // A prepaid gateway is not a silence at all — it meters spend, just not
+      // in windows. It has to be checked BEFORE the unmetered fallback, which
+      // would otherwise claim "nothing it runs counts against a quota" about
+      // an account that is literally spending money per token.
+      if (isPrepaidProvider(model.provider)) return { ...QUOTA_MODEL_PREPAID, others };
       // Three different silences, and the copy has to tell them apart: no
       // account serves this provider / the account is unmetered / the account
       // reports quota that all belongs to other models.
@@ -661,6 +675,8 @@ function QuotaWindowRow({
  *  else — context usage and token traffic live in the top bar. Exported so the
  *  SSR tests can render it open, which the composer's own state never is. */
 export function QuotaPopover({
+  resetCredits,
+  openRouter,
   quota,
   provider,
   modelName,
@@ -668,6 +684,11 @@ export function QuotaPopover({
   anchorTop = null,
   anchorRight = null,
 }: {
+  resetCredits?: ReturnType<typeof useResetCredits>;
+  /** OpenRouter's prepaid balance, passed only when an OpenRouter model is
+   * selected. Absent for every other provider — a subscription has no
+   * balance, and the section must not appear for one. */
+  openRouter?: UseOpenRouterAccountResult;
   quota: QuotaView;
   /** Selected model's provider, naming the header before anything binds. */
   provider: string | null;
@@ -677,12 +698,33 @@ export function QuotaPopover({
   anchorRight?: number | null;
 }) {
   const { t, locale } = useI18n();
+  const [resetSelection, setResetSelection] = useState<{ accountId: string; creditId: string; account: string } | null>(null);
+  const resetPendingRef = useRef(false);
+  const redeemSelectedReset = useCallback(async () => {
+    if (!resetSelection || !resetCredits || resetPendingRef.current) return;
+    resetPendingRef.current = true;
+    try {
+      const outcome = await resetCredits.redeem(resetSelection.accountId, resetSelection.creditId);
+      if (outcome.outcome === "reset" || outcome.outcome === "already_redeemed") {
+        toast.success(t("usage.resetCreditUsed", { account: resetSelection.account }));
+      } else if (outcome.outcome === "no_credit" || outcome.outcome === "nothing_to_reset") {
+        toast.info(outcome.message ?? t("usage.resetCreditUnavailable"));
+      } else {
+        toast.error(t("usage.resetCreditFailed"), outcome.message ?? t("usage.resetCreditInconclusive"));
+      }
+      setResetSelection(null);
+      resetCredits.refresh();
+    } catch {
+      toast.error(t("usage.resetCreditFailed"), t("usage.resetCreditInconclusive"));
+    } finally {
+      resetPendingRef.current = false;
+    }
+  }, [resetCredits, resetSelection, t]);
+  const resetAccounts = resetCredits?.snapshot?.accounts ?? [];
+  const availableResetCount = resetAccounts.reduce((count, account) => count + account.availableCount, 0);
   const percentText = quota.known ? `${Math.round(quota.percent)}%` : "—";
   const headlineReset = quota.known ? formatResetTime(quota.resetsAt, locale, now) : null;
   const age = quota.known && quota.fetchedAt ? formatRelativeTime(quota.fetchedAt, locale, now) : null;
-  const savedResetExpiry = quota.known && quota.resetCredits
-    ? formatResetTime(quota.resetCredits.earliestExpiresAt, locale, now)
-    : null;
   // Age is only claimed when the snapshot carries a usable timestamp, and a
   // snapshot the server flagged stale says so rather than passing for fresh.
   const freshness = age
@@ -757,20 +799,55 @@ export function QuotaPopover({
             {t("usage.reportedPlan", { plan: quota.planType })}
           </div>
         )}
-        {quota.known && quota.resetCredits && (
-          <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+        {/* The balance sits directly under the headline, before banked resets
+            and other providers' windows: for an OpenRouter model it is THE
+            number that decides whether the next turn runs, so it must not be
+            below the fold of a 320px popover. */}
+        {openRouter && <OpenRouterCredits account={openRouter} />}
+        {resetCredits && (
+          <section style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
             <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text)" }}>
-              {t("usage.savedResets", { count: quota.resetCredits.availableCount })}
+              {t("usage.savedResets", { count: availableResetCount })}
             </div>
-            {savedResetExpiry && (
-              <div style={{ marginTop: 2, fontSize: 10, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
-                {t("usage.expiresAt", { time: savedResetExpiry })}
-              </div>
-            )}
             <div style={{ marginTop: 4, fontSize: 10, lineHeight: 1.45, color: "var(--text-dim)" }}>
               {t("usage.savedResetsNote")}
             </div>
-          </div>
+            {resetCredits.loading && !resetCredits.snapshot && (
+              <div style={{ marginTop: 6, fontSize: 10, color: "var(--text-muted)" }}>{t("usage.resetCreditChecking")}</div>
+            )}
+            {resetCredits.snapshot?.accounts.map((account) => {
+              const credit = account.credits[0];
+              const expiry = credit ? formatResetTime(credit.expiresAt, locale, now) : null;
+              const confirming = resetSelection?.accountId === account.id;
+              return (
+                <div key={account.id} style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid color-mix(in srgb, var(--border) 60%, transparent)" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                    <span style={{ minWidth: 0, fontSize: 11, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{account.label}</span>
+                    <span style={{ flexShrink: 0, fontSize: 11, fontVariantNumeric: "tabular-nums", color: "var(--text-muted)" }}>{t("usage.savedResets", { count: account.availableCount })}</span>
+                  </div>
+                  {expiry && <div style={{ marginTop: 2, fontSize: 10, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>{t("usage.expiresAt", { time: expiry })}</div>}
+                  {account.error && <div style={{ marginTop: 4, fontSize: 10, color: "var(--text-dim)" }}>{account.error}</div>}
+                  {credit && account.canRedeem && !confirming && (
+                    <button type="button" onClick={() => setResetSelection({ accountId: account.id, creditId: credit.id, account: account.label })} style={{ marginTop: 6, padding: "3px 7px", border: "1px solid var(--border)", borderRadius: 5, background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 10 }}>
+                      {t("usage.useReset")}
+                    </button>
+                  )}
+                  {confirming && (
+                    <div style={{ marginTop: 6, padding: 7, borderRadius: 6, background: "var(--bg-hover)", fontSize: 10, lineHeight: 1.45, color: "var(--text-muted)" }}>
+                      <div>{t("usage.resetCreditConfirm", { account: account.label })}</div>
+                      <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 6 }}>
+                        <button type="button" onClick={() => setResetSelection(null)} disabled={resetCredits.redeeming} style={{ padding: "3px 7px", border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 10 }}>{t("usage.cancelReset")}</button>
+                        <button type="button" onClick={() => void redeemSelectedReset()} disabled={resetCredits.redeeming} style={{ padding: "3px 7px", border: "none", borderRadius: 5, background: "var(--accent-strong)", color: "var(--on-accent)", cursor: resetCredits.redeeming ? "wait" : "pointer", fontSize: 10 }}>{t("usage.useOneReset")}</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {resetCredits.snapshot && !resetCredits.snapshot.available && (
+              <div style={{ marginTop: 6, fontSize: 10, color: "var(--text-muted)" }}>{resetCredits.snapshot.reason ?? t("usage.resetCreditUnavailable")}</div>
+            )}
+          </section>
         )}
 
         {/* Every OTHER window that constrains this model, most binding first —
@@ -1124,7 +1201,7 @@ function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; plan?: A
 }
 
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, capabilities = ALL_CAPABILITIES, engine = null, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, onSmartModelPinned, autoModelSwitch, fastModeEnabled, fastModeActive, fastModeSupported, onFastModeChange, onOpenModels, toolPreset, onToolPresetChange,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, canAttachWhileStreaming = false, canAttachImagesWhileStreaming = false, capabilities = ALL_CAPABILITIES, engine = null, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, autoModelSwitch, fastModeEnabled, fastModeActive, fastModeCapable, fastModeSupported, onFastModeChange,
   onAbortCompaction, isCompacting, compactResult,
   thinkingLevel, onThinkingLevelChange, availableModes = NO_MODES, currentModeId = null, onModeChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
   retryInfo, queuedMessages, inputHistory = [], onAbortRetry,
@@ -1161,6 +1238,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     failed: usageFailed,
     refresh: refreshUsage,
   } = useUsage(quotaReported);
+  const resetCredits = useResetCredits(quotaReported);
+  const refreshResetCredits = resetCredits.refresh;
   const modelCollator = React.useMemo(
     () => new Intl.Collator(locale, { numeric: true, sensitivity: "base" }),
     [locale],
@@ -1170,12 +1249,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [modelDropdownRect, setModelDropdownRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
-  const [toolsDropdownOpen, setToolsDropdownOpen] = useState(false);
-  // Where the tool-preset and reasoning panels hang from on a phone: the
-  // button's top in viewport coordinates, captured when it opens. Icon-only
-  // buttons sit near the right edge there, too close for a panel anchored to
-  // them to stay on screen, so it detaches to the viewport instead.
-  const [toolsAnchorTop, setToolsAnchorTop] = useState<number | null>(null);
+  // The reasoning and mode panels detach to the viewport on narrow screens.
   const [thinkingAnchorTop, setThinkingAnchorTop] = useState<number | null>(null);
   const [modeAnchorTop, setModeAnchorTop] = useState<number | null>(null);
   const [contextPopoverAnchor, setContextPopoverAnchor] = useState<{ top: number; right: number } | null>(null);
@@ -1213,7 +1287,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
   const modeDropdownRef = useRef<HTMLDivElement>(null);
-  const toolsDropdownRef = useRef<HTMLDivElement>(null);
+
   const historyMenuRef = useRef<HTMLDivElement>(null);
   const contextPopoverRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1253,6 +1327,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const attachmentRevisionRef = useRef(0);
   const pendingImageCountRef = useRef(0);
   const pendingTextFileCountRef = useRef(0);
+  useEffect(() => {
+    const onBalanceIncrease = (event: Event) => {
+      const detail = (event as CustomEvent<{ label?: string; delta?: number }>).detail;
+      const delta = detail?.delta;
+      if (typeof delta !== "number" || !Number.isFinite(delta) || delta <= 0) return;
+      toast.success(t("usage.resetCreditBalanceIncreased", { count: delta, account: detail.label ?? t("usage.account") }));
+    };
+    window.addEventListener("cody:reset-credit-balance-increased", onBalanceIncrease);
+    return () => window.removeEventListener("cody:reset-credit-balance-increased", onBalanceIncrease);
+  }, [t]);
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
   attachedTextFilesRef.current = attachedTextFiles;
@@ -1360,6 +1444,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             mimeType: prepared.mimeType,
             previewUrl: URL.createObjectURL(file),
             name: file.name,
+            source: file,
           });
         } catch (error) {
           // Per file, and never silent: the user must know which one dropped out.
@@ -1442,15 +1527,19 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }, []);
 
   const processFiles = useCallback((files: File[]) => {
-    if (isStreaming) {
+    if (isStreaming && !canAttachWhileStreaming) {
       setAttachError("Attachments are disabled while the agent is running.");
       return;
     }
     const imageFiles = files.filter((file) => file.type.startsWith("image/"));
     const otherFiles = files.filter((file) => !file.type.startsWith("image/"));
-    void processImageFiles(imageFiles);
+    if (imageFiles.length > 0 && isStreaming && !canAttachImagesWhileStreaming) {
+      setAttachError("Image attachments are unavailable while the agent is running.");
+    } else {
+      void processImageFiles(imageFiles);
+    }
     void processTextFiles(otherFiles);
-  }, [isStreaming, processImageFiles, processTextFiles]);
+  }, [isStreaming, canAttachWhileStreaming, canAttachImagesWhileStreaming, processImageFiles, processTextFiles]);
 
   const removeImage = useCallback((index: number) => {
     setAttachedImages((prev) => {
@@ -1552,31 +1641,64 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       ? t("chatInput.attachmentsTooLargeNamed", { size, limit, name })
       : t("chatInput.attachmentsTooLarge", { size, limit });
   }, [t]);
-
+  /** Prepares the complete image batch immediately before any accepted prompt. */
+  const prepareOutgoingImages = useCallback(async (composedMessage: string): Promise<AttachedImage[] | null> => {
+    if (preparingImageCount > 0) return null;
+    if (!attachedImages.length) {
+      const tooLarge = budgetError(composedMessage, []);
+      if (tooLarge) setAttachError(tooLarge);
+      return tooLarge ? null : [];
+    }
+    if (attachedImages.some((image) => !image.source)) {
+      const tooLarge = budgetError(composedMessage, attachedImages);
+      if (tooLarge) setAttachError(tooLarge);
+      return tooLarge ? null : attachedImages;
+    }
+    setPreparingImageCount((count) => count + 1);
+    try {
+      const batch = await prepareImageBatchForAttachment({
+        files: attachedImages.map((image) => image.source!),
+        message: composedMessage,
+        unsupportedMessage: (fileName) => t("chatInput.imageUndecodable", { name: fileName, formats: SUPPORTED_IMAGE_FORMAT_LABEL }),
+      });
+      const outgoing = attachedImages.map((image, index) => ({
+        ...image,
+        data: batch[index].data,
+        mimeType: batch[index].mimeType,
+      }));
+      const tooLarge = budgetError(composedMessage, outgoing);
+      if (tooLarge) {
+        setAttachError(tooLarge);
+        return null;
+      }
+      return outgoing;
+    } catch (error) {
+      setAttachError(error instanceof Error ? error.message : t("chatInput.imageReadFailed", { name: attachedImages[0]?.name ?? t("chatInput.attachFile") }));
+      return null;
+    } finally {
+      setPreparingImageCount((count) => Math.max(0, count - 1));
+    }
+  }, [attachedImages, budgetError, preparingImageCount, t]);
   const handleSend = useCallback(async () => {
     const msg = value.trim();
     if (!msg && !attachedImages.length && !attachedTextFiles.length) return;
     if (isStreaming) return;
-    // An image still being compressed is not in attachedImages yet; sending now
-    // would quietly drop it.
+    // An image still being prepared is not in the outgoing frame yet.
     if (preparingImageCount > 0) return;
     onAudioUnlock?.();
     const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFiles);
-    const tooLarge = budgetError(composedMessage, attachedImages);
-    if (tooLarge) {
-      setAttachError(tooLarge);
-      return;
-    }
-    if (!attachedImages.length && !attachedTextFiles.length && msg.startsWith("/") && onBuiltinCommand) {
+    const outgoingImages = await prepareOutgoingImages(composedMessage);
+    if (outgoingImages === null) return;
+    if (!outgoingImages.length && !attachedTextFiles.length && msg.startsWith("/") && onBuiltinCommand) {
       const result = await onBuiltinCommand(msg);
       if (result.handled) {
         if (!result.error && !result.retainInput) clearInput();
         return;
       }
     }
-    onSend(composedMessage, attachedImages.length ? attachedImages : undefined);
+    onSend(composedMessage, outgoingImages.length ? outgoingImages : undefined);
     clearInput();
-  }, [value, attachedImages, attachedTextFiles, isStreaming, preparingImageCount, budgetError, onBuiltinCommand, onSend, clearInput, onAudioUnlock]);
+  }, [value, attachedImages, attachedTextFiles, isStreaming, preparingImageCount, prepareOutgoingImages, onBuiltinCommand, onSend, clearInput, onAudioUnlock]);
 
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
@@ -1847,41 +1969,38 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     });
   }, []);
 
-  const sendQueued = useCallback((mode: "steer" | "followup") => {
+  const queuedSubmitRef = useRef(false);
+  const sendQueued = useCallback(async (mode: "steer" | "followup") => {
+    const deliver = mode === "steer" ? onSteer : onFollowUp;
     const msg = value.trim();
+    if (!deliver || queuedSubmitRef.current || preparingImageCount > 0) return;
     if (!msg && !attachedImages.length && !attachedTextFiles.length) return;
-    if (attachedImages.length || attachedTextFiles.length) return;
-    onAudioUnlock?.();
-    const streamingBehavior = mode === "steer" ? "steer" : "followUp";
-    if (msg.startsWith("/") && onPromptWithStreamingBehavior) {
-      // Web commands must be expanded even when queued: the raw slash text
-      // would otherwise reach omp as a literal message (its /goal //plan are
-      // TUI-only). Action commands (compact/...) keep the raw text so omp's
-      // own ACP handlers can run them.
-      const expansion = expandWebSlashCommand(msg);
-      if (expansion.kind === "expand") {
-        onPromptWithStreamingBehavior(expansion.prompt, streamingBehavior, attachedImages.length ? attachedImages : undefined);
-        clearInput();
-        return;
+    queuedSubmitRef.current = true;
+    try {
+      const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFiles);
+      const outgoingImages = await prepareOutgoingImages(composedMessage);
+      if (outgoingImages === null) return;
+      onAudioUnlock?.();
+      if (!outgoingImages.length && !attachedTextFiles.length && msg.startsWith("/") && onPromptWithStreamingBehavior) {
+        const expansion = expandWebSlashCommand(msg);
+        if (expansion.kind === "usage-error") {
+          toast.error(t("chatInput.commandUsageTitle"), t("agentSession.commandRequiresArgs", {
+            command: expansion.command,
+            usage: t(expansion.argumentHintKey),
+          }));
+          return;
+        }
+        await onPromptWithStreamingBehavior(expansion.kind === "expand" ? expansion.prompt : msg, mode === "steer" ? "steer" : "followUp");
+      } else {
+        await deliver(composedMessage, outgoingImages.length ? outgoingImages : undefined);
       }
-      if (expansion.kind === "usage-error") {
-        toast.error(t("chatInput.commandUsageTitle"), t("agentSession.commandRequiresArgs", {
-          command: expansion.command,
-          usage: t(expansion.argumentHintKey),
-        }));
-        return;
-      }
-      onPromptWithStreamingBehavior(msg, streamingBehavior, attachedImages.length ? attachedImages : undefined);
       clearInput();
-      return;
+    } catch {
+      // The session reports its error. Keep the complete draft, including images.
+    } finally {
+      queuedSubmitRef.current = false;
     }
-    if (mode === "steer" && onSteer) {
-      onSteer(msg, attachedImages.length ? attachedImages : undefined);
-    } else if (mode === "followup" && onFollowUp) {
-      onFollowUp(msg, attachedImages.length ? attachedImages : undefined);
-    }
-    clearInput();
-  }, [value, attachedImages, attachedTextFiles, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, t]);
+  }, [value, attachedImages, attachedTextFiles, preparingImageCount, prepareOutgoingImages, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, t]);
 
   // ── Queued follow-up bar ────────────────────────────────────────────────
   // omp reports only a queued count over RPC; the texts are tracked in a
@@ -2083,8 +2202,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           // Submit-during-run behavior comes from Settings (Steer current run
           // by default, or Queue follow-up); no in-composer selector.
           const behavior = getSubmitDuringRunBehavior();
-          if (behavior === "steer" && onSteer) sendQueued("steer");
-          else sendQueued("followup");
+          if ((behavior === "steer" || !onFollowUp) && onSteer) void sendQueued("steer");
+          else void sendQueued("followup");
         } else {
           handleSend();
         }
@@ -2314,13 +2433,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         toast.info(t("chatInput.smartModelUnavailable", { name: engineName }));
         return;
       }
-      onModelChange(match.provider, match.id);
-      onSmartModelPinned?.(match.provider, match.id);
+      await onModelChange(match.provider, match.id, "smart");
     } catch (e) {
       console.error("Failed to resolve smart model:", e);
       toast.info(t("chatInput.smartModelUnavailable", { name: engineName }));
     }
-  }, [modelList, onModelChange, onSmartModelPinned, t, engineName]);
+  }, [modelList, onModelChange, t, engineName]);
 
   // Turn-based engines take one prompt at a time: no steering, no follow-up
   // queue. Rather than leave Enter silently inert, the composer says it is
@@ -2365,6 +2483,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     ),
     [usageSnapshot, usageLoading, usageFailed, quotaProvider, quotaModelId],
   );
+  // The balance is only read when an OpenRouter model is actually selected.
+  // Gating on the same predicate `buildQuotaView` branches on keeps the two
+  // in lockstep: the popover can never say "prepaid" and then have no balance
+  // to show. An Anthropic-only user never issues one of these requests.
+  const openRouterSelected = isPrepaidProvider(quotaProvider);
+  const openRouterAccount = useOpenRouterAccount(openRouterSelected);
   const quotaPercentText = quota.known ? `${Math.round(quota.percent)}%` : "—";
   // The tooltip names the window AND the model it is about, so a ring read at a
   // glance can never be attributed to the wrong conversation.
@@ -2390,9 +2514,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     return () => clearInterval(timer);
   }, [contextPopoverOpen]);
   // Opening the popover is the one moment the number is being read closely.
+  const refreshOpenRouter = openRouterAccount.refresh;
   useEffect(() => {
-    if (contextPopoverOpen) refreshUsage();
-  }, [contextPopoverOpen, refreshUsage]);
+    if (!contextPopoverOpen) return;
+    refreshUsage();
+    refreshResetCredits();
+    if (openRouterSelected) refreshOpenRouter();
+  }, [contextPopoverOpen, refreshUsage, refreshResetCredits, openRouterSelected, refreshOpenRouter]);
   // A brand-new conversation must open with an honest ring, and the composer
   // may have been idle for a whole background poll before it. Keyed on the
   // session (draftKey), never on the model: switching models re-filters the
@@ -2414,9 +2542,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   useEffect(() => {
     if (isStreaming) setThinkingDropdownOpen(false);
   }, [isStreaming]);
-  useEffect(() => {
-    if (isStreaming) setToolsDropdownOpen(false);
-  }, [isStreaming]);
 
   // The mode the engine reports, or its first offer while the report is
   // still in flight — never nothing, so the button always has a name.
@@ -2436,9 +2561,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       }
       if (modeDropdownRef.current && !modeDropdownRef.current.contains(e.target as Node)) {
         setModeDropdownOpen(false);
-      }
-      if (toolsDropdownRef.current && !toolsDropdownRef.current.contains(e.target as Node)) {
-        setToolsDropdownOpen(false);
       }
       if (historyMenuRef.current && !historyMenuRef.current.contains(e.target as Node) && !textareaRef.current?.contains(e.target as Node)) {
         setHistoryMenuOpen(false);
@@ -2485,7 +2607,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         // only hide files the app can attach (code, config, logs, ...).
         accept="*/*"
         multiple
-        disabled={isStreaming}
+        disabled={isStreaming && !canAttachWhileStreaming}
         style={{ display: "none" }}
         onChange={(e) => {
           const files = Array.from(e.target.files ?? []);
@@ -3117,7 +3239,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             {/* Attachment */}
             <button
               onClick={() => fileInputRef.current?.click()}
-              disabled={isStreaming || preparingImageCount > 0}
+              disabled={(isStreaming && !canAttachWhileStreaming) || preparingImageCount > 0}
               title={preparingImageCount > 0 ? t("chatInput.imagePreparing") : t("chatInput.attachFile")}
               aria-label={preparingImageCount > 0 ? t("chatInput.imagePreparing") : t("chatInput.attachFile")}
               style={{
@@ -3126,12 +3248,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 background: "none", border: "none",
                 borderRadius: 7,
                 color: (attachedImages.length || attachedTextFiles.length) ? "var(--accent)" : "var(--text-muted)",
-                cursor: isStreaming || preparingImageCount > 0 ? "not-allowed" : "pointer",
-                opacity: isStreaming ? 0.5 : 1,
+                cursor: (isStreaming && !canAttachWhileStreaming) || preparingImageCount > 0 ? "not-allowed" : "pointer",
+                opacity: isStreaming && !canAttachWhileStreaming ? 0.5 : 1,
                 transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
               }}
               onMouseEnter={(e) => {
-                if (isStreaming || preparingImageCount > 0) return;
+                if ((isStreaming && !canAttachWhileStreaming) || preparingImageCount > 0) return;
                 e.currentTarget.style.background = "var(--bg-hover)";
                 e.currentTarget.style.color = (attachedImages.length || attachedTextFiles.length) ? "var(--accent)" : "var(--text)";
               }}
@@ -3210,16 +3332,19 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       <ShieldCheck size={13} strokeWidth={2} aria-hidden="true" />
                     </span>
                   )}
-                  {isAutoModelSelection && currentName && (
-                    // The same glyph as the dropdown's Smart row, so "Smart"
-                    // in the label and the row read as one feature.
-                    <span style={{ display: "flex", flexShrink: 0, color: "var(--accent)" }} aria-hidden="true">
-                      <Sparkles size={12} strokeWidth={2} />
+                  {isAutoModelSelection && (
+                    <span
+                      role="img"
+                      title={t("chatInput.smartRouting")}
+                      aria-label={t("chatInput.smartRouting")}
+                      style={{ display: "flex", flexShrink: 0, color: "var(--accent)" }}
+                    >
+                      <Sparkles size={12} strokeWidth={2} aria-hidden="true" />
                     </span>
                   )}
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
-                    {isAutoModelSelection && currentName
-                      ? `${t("chatInput.smartModel", { name: engineName })} · ${currentName}`
+                    {isAutoModelSelection
+                      ? (currentName ? `${t("chatInput.smartModel", { name: engineName })} · ${currentName}` : t("chatInput.smartModel", { name: engineName }))
                       : currentName ?? (modelOptions.length > 0
                         ? t("chatInput.selectModel")
                         : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noModels"))}
@@ -3405,102 +3530,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </button>
             )}
 
-            {/* Tool preset selector — applies at spawn time only, so it stays
-                available even mid-run (the picked preset takes effect on the
-                next new session, not the live one). */}
-            {onToolPresetChange && (
-              <div ref={toolsDropdownRef} style={{ position: "relative", flexShrink: isMobile ? 0 : undefined }}>
-                <button
-                  onClick={(e) => {
-                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                    setToolsAnchorTop(rect.top);
-                    setToolsDropdownOpen((v) => !v);
-                  }}
-                  title={t("chatInput.changeToolPresetTitle", { preset: t(TOOL_PRESET_LABEL_KEY[toolPreset ?? "full"]) })}
-                  // Without the label beside it, the accessible name is the
-                  // only thing left saying which preset the wrench stands for.
-                  aria-label={isMobile
-                    ? `${t("chatInput.changeToolPreset")}: ${t(TOOL_PRESET_LABEL_KEY[toolPreset ?? "full"])}`
-                    : t("chatInput.changeToolPreset")}
-                  style={{
-                    display: "flex", alignItems: "center", gap: 5,
-                    justifyContent: isMobile ? "center" : undefined,
-                    height: isMobile ? 38 : 28,
-                    width: isMobile ? 38 : undefined,
-                    padding: isMobile ? 0 : "0 8px",
-                    background: toolsDropdownOpen ? "var(--bg-hover)" : "none",
-                    border: "none",
-                    borderRadius: 7,
-                    color: toolPreset && toolPreset !== "full" ? "var(--status-warning)" : "var(--text-muted)",
-                    cursor: "pointer",
-                    fontSize: 12,
-                    transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
-                  }}
-                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.background = toolsDropdownOpen ? "var(--bg-hover)" : "none"; }}
-                >
-                  <Wrench size={isMobile ? 16 : 12} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden="true" />
-                  {!isMobile && <span style={{ whiteSpace: "nowrap" }}>{t(TOOL_PRESET_LABEL_KEY[toolPreset ?? "full"])}</span>}
-                  {!isMobile && <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7 }} aria-hidden="true" />}
-                </button>
-                {toolsDropdownOpen && (
-                  <div className="dropdown-surface" style={isMobile && toolsAnchorTop != null ? {
-                    // Detached to the viewport (see toolsAnchorTop), the way
-                    // the model list already opens on a phone.
-                    position: "fixed",
-                    bottom: (window.visualViewport?.height ?? window.innerHeight) - toolsAnchorTop + 6,
-                    left: 8, right: 8,
-                    zIndex: 500,
-                    maxHeight: Math.max(120, toolsAnchorTop - 8), overflowY: "auto",
-                  } : {
-                    position: "absolute", bottom: "calc(100% + 6px)", left: 0,
-                    zIndex: 100, minWidth: 260, maxWidth: "calc(100vw - 32px)",
-                  }}>
-                    {TOOL_PRESET_ORDER.map((preset) => {
-                      const isActive = (toolPreset ?? "full") === preset;
-                      // The Core warning lists what is switched off. Subagents
-                      // are on that list only where the engine has them (pi
-                      // reports `subagents: false`), so the copy forks on the
-                      // flag rather than promising a loss that cannot happen.
-                      const warningKey = preset === "default" && !capabilities.subagents
-                        ? "chatInput.toolPresetCoreWarningNoSubagents"
-                        : TOOL_PRESET_WARNING_KEY[preset];
-                      return (
-                        <button
-                          className="dropdown-item"
-                          key={preset}
-                          onClick={() => { setToolsDropdownOpen(false); if (!isActive) onToolPresetChange(preset); }}
-                          style={{
-                            display: "flex", alignItems: "flex-start", gap: 8,
-                            width: "100%", padding: "7px 12px",
-                            background: isActive ? "var(--bg-selected)" : "transparent",
-                            border: "none",
-                            color: isActive ? "var(--text)" : "var(--text-muted)",
-                            cursor: "pointer", fontSize: 12, textAlign: "left",
-                            fontWeight: isActive ? 600 : 400,
-                          }}
-                          onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                          onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
-                        >
-                          {isActive
-                            ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 3 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
-                            : <span style={{ width: 10, flexShrink: 0 }} />}
-                          <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
-                            <span style={{ whiteSpace: "nowrap" }}>{t(TOOL_PRESET_LABEL_KEY[preset])}</span>
-                            {warningKey && (
-                              <span style={{ fontSize: 11, fontWeight: 400, color: "var(--status-warning)", whiteSpace: "normal" }}>
-                                {t(warningKey, { name: engineName })}
-                              </span>
-                            )}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
 
+            {(onThinkingLevelChange || (fastModeCapable && onFastModeChange)) && (
+            <div style={{ display: "inline-flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
             {/* Reasoning level selector — stays visible while the agent
                 runs (disabled) so the level never looks like it reset. */}
             {onThinkingLevelChange && (
@@ -3604,7 +3636,38 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 )}
               </div>
             )}
-
+            {fastModeCapable && onFastModeChange && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (!fastModeSupported) {
+                    toast.info(t("chatInput.fastModeUnavailable"));
+                    return;
+                  }
+                  onFastModeChange(!fastModeEnabled);
+                }}
+                title={fastModeSupported
+                  ? (fastModeActive ? t("chatInput.fastModeActive") : t("chatInput.fastModeHint"))
+                  : t("chatInput.fastModeUnavailable")}
+                aria-label={fastModeSupported
+                  ? (fastModeActive ? t("chatInput.fastModeActive") : t("chatInput.fastLabel"))
+                  : t("chatInput.fastModeUnavailable")}
+                aria-pressed={Boolean(fastModeActive && fastModeSupported)}
+                style={{
+                  display: "inline-flex", alignItems: "center", justifyContent: "center",
+                  width: isMobile ? 38 : 28, height: isMobile ? 38 : 28, padding: 0,
+                  background: fastModeActive && fastModeSupported ? "var(--bg-hover)" : "none",
+                  border: "none", borderRadius: 7,
+                  color: fastModeActive && fastModeSupported ? "var(--accent)" : "var(--text-muted)",
+                  cursor: "pointer", flexShrink: 0,
+                  transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
+                }}
+              >
+                <Zap size={isMobile ? 16 : 14} strokeWidth={2} aria-hidden="true" />
+              </button>
+            )}
+            </div>
+            )}
             {/* Agent-mode selector — the engine's own session modes, offered
                 only when it published a list for THIS session. Stays visible
                 while the agent runs (disabled) so the mode never looks reset. */}
@@ -3702,41 +3765,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             {/* Pushes the gauge and Send right on a wide toolbar; on a phone
                 the model selector is the one that takes the slack instead. */}
             <div style={{ flex: isMobile ? "0 0 0px" : 1 }} />
-            {((fastModeSupported && onFastModeChange) || onOpenModels) && (
-              <div style={{ display: "flex", alignItems: "center", gap: 2, flexShrink: 0, flexWrap: "wrap" }}>
-                {fastModeSupported && onFastModeChange && (
-                  <button
-                    type="button"
-                    onClick={() => onFastModeChange(!fastModeEnabled)}
-                    title={t("chatInput.fastModeHint")}
-                    aria-label={t("chatInput.fastLabel")}
-                    aria-pressed={Boolean(fastModeEnabled)}
-                    style={{ display: "inline-flex", alignItems: "center", gap: 4, height: isMobile ? 38 : 28, padding: isMobile ? "0 10px" : "0 8px", background: fastModeEnabled ? "var(--bg-hover)" : "none", border: "none", borderRadius: 7, color: fastModeActive ? "var(--accent)" : "var(--text-muted)", cursor: "pointer", fontSize: 12, fontWeight: fastModeEnabled ? 600 : 400 }}
-                  >
-                    {t("chatInput.fastLabel")}
-                  </button>
-                )}
-                {onOpenModels && (
-                  <button
-                    type="button"
-                    onClick={onOpenModels}
-                    title={t("chatInput.manageModels")}
-                    aria-label={t("chatInput.manageModels")}
-                    style={{ display: "inline-flex", alignItems: "center", gap: 4, height: isMobile ? 38 : 28, padding: isMobile ? "0 10px" : "0 8px", background: "none", border: "none", borderRadius: 7, color: "var(--text-muted)", cursor: "pointer", fontSize: 12 }}
-                  >
-                    <Settings size={14} strokeWidth={1.8} aria-hidden="true" />
-                    <span>{t("chatInput.manageModels")}</span>
-                  </button>
-                )}
-              </div>
-            )}
 
             {/* Icon-only plan-quota gauge. The arc tracks the binding quota
                 window; context usage lives in the top bar and, in detail,
                 below the divider inside this popover. Hidden entirely on an
-                engine that reports no plan quota — there the ring could only
-                ever be an empty dashed circle. */}
-              {quotaReported && (
+                engine that reports no plan quota AND has no prepaid balance to
+                report — there the ring could only ever be an empty dashed
+                circle. An OpenRouter model is a reason to show it even when
+                the engine reports no windows: the popover then carries the
+                credit balance, which is the only spend signal that exists. */}
+              {(quotaReported || openRouterSelected || Boolean(resetCredits.snapshot?.available)) && (
               <div
                 ref={contextPopoverRef}
                 // marginRight doubles the visual space between the gauge and
@@ -3794,6 +3832,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
                 {contextPopoverOpen && (
                   <QuotaPopover
+                    resetCredits={resetCredits}
+                    openRouter={openRouterSelected ? openRouterAccount : undefined}
                     quota={quota}
                     provider={quotaProvider ?? null}
                     modelName={displayModelName}
