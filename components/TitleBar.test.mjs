@@ -4,12 +4,13 @@ import test from "node:test";
 
 const readSource = (file) => readFile(new URL(`./${file}`, import.meta.url), "utf8");
 
-test("desktop titlebar keeps the live activity summary wired", async () => {
-  const [titleBar, appShell, chatWindow, sidebar] = await Promise.all([
+test("desktop activity stays wired to the titlebar and native shell", async () => {
+  const [titleBar, appShell, chatWindow, sidebar, desktopShell] = await Promise.all([
     readSource("TitleBar.tsx"),
     readSource("AppShell.tsx"),
     readSource("ChatWindow.tsx"),
     readSource("SessionSidebar.tsx"),
+    readSource("../hooks/useDesktopShell.ts"),
   ]);
 
   assert.match(titleBar, /function ActivitySummary/);
@@ -19,8 +20,14 @@ test("desktop titlebar keeps the live activity summary wired", async () => {
   assert.match(titleBar, /title=\{label\}/);
   assert.match(titleBar, /<ActivitySummary activeSessions=\{activeSessions\} activeSubagents=\{activeSubagents\} \/>/);
   assert.match(appShell, /activeSessions=\{activeSessionCount\} activeSubagents=\{activeSubagentCount\}/);
-  assert.match(appShell, /onRunningSessionCountChange=\{handleRunningSessionCountChange\}/);
+  assert.match(appShell, /onDesktopActivityChange=\{handleDesktopActivityChange\}/);
   assert.match(appShell, /onActiveSubagentCountChange=\{handleActiveSubagentCountChange\}/);
   assert.match(chatWindow, /onActiveSubagentCountChange\?\.\(activeSubagentCount\)/);
-  assert.match(sidebar, /onRunningSessionCountChange\?\.\(runningSessionIds\.size\)/);
+  assert.match(sidebar, /onDesktopActivityChange\?\.\(\{/);
+  assert.match(sidebar, /ready: runningStateReady/);
+  assert.match(sidebar, /const completedSessionIds = \[\.\.\.previous\]\.filter\(\(id\) => !runningSessionIds\.has\(id\)\)/);
+  assert.match(sidebar, /completedSessionIds\.forEach\(\(id\) => next\.add\(id\)\)/);
+  assert.doesNotMatch(sidebar, /completedInBackground/);
+  assert.match(desktopShell, /desktop_status_update/);
+  assert.match(desktopShell, /updateDesktopStatus/);
 });
