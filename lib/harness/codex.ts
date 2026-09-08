@@ -122,7 +122,7 @@ const CODEX_CLI_VERSION_ARGS = ["cli", "-V"] as const;
  */
 function displayBridge(sessionId: string): AcpMcpServer[] {
   try {
-    return [displayMcpAcpServer(sessionId)];
+    return [displayMcpAcpServer(sessionId, "Codex")];
   } catch {
     return [];
   }

@@ -92,6 +92,7 @@ app/api/
   agent/[id]/display/route.ts     POST publish a display request | GET latest (auth-gated)
   agent/[id]/display/events/route.ts GET SSE stream of display requests (snapshot + live)
   internal/display/route.ts       POST publish from engine MCP servers (capability-token auth)
+  internal/todo/route.ts          POST project To-do MCP operations (capability-token auth)
   auth/**                         omp's provider list + login flow (via RPC); every
                                    route refuses `unsupported` unless omp is active
   cwd/validate/route.ts           POST validate/select a cwd
@@ -100,6 +101,7 @@ app/api/
   git/status/route.ts             GET repo status + branch/ahead-behind for a cwd
   git/diff/route.ts               GET one file's HEAD->worktree patch
   info/route.ts                   GET server facts for the Info panel
+  todo/route.ts                   GET/POST project .cody/todo.json (validated, atomic)
   tasks/route.ts                  GET .cody/tasks.json (validated)
   tasks/run/route.ts              POST run a task by id into a new terminal
   home/route.ts                   GET user home directory
@@ -177,11 +179,11 @@ lib/
     types.ts           DisplayRequestV1 + DisplayCandidate + bus event types
     validation.ts      loopback-only http(s) URL normalization (rejects credentials)
     bus.ts             globalThis per-session latest+listeners; publish/subscribe/alias
-    capability.ts      HMAC session-scoped tokens (CODY_INTERNAL_DISPLAY_SECRET/ORIGIN)
+    capability.ts      HMAC session-scoped display/to-do tokens (CODY_INTERNAL_DISPLAY_SECRET/ORIGIN)
     provider.ts        RasterWebProvider: puppeteer-core + system Chromium → JPEG WS stream
     native-gateway.ts  candidate ranking; optional CODY_PREVIEW_BASE_URL
                        wildcard-subdomain reverse proxy
-    engine-tools.ts    bundled display-MCP launch descriptors: --mcp-config JSON for a
+    engine-tools.ts    bundled display/to-do MCP launch descriptors: --mcp-config JSON for a
                        per-turn CLI, an ACP McpServerStdio for an ACP session
     access.ts          authorizeDisplaySession(): request auth for display routes
     csp.ts             buildContentSecurityPolicy(): loopback + this host's
@@ -267,7 +269,11 @@ lib/
   composer-model-visibility.ts  browser-side mirror of the visibility file so
                        the composer repaints without a round trip, and the
                        store of record on an open instance (no accounts)
-  rpc-manager.ts       session registry + startRpcSession over RpcProcess
+  rpc-manager.ts       session registry + Cody-owned host tools + startRpcSession over RpcProcess
+  session-active-models.ts  every model in use in the CURRENT run (live model,
+                       Smart resolution, subagents' resolvedModel, fallback
+                       targets, this run's assistant turns) with what uses
+                       each; feeds the quota popup's "Also in use" section
   session-namer.ts     3-4 word model-written session names: a one-shot run of the
                        ACTIVE rpc-dialect engine (omp's `tiny` role only when omp
                        is that engine; null for ACP engines), plus the pure
@@ -289,6 +295,10 @@ lib/
                        engine switch (session ids, pinned models)
   stream-tuning.ts     tunable streaming pacing/motion params: defaults, clamping,
                        CSS-var diffing, localStorage store (playground: /dev/stream-tuner)
+  thinking-level-labels.ts  the one raw-reasoning-level → label-key map shared
+                       by the composer selector, its pending status, chat
+                       notices and the subagent dialog
+  project-todo.ts      .cody/todo.json schema, atomic mutation/history + agent summary
   workspace-tasks.ts   .cody/tasks.json schema validation + grouping
   tool-presets.ts      PRESET_NONE/DEFAULT/FULL + getPresetFromTools()
   types.ts             shared TypeScript types
@@ -309,7 +319,9 @@ components/
   BranchNavigator.tsx in-session branch switcher
   DiffView.tsx        folding unified-diff renderer (FileViewer + GitPanel)
   GitPanel.tsx        right-panel Git tool: changed files + diffs + branch info
-  TasksPanel.tsx      right-panel Tasks tool: .cody/tasks.json runner
+  TodoPanel.tsx       right-panel Tasks content: manual .cody/todo.json To-do list
+                      with an embedded collapsed Commands section when .cody/tasks.json exists
+  TasksPanel.tsx      embedded Commands runner for .cody/tasks.json
   PreviewPanel.tsx    right-panel Preview: walks the display candidate ladder —
                       direct/gateway iframe, else the streamed surface below —
                       plus clipboard/pop-out controls and manual URL mode
@@ -435,8 +447,8 @@ bin/
   cody-server.js           custom server; also WS upgrade for /api/display/socket
                            (stream frames + input) and native-gateway host routing;
                            mints the display capability secret at boot
-  cody-display-mcp.js      bundled stdio MCP server exposing open_preview to
-                           Claude/Codex engines (posts to /api/internal/display)
+  cody-display-mcp.js      bundled stdio MCP server exposing open_preview and cody_todo to
+                           Claude/Codex engines (posts to /api/internal/display and /api/internal/todo)
   cody-pi-login.mjs        pi's provider sign-in helper: imports the INSTALLED pi
                            package's AuthStorage/OAuth flows and speaks JSON
                            lines to lib/harness/pi-login.ts (list / login /
@@ -607,8 +619,8 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   `ChatWindow` → `ChatInput` and into `SessionSidebar`; the composer derives
   `chatExtras`/`fastMode`/`subagents` from that prop rather than receiving
   three booleans. The three-boolean version is what produced four separate
-  leaks at once: with `models` and `skills` never threaded, the "Smart — OMP
-  roles" row (which fetches omp's `config.yml`) rendered on pi because it was
+  leaks at once: with `models` and `skills` never threaded, the `Smart`
+  model-roles row (which fetches omp's `config.yml`) rendered on pi because it was
   gated on `chatExtras`, which pi HAS. When a control needs a flag nobody
   passed yet, read it off `capabilities` — do not add a fourth boolean.
 - **A few surfaces are one engine's own files, not a capability.** Session
@@ -622,14 +634,29 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   (`useUsage(enabled)` also stops the 90-second poll behind it).
 - **Engine-specific copy names the ACTIVE engine.** Every user-facing string
   that used to say "omp"/"OMP" now interpolates `{name}` from
-  `engine.shortName` (`chatInput.smartModel*`, `.thinkingAuto`,
-  `.toolPresetCoreWarning*`, `.groupEngineBuiltin`, `agentSession.startingAgent`,
-  `.fallbackAppliedDetail`, `.fallbackSucceededDetail`, `info.section.engine`).
-  `agentSession.startingAgent` fires on any slow first connect — i.e. exactly
-  the Hermes/Codex cold start — which is why it said "Starting omp…" to a
-  Hermes user. The Info panel's copyable diagnostics say
+  `engine.shortName` (`chatInput.smartModelHint`,
+  `.smartModelUnavailable`, `.thinkingAuto`, `.toolPresetCoreWarning*`,
+  `.groupEngineBuiltin`, `agentSession.startingAgent`,
+  `.fallbackAppliedDetail`, `.fallbackSucceededDetail`,
+  `info.section.engine`). The sole intentional exception is the Smart model
+  label: it is exactly `Smart`, with no engine, role, or resolved-model
+  suffix. `agentSession.startingAgent` fires on any slow first connect —
+  i.e. exactly the Hermes/Codex cold start — which is why it said
+  "Starting omp…" to a Hermes user. The Info panel's copyable diagnostics say
   `Engine: <shortName> <version>` for the same reason: the VALUE was always
   the active engine's, only the label lied.
+- **Composer request state has two authorities.** Fast catalog support is a
+  capability prediction, while `fastModeActive` and explicit
+  `fastModeUnavailable` come from the live engine. The compact Fast control
+  says **Fast off**, **Fast requested**, **Fast inactive**, **Fast unavailable**,
+  **Fast unverified**, or **Checking**. Requested means the engine accepted a
+  priority request; it is never positive confirmation that the provider is
+  actually servicing it. Inactive means the enabled request is not receiving
+  engine priority and normal service applies, not that it was rejected; it can
+  still be turned off. An active engine answer outranks stale catalog metadata.
+  Reasoning-level changes are allowed during a run, lock only while awaiting
+  engine acknowledgement, and apply to the next model invocation (including a
+  tool continuation), never the stream already in progress.
 - **A capability flag is a UI convenience; the ROUTE is the boundary**
   (`lib/engine-guard.ts`). Every omp-shaped endpoint used to answer 200
   whichever engine was selected — probed directly under Hermes they served
@@ -638,7 +665,7 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   through the UI too, because the flag that hid them is not the flag they
   needed: Hermes declares `nativeSettings` (it has its own config) and so
   rendered omp's `config.yml` panels with a Save that wrote to a file it
-  never reads; pi has `chatExtras` and so offered omp's "Smart — OMP roles"
+  never reads; pi has `chatExtras` and so offered omp's `Smart` model-roles
   row and an Export that shells `omp --export`. Every such route now either
   DISPATCHES on `getHarness()` (`/api/models`, `/api/omp-version`) or on an
   ADAPTER METHOD (`/api/omp-settings/schema` → `HarnessAdapter.settings`), or
@@ -1170,22 +1197,32 @@ setting added upstream appears without a Cody change.
   one server can serve a local webview and a remote tablet at the same time and
   each resolves correctly from the same candidate list.
 - **Capability tokens** (`capability.ts`): engine-side MCP servers post to
-  `/api/internal/display` with an HMAC session-scoped token.
+  `/api/internal/display` and `/api/internal/todo` with an HMAC session-scoped token.
   `CODY_INTERNAL_DISPLAY_SECRET`/`CODY_INTERNAL_DISPLAY_ORIGIN` are minted by
-  `bin/cody-server.js` at boot and live only in the environment — never
-  persisted.
-- **Per-engine wiring**: omp gets a Cody-owned `open_preview` host tool —
-  `lib/rpc-manager.ts` sends `set_host_tools` at session start, merges it into
-  any browser-registered tool list, and routes the `host_tool_call` to
-  `publishDisplayRequest`. Every other engine gets the bundled stdio MCP
-  server (`bin/cody-display-mcp.js`) via `lib/display/engine-tools.ts` —
-  `claudeDisplayMcpConfig` for a per-turn CLI's `--mcp-config`,
-  `displayMcpAcpServer` for an ACP session's `mcpServers`. The ACP builder
-  MINTS a capability token, so it throws when the server's internal display
-  origin/secret are absent; an adapter's `mcpServers` hook must catch that and
-  report an empty list. `scripts/engine-bringup.mjs` drives adapters with no
-  server behind them, and a throw there aborts `session/new` — no bridge is a
-  missing Preview button, a throw is a chat that will not open.
+  `bin/cody-server.js` at boot and live only in the environment, never persisted.
+- **Per-engine wiring**: omp gets Cody-owned `open_preview` and `cody_todo` host
+  tools. `lib/rpc-manager.ts` sends `set_host_tools` at session start, merges them
+  into any browser-registered tool list, and routes their `host_tool_call`s to their
+  server implementations. Every other engine gets the bundled stdio MCP server
+  (`bin/cody-display-mcp.js`) via `lib/display/engine-tools.ts`: `claudeDisplayMcpConfig`
+  for a per-turn CLI's `--mcp-config`, `displayMcpAcpServer` for an ACP session's
+  `mcpServers`. The ACP builder mints a capability token, so it throws when the server's
+  internal display origin/secret are absent; an adapter's `mcpServers` hook must catch
+  that and report an empty list. `scripts/engine-bringup.mjs` drives adapters with no
+  server behind them, and a throw there aborts `session/new`: no bridge is a missing
+  Preview button, a throw is a chat that will not open.
+- **Project To-do list is durable user intent, not an engine plan.** `.cody/todo.json`
+  sits at the resolved project root so it is visible in the project and survives session
+  or engine changes. Cody writes it atomically, preserves unknown top-level keys, and
+  keeps append-only history capped to the newest 500 entries, so users can audit or reopen
+  an agent completion. omp reaches it through the RPC `cody_todo` host tool; Claude Code
+  and Codex use the bundled MCP server with a session-scoped capability token that resolves
+  the session cwd. Hermes and any engine without a tool bridge still reach it as a plain
+  file: the panel's "Ask the agent" button drops a prompt into the composer that names
+  the path and the tool, so discoverability never depends on prompt injection Cody does
+  not do. This remains separate from an engine execution plan (`omp todo` to
+  Composer `TodoList`): the Tasks tab calls the user-owned section To-do, while the legacy
+  `.cody/tasks.json` runner is its collapsed Commands section only when that file exists.
 - **Client**: `hooks/useDisplayRequests.ts` subscribes to the SSE route;
   `AppShell` auto-opens the right panel in `preview` mode on live requests —
   the explicit, server-driven trigger alongside the client-side URL sniffing
@@ -1445,34 +1482,73 @@ handled or safely ignored.
   (`phaseElapsed`, tabular digits); only real status changes crossfade.
 
 ### Composer model + tools controls
-- **Smart model row**: the model dropdown's pinned first row ("Smart — OMP
-  roles") is the labeled face of auto model selection. A NEW session with no
-  explicit pick sends no `set_model`, so omp resolves `modelRoles.default`
+- **Smart model row**: the model dropdown's pinned first row is labeled
+  exactly `Smart`; engine roles and the resolved model are intentionally not
+  appended. It is the labeled face of auto model selection. A NEW session with
+  no explicit pick sends no `set_model`, so omp resolves `modelRoles.default`
   (the saved plan); Smart re-selects that state (`selectSmartModel()` clears
   `newSessionModel`). On a live session it resolves the configured default
   role to a concrete model client-side and pins it (omp's `set_model` RPC
-  takes exact provider/model — no role aliases). Picking any named model
-  pins it and OMP roles stop applying to that session's main turns.
+  takes exact provider/model — no role aliases). Picking any named model pins
+  it and OMP roles stop applying to that session's main turns.
 - **Smart-ness survives the pin** (`smartPinnedModel` in useAgentSession):
   both a live Smart pick (`markSmartPinnedModel`) and the engine's own
   resolution of a Smart spawn (`pendingSmartSpawnRef`, claimed by the first
   authoritative model) record the pin as Smart's answer, id-scoped to their
   session — loads and reconciles reuse `loadSession`, so a reset there would
-  wipe it mid-conversation. The composer keeps "✦ Smart · <model>" while the
-  running model still matches. The Advisor indicator is ShieldCheck, never
-  Sparkles: Sparkles is the Smart glyph, and an accent sparkle beside the
-  model name read as "auto-picked".
+  wipe it mid-conversation. The composer keeps the label `Smart` while the
+  running model still matches; it does not append that model to the label. The
+  Advisor indicator is ShieldCheck, never Sparkles: Sparkles is the Smart glyph,
+  and an accent sparkle beside the model name read as "auto-picked".
 - **Display names and picker controls stay presentation-only.** `formatModelDisplayName()` in `lib/model-display.ts` is the shared display boundary for the composer, transcript, and usage surfaces; it may improve a catalog label but never changes the routing identifier. Fast remains beside the existing Composer model picker, and its adjacent Manage models gear opens Settings › Models. Only Smart is pinned; the ordinary named-model list has no sticky selection.
-- **Composer quota is model-scoped.** Select usage windows for the actual selected model: a reported tier explicitly scopes its bucket even when it is also marked shared; only untiered buckets apply to the account as a whole. Render the raw engine-reported plan without inferring a `$tier` convention, and show saved reset credits as a separate count, including zero.
-- **Engine-initiated model switches wear a persistent marker**
-  (`autoModelSwitch`): `retry_fallback_applied` (error and usage-aware
+- **Composer quota is model-scoped, but the popup covers the whole session.** The RING gauges the selected/live model: select usage windows for that model; a reported tier explicitly scopes its bucket even when it is also marked shared; only untiered buckets apply to the account as a whole. Render the raw engine-reported plan without inferring a `$tier` convention. Saved resets are a separate single summary that keeps explicit zero visible; only meaningful positive account rows expand it. Under Smart routing, subagents and fallback chains other providers consume quota in the same session, so `lib/session-active-models.ts` derives every model in use this run (live model, Smart resolution, each subagent's `resolvedModel`, fallback `to`, this run's assistant turns) and the popup renders their windows EXPANDED under "Also in use", each attributed to what uses it ("Subagent scout (research)", "Fallback for this conversation"); OpenRouter credits appear the same way when only a subagent rides that gateway. Limits nothing in the session touches stay in the collapsed "Other limits" section that says they cannot stop the selected model.
+- **Engine-initiated model switches wear a persistent marker and name the
+  job** (`autoModelSwitch`): `retry_fallback_applied` (error and usage-aware
   routing both emit it) and any bare `model_changed` whose model differs
   from the last authoritative one set a warning chip beside the model
-  control — from → to, role, and the last provider error; click re-shows the
-  detail as a toast. The echo of Cody's own `set_model`
-  (`lastUserModelPickRef`, 15s window) is never dressed up as an engine
-  switch. The 10s fallback toast stays; the marker is what outlives it,
-  clearing on the next user pick or model move.
+  control; click re-shows the detail as a toast. The frame carries only
+  `{from, to, role}`, so the JOB is derived from `role`: a built-in role
+  (`default` = this conversation, `tiny` = session naming, `task`, `advisor`,
+  ...) or `subagent:<id>`, and a CHILD subagent's fallback never arrives as
+  a top-level frame at all: it comes wrapped in `subagent_event
+  {payload:{id, event}}`, attributed to that subagent by roster name, and
+  never repaints the composer's model marker (`announceFallbackApplied`,
+  `hooks/session-control-scope.ts` `fallbackAttributionFor*`). The provider
+  error is remembered PER JOB from `auto_retry_start`, because usage-aware
+  fallback fires before any request with no retry at all: such a switch says
+  "hit a usage limit or error" rather than borrowing another job's error.
+  The echo of Cody's own `set_model` (`recentUserModelPicksRef`, 15s
+  window) is never dressed up as an engine switch.
+- **Live model and reasoning switches apply at the step boundary steering
+  uses, never mid-stream.** omp's `steer` does not abort an in-flight
+  provider stream either: it is delivered after the current assistant
+  message and its tools, and `getModel`/`getReasoning` are sampled before
+  EACH provider call. `set_thinking_level` is therefore safe any time (sent
+  immediately, `thinkingLevelTarget` shown as "Applying High" until the
+  engine confirms). `set_model` is NOT: on the Codex WebSocket provider,
+  omp's model switch closes the socket and the running response ends as a
+  provider ERROR whose turn is dropped from replay. So a live pick is held
+  as `modelSwitchPending` (`phase: "waiting"`, status "Switching to X at
+  next step") while `assistantProviderCallRef` says a stream is open, and
+  dispatched at the first boundary frame (assistant `message_end`,
+  `tool_execution_start`, `turn_end`, `agent_end`); a newer pick replaces
+  the waiting one, a re-pick of the current model cancels it, and the
+  applied `model_changed` posts an inline notice "Model switched to X.
+  Applies from the next step." (`dispatchPendingModelSwitch`). ACP engines
+  keep the picker disabled while a turn runs: mid-prompt `set_model`
+  acceptance is unverified there, and `handleModelChange` refuses it
+  without `chatExtras` regardless of the UI.
+- **Running subagents cannot be switched, and Cody says so instead of
+  pretending.** omp's RPC exposes only `get_subagents`,
+  `get_subagent_messages` and `set_subagent_subscription`; `set_model` and
+  `set_thinking_level` address the root session. A child resolves its model
+  and effort once at spawn (request model > `task.agentModelOverrides` >
+  agent frontmatter, with the task role expanded from settings re-read from
+  disk per spawn), so role changes reach subagents started AFTERWARDS. The
+  transcript dialog shows each child's resolved model (with a fallback
+  marker), role and reasoning (`progress.thinkingLevel`, parsed from the
+  `:<level>` suffix omp appends to `resolvedModel` or from wrapped
+  `thinking_level_changed` events) plus that explanation, with no control.
 - **Tools preset control** (composer, Wrench icon): "full" leaves omp's
   toolset alone; "default"/Core spawns omp with `--tools read,bash,edit,write`,
   which also kills the `task`, `todo`, `github` and `web_search` builtins —

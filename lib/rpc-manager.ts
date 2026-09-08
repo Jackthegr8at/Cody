@@ -13,6 +13,8 @@ import { MAX_RPC_FRAME_BYTES } from "./omp/rpc-frame";
 import { RpcCommandError, RpcProcess, type RpcFrame, type RpcProcessLaunch } from "./omp/rpc-process";
 import { readNativeSettings } from "./omp/settings-config";
 import { captureLoopbackScreenshot, ScreenshotError } from "./preview-screenshot";
+import { ProjectTodoError, type TodoDocument, formatTodoForAgent, mutateProjectTodo, parseTodoAgentAction, readProjectTodo, todoAgentActionOperation } from "./project-todo";
+import { resolveProject } from "./worktree";
 import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
 import { PRESET_FULL } from "./tool-presets";
 import type {
@@ -56,7 +58,8 @@ const READY_TIMEOUT_MS = 120_000;
  * Cody's Preview panel over SSE for any watching browser. read_app_logs hands
  * back the previewed app's own console and failed requests (lib/logs), so a
  * dev server throwing in the browser is something the model can read instead
- * of something only the user ever sees.
+ * of something only the user ever sees. cody_todo reads and updates the project-owned
+ * manual list, deliberately separate from an engine execution plan.
  */
 const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
   name: "preview_screenshot",
@@ -93,6 +96,20 @@ const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
       grep: { type: "string", description: "Case-insensitive regular expression the message or URL must match." },
       limit: { type: "number", description: `Newest N entries (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}).` },
     },
+  },
+}, {
+  name: "cody_todo",
+  description: "The user's own project to-do list (.cody/todo.json). Separate from your task plan: it holds what the user asked to remember. Use list before working through it, complete an item only when its work is actually done, reopen if you completed it by mistake, note to leave a short note on an item. The user sees every change with your name in the list's history.",
+  parameters: {
+    type: "object",
+    properties: {
+      action: { type: "string", enum: ["list", "add", "complete", "reopen", "note"], description: "To-do action to perform." },
+      id: { type: "string", description: "To-do item id for complete, reopen, or note." },
+      title: { type: "string", description: "Title for a new to-do item." },
+      notes: { type: "string", description: "Optional notes for a new item or note text." },
+      color: { type: "string", enum: ["gray", "red", "orange", "yellow", "green", "blue", "purple", "pink"], description: "Optional color for a new item." },
+    },
+    required: ["action"],
   },
 }];
 const SERVER_HOST_TOOL_NAMES = new Set(SERVER_HOST_TOOLS.map((tool) => tool.name));
@@ -749,6 +766,37 @@ export class AgentSessionWrapper {
    * reject paths, never routed to a browser.
    */
   private async handleServerHostTool(id: string, toolName: string, event: AgentEvent): Promise<void> {
+    if (toolName === "cody_todo") {
+      try {
+        const action = parseTodoAgentAction(event.arguments);
+        const projectRoot = (await resolveProject(this.cwd)).projectRoot;
+        let doc: TodoDocument;
+        if (action.action === "list") {
+          const loaded = await readProjectTodo(projectRoot);
+          if (loaded.status === "invalid") throw new ProjectTodoError(loaded.reason);
+          doc = loaded.doc;
+        } else {
+          doc = await mutateProjectTodo(
+            projectRoot,
+            todoAgentActionOperation(action),
+            { kind: "agent", label: this.engine.label },
+          );
+        }
+        this.sendHostToolResult({
+          type: "host_tool_result",
+          id,
+          result: { content: [{ type: "text", text: formatTodoForAgent(doc) }] },
+        });
+      } catch (error) {
+        this.sendHostToolResult({
+          type: "host_tool_result",
+          id,
+          isError: true,
+          result: { content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to update the project to-do list" }] },
+        });
+      }
+      return;
+    }
     if (toolName === "open_preview") {
       try {
         const request = await publishDisplayRequest(this._sessionId, event.arguments as Record<string, unknown>);

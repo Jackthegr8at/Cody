@@ -1,37 +1,39 @@
 import type { OmpModel } from "./omp/rpc-utility";
 
 /**
- * Which models can actually honor the composer's fast-mode toggle.
+ * Catalog prediction for model families that may accept the composer's Fast
+ * priority request.
  *
- * The toggle is not a generic "be quicker" switch: it sets the PRIORITY service
- * tier for the selected model's provider family (the harness exposes the same
- * thing as `/fast`). Only some families realize that on the wire — direct
- * Anthropic turns it into `speed: "fast"` plus a fast-mode beta header, the
- * OpenAI family sends a `service_tier` field, and everyone else has nothing to
- * send. The composer hides the control rather than offering one that silently
- * does nothing, so this predicate decides whether it appears at all.
+ * Fast is not a generic "be quicker" switch: it asks the engine to request a
+ * priority service tier for the selected model's provider family (the harness
+ * exposes the same thing as `/fast`). Direct Anthropic may encode that as
+ * `speed: "fast"` plus a beta header, and OpenAI-family requests may carry a
+ * `service_tier` field. This predicate only classifies model metadata; it
+ * cannot confirm that an engine accepted the request or that a provider is
+ * servicing it. The live session's `fastModeActive` and explicit rejection
+ * state are authoritative over this prediction.
  *
- * This restates upstream logic (`serviceTierFamily` + `realizesPriorityServiceTier`
- * in the harness's AI package) because Cody cannot import it: those packages are
- * Bun-only. That means it can drift, and this is the file to re-check against
- * upstream when a provider is added.
+ * This restates upstream logic (`serviceTierFamily` +
+ * `realizesPriorityServiceTier` in the harness's AI package) because Cody
+ * cannot import it: those packages are Bun-only. That means it can drift, and
+ * this is the file to re-check against upstream when a provider is added.
  *
  * Two deliberate omissions:
  * - Upstream also has a catalog-driven fallback that recognizes OpenAI-shaped
  *   models served by unrelated custom providers. Replicating it would need the
- *   catalog, so an exotic custom provider gets no toggle here. That is the safe
- *   direction: a hidden control beats a control that no-ops.
- * - Fireworks is excluded on purpose. Priority is real there, but `/fast` does
- *   not drive it — it has its own separate provider tier setting, and upstream
- *   gives those models no service-tier family at all.
+ *   catalog, so this predicate conservatively returns false for an exotic
+ *   custom provider; a later live engine state can still supersede it.
+ * - Fireworks is excluded on purpose. Priority is real there, but `/fast`
+ *   does not drive it — it has its own separate provider tier setting, and
+ *   upstream gives those models no service-tier family at all.
  */
 export function supportsPriorityFastMode(model: Pick<OmpModel, "provider" | "api" | "id">): boolean {
   const provider = model.provider;
-  // Direct Anthropic is the only place Claude realizes priority.
+  // The catalog predicts direct Anthropic may accept the priority request.
   if (provider === "anthropic") return true;
-  // Claude served by anyone else — Bedrock, Vertex, an Anthropic-compatible
-  // proxy — accepts the request and drops the tier. Checked before the provider
-  // branches below so Vertex-served and OpenRouter-served Claude both land here.
+  // Claude served by anyone else — Bedrock, Vertex, or an
+  // Anthropic-compatible proxy — is cataloged as unsupported. A live engine
+  // state update can still supersede this prediction.
   if (model.api === "anthropic-messages") return false;
   // The Codex subscription is its own provider id, distinct from the API's.
   // Missing it is what hid this control from Codex models.

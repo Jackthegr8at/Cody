@@ -19,8 +19,8 @@ export interface PreviewPanelProps {
   sessionId: string | null;
   active: boolean;
   request: DisplayRequestV1 | null;
-  /** Jump to the Tasks tab (the usual way to start a dev server). */
-  onOpenTasks?: () => void;
+  /** Open the Tasks tab with its project Commands section expanded. */
+  onOpenCommands?: () => void;
   /** Receive a server-side screenshot of the previewed app (attached to the
    * composer by the shell). */
   onCaptureToChat?: (image: { data: string; mimeType: string }) => void;
@@ -44,7 +44,7 @@ const MODE_LABEL_KEY: Record<DisplayCandidateKind, string> = {
   stream: "preview.modeStreamed",
 };
 
-export function PreviewPanel({ sessionId, active, request, onOpenTasks, onCaptureToChat }: PreviewPanelProps): ReactElement {
+export function PreviewPanel({ sessionId, active, request, onOpenCommands, onCaptureToChat }: PreviewPanelProps): ReactElement {
   const { t } = useI18n();
   const [input, setInput] = useState(DEFAULT_URL);
   const [inputError, setInputError] = useState("");
@@ -254,7 +254,7 @@ export function PreviewPanel({ sessionId, active, request, onOpenTasks, onCaptur
         ) : (
           <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, padding: 20, textAlign: "center", color: "var(--text-dim)", fontSize: 12 }}>
             <span>{t("preview.emptyHint")}</span>
-            {onOpenTasks && <button type="button" className="ui-focus-ring" onClick={onOpenTasks} style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "5px 10px", fontSize: 12, border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: "pointer" }}><ListTodo size={13} aria-hidden="true" /> {t("preview.openTasks")}</button>}
+            {onOpenCommands && <button type="button" className="ui-focus-ring" onClick={onOpenCommands} style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "5px 10px", fontSize: 12, border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: "pointer" }}><ListTodo size={13} aria-hidden="true" /> {t("preview.openCommands")}</button>}
           </div>
         )}
         {/* Names the path that won, then dismisses itself. pointer-events are

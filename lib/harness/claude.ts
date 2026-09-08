@@ -91,7 +91,7 @@ const CLAUDE_CLI_VERSION_ARGS = ["--cli", "--version"] as const;
  */
 function claudeMcpServers(sessionId: string): readonly AcpMcpServer[] {
   try {
-    return [displayMcpAcpServer(sessionId)];
+    return [displayMcpAcpServer(sessionId, "Claude Code")];
   } catch {
     return [];
   }

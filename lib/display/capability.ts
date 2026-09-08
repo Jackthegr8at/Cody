@@ -42,8 +42,16 @@ export function verifyDisplayCapability(token: string): DisplayCapabilityPayload
   }
 }
 
-export function displayInternalEndpoint(): string {
+function internalEndpoint(pathname: string): string {
   const origin = process.env.CODY_INTERNAL_DISPLAY_ORIGIN;
   if (!origin) throw new Error("CODY_INTERNAL_DISPLAY_ORIGIN is not configured");
-  return `${origin.replace(/\/$/, "")}/api/internal/display`;
+  return `${origin.replace(/\/$/, "")}${pathname}`;
+}
+
+export function displayInternalEndpoint(): string {
+  return internalEndpoint("/api/internal/display");
+}
+
+export function todoInternalEndpoint(): string {
+  return internalEndpoint("/api/internal/todo");
 }

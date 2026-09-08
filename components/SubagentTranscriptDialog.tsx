@@ -6,10 +6,12 @@ import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { useI18n } from "@/lib/i18n";
 import { formatCost, formatDuration, formatTokens, shortModel } from "@/lib/subagent-format";
+import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { MarkdownBody } from "./MarkdownBody";
 import { Dialog, DialogContent, DialogTitle } from "./ui/primitives";
 import type { SubagentInfo } from "@/hooks/useAgentSession";
-import type { SubagentActivityEvent, SubagentSnapshotLike } from "@/lib/subagent-types";
+import { parseSubagentProgress } from "@/lib/subagent-types";
+import type { SubagentActivityEvent, SubagentProgress, SubagentSnapshotLike } from "@/lib/subagent-types";
 import type { AgentMessage, ToolResultMessage } from "@/lib/types";
 
 interface SubagentMessagesPage {
@@ -209,6 +211,62 @@ function ActivityIndicator({ reducedMotion }: { reducedMotion: boolean }) {
       style={{ flexShrink: 0, alignSelf: "center", animation: "spin 0.8s linear infinite" }}
     />
   );
+}
+
+/** The resolved model settings are status only: a running subagent cannot be steered. */
+export const ModelAndReasoningBlock = memo(function ModelAndReasoningBlock({ progress }: { progress?: SubagentProgress }) {
+  const { t } = useI18n();
+  const none = t("subagentTranscript.none");
+  const model = progress?.resolvedModel ?? none;
+  const role = progress?.modelRole ?? none;
+  const thinkingLevel = progress?.thinkingLevel ? thinkingLevelLabel(progress.thinkingLevel, t) : none;
+
+  return (
+    <section
+      aria-label={t("subagentTranscript.modelReasoning")}
+      style={{
+        display: "grid",
+        gap: 7,
+        marginTop: 10,
+        padding: "8px 10px",
+        border: "1px solid var(--border)",
+        borderRadius: "var(--radius-control)",
+        background: "var(--bg-subtle)",
+      }}
+    >
+      <strong style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("subagentTranscript.modelReasoning")}</strong>
+      <dl style={{ display: "grid", gridTemplateColumns: "auto minmax(0, 1fr)", columnGap: 8, rowGap: 4, margin: 0, fontSize: 11 }}>
+        <dt style={{ color: "var(--text-dim)" }}>{t("subagentTranscript.model")}</dt>
+        <dd style={{ minWidth: 0, margin: 0, overflowWrap: "anywhere", fontFamily: "var(--font-mono)", color: "var(--text)" }}>
+          {model}
+          {progress?.resolvedModelIsFallback && (
+            <span style={{ marginLeft: 6, color: "var(--status-warning)", fontFamily: "inherit" }}>({t("subagentTranscript.fallback")})</span>
+          )}
+        </dd>
+        <dt style={{ color: "var(--text-dim)" }}>{t("subagentTranscript.role")}</dt>
+        <dd style={{ minWidth: 0, margin: 0, overflowWrap: "anywhere", fontFamily: "var(--font-mono)", color: "var(--text)" }}>{role}</dd>
+        <dt style={{ color: "var(--text-dim)" }}>{t("subagentTranscript.reasoning")}</dt>
+        <dd style={{ minWidth: 0, margin: 0, overflowWrap: "anywhere", color: "var(--text)" }}>{thinkingLevel}</dd>
+      </dl>
+      <p style={{ margin: 0, fontSize: 10.5, lineHeight: 1.4, color: "var(--text-dim)" }}>
+        {t("subagentTranscript.modelReasoningExplanation")}
+      </p>
+    </section>
+  );
+});
+
+/** Localized status text for structured child lifecycle events. */
+export function subagentActivityLabel(event: SubagentActivityEvent, t: (key: string, vars?: Record<string, string>) => string): string {
+  if (event.kind === "model_changed" && event.to) {
+    return t("subagentTranscript.activityModelChanged", { model: event.to });
+  }
+  if (event.kind === "thinking_level_changed" && event.thinkingLevel) {
+    return t("subagentTranscript.activityThinkingChanged", { level: thinkingLevelLabel(event.thinkingLevel, t) });
+  }
+  if (event.kind === "retry_fallback_applied" && event.from && event.to) {
+    return t("subagentTranscript.activityFallback", { from: event.from, to: event.to });
+  }
+  return event.label;
 }
 
 /** Scrollable transcript list with stick-to-bottom follow. Memoized so live
@@ -541,7 +599,30 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
   const agent = currentDetail?.agent ?? subagent?.agent ?? "";
   const description = currentDetail?.description ?? subagent?.description ?? "";
   const task = currentDetail?.task ?? subagent?.task ?? subagent?.assignment ?? "";
-  const progress = subagent?.progress;
+  const progress = parseSubagentProgress(currentDetail?.progress) ?? subagent?.progress;
+  let latestModelEvent: SubagentActivityEvent | undefined;
+  let latestThinkingEvent: SubagentActivityEvent | undefined;
+  if (live && events) {
+    for (let index = events.length - 1; index >= 0 && (!latestModelEvent || !latestThinkingEvent); index -= 1) {
+      const event = events[index];
+      if (!latestModelEvent && (event.kind === "model_changed" || event.kind === "retry_fallback_applied") && event.to) {
+        latestModelEvent = event;
+      }
+      if (!latestThinkingEvent && event.kind === "thinking_level_changed" && event.thinkingLevel) {
+        latestThinkingEvent = event;
+      }
+    }
+  }
+  const displayProgress = latestModelEvent || latestThinkingEvent
+    ? {
+        ...progress,
+        ...(latestModelEvent ? {
+          resolvedModel: latestModelEvent.to ?? progress?.resolvedModel,
+          resolvedModelIsFallback: latestModelEvent.kind === "retry_fallback_applied",
+        } : {}),
+        ...(latestThinkingEvent ? { thinkingLevel: latestThinkingEvent.thinkingLevel ?? progress?.thinkingLevel } : {}),
+      }
+    : progress;
   const historyTokens = formatTokens(progress?.tokens);
   const historyMeta = subagent?.source === "history"
     ? [
@@ -561,7 +642,7 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
   const currentStatus = currentDetail?.status ?? subagent?.status;
   const subagentActive = live && !completion
     && (currentStatus === "started" || currentStatus === "pending" || currentStatus === "running");
-  const recentEvents = live && !completion && events && events.length > 0 ? events.slice(-4) : null;
+  const recentEvents = events && events.length > 0 ? events.slice(-4) : null;
 
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
@@ -594,9 +675,8 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
                     {description}
                   </div>
                 )}
-                <div style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {currentDetail?.sessionFile ?? subagent.sessionFile ?? subagent.id}
-                </div>
+                <div style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{currentDetail?.sessionFile ?? subagent.sessionFile ?? subagent.id}</div>
+                <ModelAndReasoningBlock progress={displayProgress} />
                 {historyMeta && (
                   <div style={{ fontSize: 10.5, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginTop: 2 }}>
                     {historyMeta}
@@ -631,14 +711,16 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
                       gap: 6,
                       fontSize: 11,
                       fontFamily: "var(--font-mono)",
-                      color: event.kind === "tool" ? "var(--accent)" : "var(--text-muted)",
+                      color: event.kind === "tool"
+                        ? "var(--accent)"
+                        : event.kind === "retry_fallback_applied" ? "var(--status-warning)" : "var(--text-muted)",
                       minWidth: 0,
                     }}
                   >
                     <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>
-                      {event.kind === "tool" ? "·" : event.kind === "notice" ? "!" : "»"}
+                      {event.kind === "tool" ? "·" : event.kind === "retry_fallback_applied" || event.kind === "notice" ? "!" : "»"}
                     </span>
-                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{event.label}</span>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subagentActivityLabel(event, t)}</span>
                     {subagentActive && i === recentEvents.length - 1 && (
                       <ActivityIndicator reducedMotion={reducedMotion} />
                     )}

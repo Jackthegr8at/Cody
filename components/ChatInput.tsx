@@ -48,11 +48,13 @@ import { brandAccountLabel } from "@/lib/provider-brand";
 import { ModelIcon, ProviderIcon } from "./ProviderIcon";
 import { useI18n } from "@/lib/i18n";
 import { selectableThinkingLevels } from "@/lib/thinking-levels";
+import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { STORAGE_EVENTS } from "@/lib/storage-keys";
 import { migrateComposerAllowlist, mirrorServerVisibility, modelVisibilityKey, pushRecentModel, readComposerVisibility, type ComposerVisibility } from "@/lib/composer-model-visibility";
 import { useSettingsRoute } from "@/hooks/useSettingsData";
 import { useSettingsOpener } from "./settings/shell-context";
 import { formatModelDisplayName } from "@/lib/model-display";
+import type { SessionActiveModel } from "@/lib/session-active-models";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix (already compressed if it needed to be)
@@ -74,6 +76,8 @@ interface ModelOption {
 
 /** Stable empty list, so a composer without modes never re-renders for a fresh `[]`. */
 const NO_MODES: SessionModeOption[] = [];
+/** Stable empty list keeps quota derivation memo-friendly when no session is live. */
+const NO_ACTIVE_MODELS: readonly SessionActiveModel[] = [];
 
 interface Props {
   onSend: (message: string, images?: AttachedImage[]) => void;
@@ -96,6 +100,8 @@ interface Props {
    * was running, and to scope per-engine browser storage. */
   engine?: ActiveEngineInfo | null;
   model?: { provider: string; modelId: string } | null;
+  /** Every concrete model with work attributable to this session. */
+  activeModels?: readonly SessionActiveModel[];
   isAutoModelSelection?: boolean;
   modelNames?: Record<string, string>;
   modelList?: { id: string; name: string; provider: string; supportsFastMode?: boolean }[];
@@ -112,17 +118,35 @@ interface Props {
   /** The engine's last unprompted model switch for this session (retry
    * fallback, usage-aware routing). Renders a persistent marker beside the
    * model control naming what moved and why — the switch outlives its toast. */
-  autoModelSwitch?: { from: string; to: string; role?: string; reason?: string } | null;
+  autoModelSwitch?: {
+    from: string;
+    to: string;
+    role?: string;
+    reason?: string;
+    job?: { kind: "main" | "subagent"; subagentId?: string; agent?: string; roleLabelKey: string };
+  } | null;
+  /** RPC-dialect engines can queue a safe model switch while a turn is running. */
+  modelChangeWhileStreaming?: boolean;
+  /** A live model switch queued for the next safe provider-call boundary. */
+  modelSwitchPending?: { provider: string; modelId: string; name: string; phase: "waiting" | "applying" } | null;
   fastModeEnabled?: boolean;
   fastModeActive?: boolean;
   fastModeCapable?: boolean;
   fastModeSupported?: boolean;
+  /** A Fast request is in flight; prevent a second click until the engine replies. */
+  fastModePending?: boolean;
+  /** The engine explicitly rejected Fast for this model/session. */
+  fastModeUnavailable?: boolean;
   onFastModeChange?: (enabled: boolean) => void;
   onAbortCompaction?: () => void;
   isCompacting?: boolean;
   compactResult?: CompactResultInfo | null;
   thinkingLevel?: string;
   onThinkingLevelChange?: (level: string) => void;
+  /** A reasoning-level command is awaiting engine acknowledgement. */
+  thinkingLevelPending?: boolean;
+  /** The requested reasoning level while an acknowledgement is pending. */
+  thinkingLevelTarget?: string | null;
   /** The engine's own session modes (ACP `session/new` → `modes`): its
    * permission posture — Manual / Accept edits / Plan / Auto on Claude,
    * Default / Accept Edits / Don't Ask on Hermes. Empty for an engine without
@@ -131,7 +155,6 @@ interface Props {
   currentModeId?: string | null;
   onModeChange?: (modeId: string) => void;
   availableThinkingLevels?: string[] | null;
-  thinkingLevelMap?: Record<string, string | null> | null;
   /** Display name for the current model when the catalog does not know it. */
   modelNameOverride?: string | null;
   retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
@@ -212,6 +235,12 @@ export interface QuotaWindowView {
   resetsAt: string | null;
 }
 
+/** A non-selected window that constrains work still active in this session. */
+export interface QuotaInUseWindowView extends QuotaWindowView {
+  provider: string;
+  uses: SessionActiveModel["uses"];
+}
+
 /** One quota window the ring is deliberately NOT gauging — another provider's
  *  subscription, or another model tier on this one. Reported so a spent window
  *  is never a surprise, but kept out of everything that colours the ring. */
@@ -239,6 +268,8 @@ export interface QuotaKnownView {
   label: string;
   resetsAt: string | null;
   windows: QuotaWindowView[];
+  /** Non-selected models with work in this session, always expanded. */
+  inUse: QuotaInUseWindowView[];
   /** Everything the section above does not cover, de-emphasised. */
   others: QuotaOtherWindowView[];
   fetchedAt: string | null;
@@ -261,6 +292,7 @@ export interface QuotaAbsentView {
   /** Engine-supplied prose explaining the gap, when it gave one. */
   reason: string | null;
   others: QuotaOtherWindowView[];
+  inUse: QuotaInUseWindowView[];
 }
 
 /** What the ring and the popover's quota half should say. A missing signal is
@@ -277,6 +309,7 @@ const QUOTA_UNREPORTED: QuotaAbsentView = {
   noteKey: "usage.notReportedNote",
   scopeKey: "usage.noQuotaSignal",
   reason: null,
+  inUse: [],
   others: [],
 };
 
@@ -289,6 +322,7 @@ const QUOTA_MODEL_UNMETERED: QuotaAbsentView = {
   noteKey: "usage.modelUnmeteredNote",
   scopeKey: "usage.modelUnmeteredScope",
   reason: null,
+  inUse: [],
   others: [],
 };
 
@@ -304,6 +338,7 @@ const QUOTA_MODEL_PREPAID: QuotaAbsentView = {
   noteKey: null,
   scopeKey: "usage.prepaidScope",
   reason: null,
+  inUse: [],
   others: [],
 };
 
@@ -327,6 +362,7 @@ const QUOTA_MODEL_UNCONSTRAINED: QuotaAbsentView = {
   noteKey: "usage.modelUnconstrainedNote",
   scopeKey: "usage.modelUnconstrainedScope",
   reason: null,
+  inUse: [],
   others: [],
 };
 
@@ -340,6 +376,7 @@ const QUOTA_UNAVAILABLE: QuotaAbsentView = {
   noteKey: "usage.unavailableNote",
   scopeKey: "usage.unavailableScope",
   reason: null,
+  inUse: [],
   others: [],
 };
 
@@ -351,6 +388,7 @@ const QUOTA_CHECKING: QuotaAbsentView = {
   noteKey: null,
   scopeKey: "usage.checkingScope",
   reason: null,
+  inUse: [],
   others: [],
 };
 
@@ -371,33 +409,108 @@ function clampQuotaPercent(value: number): number {
  *  merely-full one, exactly as lib/usage/select ranks the binding one. */
 const OTHER_STATE_RANK: Record<UsageWindowState, number> = { exhausted: 2, warning: 1, ok: 0 };
 
+function accountWindowKey(accountIndex: number, account: UsageAccount, window: Pick<UsageWindow, "id">): string {
+  return accountIndex + ":" + account.provider + ":" + window.id;
+}
+
+function isSelectedModel(active: SessionActiveModel, selected: ModelRef): boolean {
+  return active.provider.trim().toLocaleLowerCase() === selected.provider.trim().toLocaleLowerCase()
+    && active.modelId.trim() === selected.modelId.trim();
+}
+
+function mergeModelUses(target: SessionActiveModel["uses"], incoming: SessionActiveModel["uses"]): void {
+  for (const use of incoming) {
+    if (!target.some((candidate) => candidate.kind === use.kind && candidate.label === use.label)) {
+      target.push({ kind: use.kind, label: use.label });
+    }
+  }
+}
+
 /**
- * Everything the primary section does not cover, one row per account.
- *
- * Scoping the ring to one model drops two things out of view: the other
- * providers' subscriptions, and this provider's windows that belong to another
- * model tier. Neither may colour the ring — they cannot stop this turn — but
- * neither may vanish either: discovering a spent week by running into it is
- * exactly the failure this whole change is fixing. So each account reports its
- * own binding window among whatever is left over.
+ * Windows for concrete non-selected models with attributable session work.
+ * A shared provider window is rendered once with every reason it is active;
+ * tiered windows remain separate, exactly like the selected model's rows.
+ */
+function buildInUseWindows(
+  accounts: UsageAccount[],
+  primary: { account: UsageAccount; windows: UsageWindow[] } | null,
+  activeModels: readonly SessionActiveModel[],
+  selectedModel: ModelRef,
+  nameWindow: (account: UsageAccount, windowLabel: string) => string,
+): QuotaInUseWindowView[] {
+  const primaryAccountIndex = primary ? accounts.indexOf(primary.account) : -1;
+  const primaryKeys = new Set(
+    primary && primaryAccountIndex >= 0
+      ? primary.windows.map((window) => accountWindowKey(primaryAccountIndex, primary.account, window))
+      : [],
+  );
+  const rows = new Map<string, QuotaInUseWindowView>();
+
+  for (const active of activeModels) {
+    if (isSelectedModel(active, selectedModel) || active.uses.length === 0) continue;
+    const match = selectWindowsForModel(accounts, active);
+    if (!match) continue;
+    const accountIndex = accounts.indexOf(match.account);
+    if (accountIndex < 0) continue;
+
+    for (const quotaWindow of match.windows) {
+      const key = accountWindowKey(accountIndex, match.account, quotaWindow);
+      if (primaryKeys.has(key)) continue;
+      const existing = rows.get(key);
+      if (existing) {
+        mergeModelUses(existing.uses, active.uses);
+        continue;
+      }
+      const percent = clampQuotaPercent(quotaWindow.utilization);
+      rows.set(key, {
+        key,
+        provider: match.account.provider,
+        label: nameWindow(match.account, quotaWindow.label),
+        percent,
+        color: usageToneColor(percent, quotaWindow.state),
+        state: quotaWindow.state,
+        exhausted: quotaWindow.state === "exhausted",
+        resetsAt: quotaWindow.resetsAt,
+        uses: active.uses.map((use) => ({ kind: use.kind, label: use.label })),
+      });
+    }
+  }
+
+  return [...rows.values()].sort((a, b) => (
+    (OTHER_STATE_RANK[b.state] ?? 0) - (OTHER_STATE_RANK[a.state] ?? 0) || b.percent - a.percent
+  ));
+}
+
+/**
+ * Everything the selected model and the active-session rows do not cover,
+ * one binding row per account. These limits remain visible, but explicitly
+ * cannot stop the selected model.
  */
 function buildOtherWindows(
   accounts: UsageAccount[],
   primary: { account: UsageAccount; windows: UsageWindow[] } | null,
+  inUseKeys: ReadonlySet<string>,
 ): QuotaOtherWindowView[] {
-  const shown = new Set((primary?.windows ?? []).map((window) => window.id));
+  const primaryAccountIndex = primary ? accounts.indexOf(primary.account) : -1;
+  const primaryKeys = new Set(
+    primary && primaryAccountIndex >= 0
+      ? primary.windows.map((window) => accountWindowKey(primaryAccountIndex, primary.account, window))
+      : [],
+  );
   const rows: QuotaOtherWindowView[] = [];
   accounts.forEach((account, index) => {
     if (!account) return;
-    const leftover = (account.windows ?? []).filter((window) => (
-      Boolean(window) && !(account === primary?.account && shown.has(window.id))
+    const leftover = (account.windows ?? []).filter((window): window is UsageWindow => (
+      Boolean(window)
+      && !primaryKeys.has(accountWindowKey(index, account, window))
+      && !inUseKeys.has(accountWindowKey(index, account, window))
     ));
     // Same comparator as the ring's own pick, so the row a user reads first is
     // the one that would stop them first on that account.
     const binding = selectBindingWindow([{ ...account, windows: leftover }]);
     if (!binding) return;
     rows.push({
-      key: `${index}:${account.provider}:${binding.window.id}`,
+      key: accountWindowKey(index, account, binding.window),
       provider: account.provider,
       account: brandAccountLabel(account.provider, account.label || account.provider),
       label: binding.window.label,
@@ -411,7 +524,6 @@ function buildOtherWindows(
     (OTHER_STATE_RANK[b.state] ?? 0) - (OTHER_STATE_RANK[a.state] ?? 0) || b.percent - a.percent
   ));
 }
-
 /** Turns the usage snapshot into the ring's states. Pure, so the thresholds and
  *  the absence cases are testable without a DOM.
  *
@@ -431,6 +543,7 @@ export function buildQuotaView(
   loading: boolean,
   failed = false,
   model?: ModelRef | null,
+  activeModels: readonly SessionActiveModel[] = NO_ACTIVE_MODELS,
 ): QuotaView {
   if (!snapshot) {
     // A first read still in flight says "checking"; once one has failed, the
@@ -453,6 +566,7 @@ export function buildQuotaView(
       noteKey: "usage.unlimitedNote",
       scopeKey: "usage.unlimited",
       reason: readableReason(snapshot.reason),
+      inUse: [],
       others: [],
     };
   }
@@ -473,7 +587,8 @@ export function buildQuotaView(
     // selects once over the snapshot instead of twice, and guarantees the ring
     // and the list below it name the same window.
     const modelBinding = match?.windows[0] ?? null;
-    const others = buildOtherWindows(accounts, modelBinding ? match : null);
+    const inUse = buildInUseWindows(accounts, match, activeModels, model, nameWindow);
+    const others = buildOtherWindows(accounts, match, new Set(inUse.map((entry) => entry.key)));
     const reason = readableReason(snapshot.reason);
 
     if (!match || !modelBinding) {
@@ -481,7 +596,7 @@ export function buildQuotaView(
       // in windows. It has to be checked BEFORE the unmetered fallback, which
       // would otherwise claim "nothing it runs counts against a quota" about
       // an account that is literally spending money per token.
-      if (isPrepaidProvider(model.provider)) return { ...QUOTA_MODEL_PREPAID, others };
+      if (isPrepaidProvider(model.provider)) return { ...QUOTA_MODEL_PREPAID, inUse, others };
       // Three different silences, and the copy has to tell them apart: no
       // account serves this provider / the account is unmetered / the account
       // reports quota that all belongs to other models.
@@ -489,8 +604,8 @@ export function buildQuotaView(
         && match.account.unlimited !== true
         && (match.account.windows ?? []).some(Boolean);
       return providerReportsQuota
-        ? { ...QUOTA_MODEL_UNCONSTRAINED, reason, others }
-        : { ...QUOTA_MODEL_UNMETERED, reason, others };
+        ? { ...QUOTA_MODEL_UNCONSTRAINED, reason, inUse, others }
+        : { ...QUOTA_MODEL_UNMETERED, reason, inUse, others };
     }
 
     const accountIndex = accounts.indexOf(match.account);
@@ -518,6 +633,7 @@ export function buildQuotaView(
         };
       }),
       others,
+      inUse,
       fetchedAt: snapshot.fetchedAt ?? null,
       stale: snapshot.stale === true,
       planType: match.account.planType,
@@ -558,6 +674,7 @@ export function buildQuotaView(
     resetsAt: binding.window.resetsAt,
     windows,
     // The account-wide list above already shows every window there is.
+    inUse: [],
     others: [],
     fetchedAt: snapshot.fetchedAt ?? null,
     stale: snapshot.stale === true,
@@ -577,6 +694,12 @@ function formatResetTime(iso: string | null, locale: string, now: number): strin
   return sameDay
     ? at.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })
     : at.toLocaleString(locale, { weekday: "short", hour: "2-digit", minute: "2-digit" });
+}
+/** Usage-window labels are presentation text, unlike opaque plan and model
+ * identifiers. Give case-aware locales a readable capital to every visible
+ * window segment without changing the reported value itself. */
+function formatQuotaLabel(label: string, locale: string): string {
+  return label.replace(/(^|·\s*)(\p{Ll})/gu, (_match, prefix: string, letter: string) => prefix + letter.toLocaleUpperCase(locale));
 }
 
 /** The one bar geometry every quota row shares: 4px track, pill radius. The
@@ -608,6 +731,7 @@ function QuotaWindowRow({
   exhausted,
   resetsAt,
   now,
+  uses,
   muted = false,
 }: {
   icon?: React.ReactNode;
@@ -618,10 +742,13 @@ function QuotaWindowRow({
   exhausted: boolean;
   resetsAt: string | null;
   now: number;
+  /** Compact attribution for a window used by another live session model. */
+  uses?: readonly string[];
   muted?: boolean;
 }) {
   const { t, locale } = useI18n();
   const reset = formatResetTime(resetsAt, locale, now);
+  const displayLabel = formatQuotaLabel(label, locale);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
@@ -633,7 +760,7 @@ function QuotaWindowRow({
             color: muted ? "var(--text-muted)" : "var(--text)",
             whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
           }}>
-            {label}
+            {displayLabel}
           </div>
           {exhausted && (
             <div style={{
@@ -662,6 +789,11 @@ function QuotaWindowRow({
         </div>
       </div>
       <QuotaBar percent={percent} color={color} dimmed={muted && !exhausted} />
+      {uses && uses.length > 0 && (
+        <div style={{ fontSize: 10, lineHeight: 1.35, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {uses.join(", ")}
+        </div>
+      )}
       {reset && (
         <div style={{ fontSize: 10, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
           {t("usage.resetsAt", { time: reset })}
@@ -671,13 +803,15 @@ function QuotaWindowRow({
   );
 }
 
-/** The quota ring's popover: plan quota for the selected model and nothing
- *  else — context usage and token traffic live in the top bar. Exported so the
- *  SSR tests can render it open, which the composer's own state never is. */
+/** The quota ring's popover keeps the selected model primary while spelling
+ *  out every other model with attributable work in this session. Context usage
+ *  and token traffic live in the top bar. Exported so SSR tests can render it
+ *  open, which the composer's own state never is. */
 export function QuotaPopover({
   resetCredits,
   openRouter,
   quota,
+  activeModels = NO_ACTIVE_MODELS,
   provider,
   modelName,
   now,
@@ -685,9 +819,11 @@ export function QuotaPopover({
   anchorRight = null,
 }: {
   resetCredits?: ReturnType<typeof useResetCredits>;
-  /** OpenRouter's prepaid balance, passed only when an OpenRouter model is
-   * selected. Absent for every other provider — a subscription has no
-   * balance, and the section must not appear for one. */
+  /** Concrete models with work attributable to this session. */
+  activeModels?: readonly SessionActiveModel[];
+  /** OpenRouter's prepaid balance when it is selected or actively used by this
+   * session. Absent otherwise: subscription providers have no credit balance
+   * and must not grow a gateway section. */
   openRouter?: UseOpenRouterAccountResult;
   quota: QuotaView;
   /** Selected model's provider, naming the header before anything binds. */
@@ -698,6 +834,20 @@ export function QuotaPopover({
   anchorRight?: number | null;
 }) {
   const { t, locale } = useI18n();
+  const formatUse = (use: SessionActiveModel["uses"][number]): string => {
+    if (use.kind === "main") return t("usage.useMain", { label: use.label });
+    if (use.kind === "smart") return t("usage.useSmart", { label: use.label });
+    if (use.kind === "subagent") return t("usage.useSubagent", { label: use.label });
+    return t("usage.useFallback", { label: use.label });
+  };
+  const openRouterUses: SessionActiveModel["uses"] = [];
+  for (const active of activeModels) {
+    if (isPrepaidProvider(active.provider)) mergeModelUses(openRouterUses, active.uses);
+  }
+  const openRouterSessionLabel = !isPrepaidProvider(provider) && openRouterUses.length > 0
+    ? t("usage.openRouterInUse", { uses: openRouterUses.map(formatUse).join(", ") })
+    : null;
+  const hasSessionUsage = quota.inUse.length > 0 || openRouterSessionLabel !== null;
   const [resetSelection, setResetSelection] = useState<{ accountId: string; creditId: string; account: string } | null>(null);
   const resetPendingRef = useRef(false);
   const redeemSelectedReset = useCallback(async () => {
@@ -722,7 +872,13 @@ export function QuotaPopover({
   }, [resetCredits, resetSelection, t]);
   const resetAccounts = resetCredits?.snapshot?.accounts ?? [];
   const availableResetCount = resetAccounts.reduce((count, account) => count + account.availableCount, 0);
-  const percentText = quota.known ? `${Math.round(quota.percent)}%` : "—";
+  // The total remains visible even at zero. Per-account rows only earn their
+  // space when they can explain a positive balance, an expiry, or a failure.
+  const visibleResetAccounts = resetAccounts.filter((account) =>
+    (account.availableCount > 0 || Boolean(account.error))
+    && (resetAccounts.length > 1 || account.canRedeem || account.credits.length > 0 || Boolean(account.error)),
+  );
+  const percentText = quota.known ? t("usage.percentUsed", { percent: Math.round(quota.percent) }) : t("usage.unavailable");
   const headlineReset = quota.known ? formatResetTime(quota.resetsAt, locale, now) : null;
   const age = quota.known && quota.fetchedAt ? formatRelativeTime(quota.fetchedAt, locale, now) : null;
   // Age is only claimed when the snapshot carries a usable timestamp, and a
@@ -769,21 +925,21 @@ export function QuotaPopover({
             size={14}
             style={{ flexShrink: 0, color: "var(--text-muted)" }}
           />
-          <div style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 700, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          <div style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 700, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {modelName ? t("usage.titleForModel", { model: modelName }) : t("usage.title")}
           </div>
-          <div style={{ flexShrink: 0, fontSize: 16, fontWeight: 700, color: quota.color, fontVariantNumeric: "tabular-nums" }}>
+          <div style={{ flexShrink: 0, fontSize: 14, fontWeight: 700, color: quota.color, fontVariantNumeric: "tabular-nums" }}>
             {percentText}
           </div>
         </div>
         {/* The headline always names the window it is quoting — a bare
             percentage would not say what ran out. */}
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8, marginTop: 4 }}>
-          <div style={{ minWidth: 0, fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {quota.known ? quota.label : t(quota.titleKey)}
+          <div style={{ minWidth: 0, fontSize: 12, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {quota.known ? formatQuotaLabel(quota.label, locale) : t(quota.titleKey)}
           </div>
           {headlineReset && (
-            <div style={{ flexShrink: 0, fontSize: 11, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
+            <div style={{ flexShrink: 0, fontSize: 12, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
               {t("usage.resetsAt", { time: headlineReset })}
             </div>
           )}
@@ -795,7 +951,7 @@ export function QuotaPopover({
           </div>
         )}
         {quota.known && quota.planType && (
-          <div style={{ marginTop: 8, fontSize: 10, color: "var(--text-muted)" }}>
+          <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-muted)" }}>
             {t("usage.reportedPlan", { plan: quota.planType })}
           </div>
         )}
@@ -803,30 +959,30 @@ export function QuotaPopover({
             and other providers' windows: for an OpenRouter model it is THE
             number that decides whether the next turn runs, so it must not be
             below the fold of a 320px popover. */}
-        {openRouter && <OpenRouterCredits account={openRouter} />}
+        {openRouter && <OpenRouterCredits account={openRouter} usageLabel={openRouterSessionLabel ?? undefined} />}
         {resetCredits && (
           <section style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text)" }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>
               {t("usage.savedResets", { count: availableResetCount })}
             </div>
-            <div style={{ marginTop: 4, fontSize: 10, lineHeight: 1.45, color: "var(--text-dim)" }}>
-              {t("usage.savedResetsNote")}
+            <div style={{ marginTop: 4, fontSize: 11, lineHeight: 1.45, color: "var(--text-dim)" }}>
+              {t(availableResetCount === 0 ? "usage.savedResetsEmpty" : "usage.savedResetsNote")}
             </div>
             {resetCredits.loading && !resetCredits.snapshot && (
-              <div style={{ marginTop: 6, fontSize: 10, color: "var(--text-muted)" }}>{t("usage.resetCreditChecking")}</div>
+              <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-muted)" }}>{t("usage.resetCreditChecking")}</div>
             )}
-            {resetCredits.snapshot?.accounts.map((account) => {
+            {visibleResetAccounts.map((account) => {
               const credit = account.credits[0];
               const expiry = credit ? formatResetTime(credit.expiresAt, locale, now) : null;
               const confirming = resetSelection?.accountId === account.id;
               return (
                 <div key={account.id} style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid color-mix(in srgb, var(--border) 60%, transparent)" }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                    <span style={{ minWidth: 0, fontSize: 11, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{account.label}</span>
-                    <span style={{ flexShrink: 0, fontSize: 11, fontVariantNumeric: "tabular-nums", color: "var(--text-muted)" }}>{t("usage.savedResets", { count: account.availableCount })}</span>
+                    <span style={{ minWidth: 0, fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{account.label}</span>
+                    <span style={{ flexShrink: 0, fontSize: 12, fontVariantNumeric: "tabular-nums", color: "var(--text-muted)" }}>{t("usage.resetCount", { count: account.availableCount })}</span>
                   </div>
-                  {expiry && <div style={{ marginTop: 2, fontSize: 10, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>{t("usage.expiresAt", { time: expiry })}</div>}
-                  {account.error && <div style={{ marginTop: 4, fontSize: 10, color: "var(--text-dim)" }}>{account.error}</div>}
+                  {expiry && <div style={{ marginTop: 2, fontSize: 11, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>{t("usage.expiresAt", { time: expiry })}</div>}
+                  {account.error && <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)" }}>{account.error}</div>}
                   {credit && account.canRedeem && !confirming && (
                     <button type="button" onClick={() => setResetSelection({ accountId: account.id, creditId: credit.id, account: account.label })} style={{ marginTop: 6, padding: "3px 7px", border: "1px solid var(--border)", borderRadius: 5, background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 10 }}>
                       {t("usage.useReset")}
@@ -845,7 +1001,7 @@ export function QuotaPopover({
               );
             })}
             {resetCredits.snapshot && !resetCredits.snapshot.available && (
-              <div style={{ marginTop: 6, fontSize: 10, color: "var(--text-muted)" }}>{resetCredits.snapshot.reason ?? t("usage.resetCreditUnavailable")}</div>
+              <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-muted)" }}>{resetCredits.snapshot.reason ?? t("usage.resetCreditUnavailable")}</div>
             )}
           </section>
         )}
@@ -880,16 +1036,44 @@ export function QuotaPopover({
           </div>
         )}
 
+        {/* Non-selected models in this session remain visible without ever
+            changing the selected model's ring. This is a section, not details:
+            routing work is active context, not optional diagnostics. */}
+        {quota.inUse.length > 0 && (
+          <section style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)" }}>
+              {t("usage.alsoInUseSummary", { count: quota.inUse.length })}
+            </div>
+            <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 12 }}>
+              {quota.inUse.map((entry) => (
+                <QuotaWindowRow
+                  key={entry.key}
+                  label={entry.label}
+                  percent={entry.percent}
+                  color={entry.color}
+                  exhausted={entry.exhausted}
+                  resetsAt={entry.resetsAt}
+                  uses={entry.uses.map(formatUse)}
+                  now={now}
+                />
+              ))}
+            </div>
+          </section>
+        )}
+
         {/* Everything the model above is NOT charged against — other
             providers' subscriptions and this one's other tiers. Same row
             design as the list above, dimmed: a spent window here must stay
             visible, and must never colour the ring. */}
         {quota.others.length > 0 && (
-          <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
-            <div style={{ marginBottom: 8, fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.045em" }}>
-              {t("usage.notForThisModel")}
+          <details style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+            <summary style={{ cursor: "pointer", fontSize: 11, fontWeight: 700, color: "var(--text-muted)" }}>
+              {t("usage.otherLimitsSummary", { count: quota.others.length })}
+            </summary>
+            <div style={{ marginTop: 8, fontSize: 11, lineHeight: 1.45, color: "var(--text-dim)" }}>
+              {t("usage.notForThisModelNote")}
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 12 }}>
               {quota.others.map((entry) => (
                 <QuotaWindowRow
                   key={entry.key}
@@ -904,24 +1088,17 @@ export function QuotaPopover({
                 />
               ))}
             </div>
-            <div style={{ marginTop: 8, fontSize: 10, lineHeight: 1.45, color: "var(--text-dim)" }}>
-              {t("usage.notForThisModelNote")}
-            </div>
-          </div>
+          </details>
         )}
 
-        {/* Footer — whose limits these are, and how fresh the reading is. */}
-        <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)", display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
-          <div style={{ fontSize: 10, color: "var(--text-muted)" }}>
-            {!quota.known
-              ? t(quota.scopeKey)
-              : modelName ? t("usage.modelScope") : t("usage.accountWide")}
-          </div>
-          {freshness && (
-            <div style={{ flexShrink: 0, fontSize: 10, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
-              {freshness}
-            </div>
-          )}
+        {/* Footer — the primary window is all-session; the added section is
+            explicitly scoped to this run. */}
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)", fontSize: 11, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
+          {[
+            !quota.known ? t(quota.scopeKey) : provider ? t("usage.modelScope") : t("usage.accountWide"),
+            hasSessionUsage ? t("usage.sessionInUseScope") : null,
+            freshness,
+          ].filter(Boolean).join(" · ")}
         </div>
       </div>
     </div>
@@ -952,6 +1129,7 @@ type SlashCommandPaletteItem = {
   argumentHint?: string;
   source: SlashCommandSource;
 };
+
 
 function isDormantSkillCommand(command: SlashCommandPaletteItem, dormantNames: Set<string>): boolean {
   return command.source === "skill" && dormantNames.has(command.name);
@@ -1201,9 +1379,9 @@ function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; plan?: A
 }
 
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, canAttachWhileStreaming = false, canAttachImagesWhileStreaming = false, capabilities = ALL_CAPABILITIES, engine = null, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, autoModelSwitch, fastModeEnabled, fastModeActive, fastModeCapable, fastModeSupported, onFastModeChange,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, canAttachWhileStreaming = false, canAttachImagesWhileStreaming = false, capabilities = ALL_CAPABILITIES, engine = null, model, activeModels = NO_ACTIVE_MODELS, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, autoModelSwitch, modelSwitchPending, modelChangeWhileStreaming = false, fastModeEnabled, fastModeActive, fastModeCapable, fastModeSupported, fastModePending, fastModeUnavailable, onFastModeChange,
   onAbortCompaction, isCompacting, compactResult,
-  thinkingLevel, onThinkingLevelChange, availableModes = NO_MODES, currentModeId = null, onModeChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
+  thinkingLevel, onThinkingLevelChange, thinkingLevelPending, thinkingLevelTarget, availableModes = NO_MODES, currentModeId = null, onModeChange, availableThinkingLevels, modelNameOverride,
   retryInfo, queuedMessages, inputHistory = [], onAbortRetry,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
@@ -2399,7 +2577,26 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   // A failed load surfaces modelError; only an in-flight load shows the
   // loading chip, so "no models" can only appear after the fetch settled.
   const showModelsLoading = Boolean(modelsLoading) && !modelError;
-  const modelSelectorDisabled = isStreaming || (showModelsLoading && modelOptions.length === 0);
+  const modelSelectorDisabled = (isStreaming && !modelChangeWhileStreaming) || (showModelsLoading && modelOptions.length === 0);
+  const modelSwitchStatus = modelSwitchPending
+    ? t(modelSwitchPending.phase === "waiting" ? "chatInput.modelSwitchWaiting" : "chatInput.modelSwitchApplying", { name: modelSwitchPending.name })
+    : null;
+  const autoSwitchJobKey = autoModelSwitch?.job?.roleLabelKey ?? "agentSession.job.default";
+  const autoSwitchJobLabel = t(autoSwitchJobKey, {
+    name: autoModelSwitch?.job?.agent ?? autoModelSwitch?.job?.subagentId ?? "",
+    role: autoModelSwitch?.role ?? "",
+  });
+  const autoSwitchJob = autoSwitchJobLabel === autoSwitchJobKey
+    ? t("agentSession.job.default")
+    : autoSwitchJobLabel;
+  const autoSwitchDetail = autoModelSwitch
+    ? t("chatInput.autoSwitchDetail", {
+        job: autoSwitchJob,
+        from: autoModelSwitch.from,
+        reason: autoModelSwitch.reason ?? t("chatInput.autoSwitchUnknownReason"),
+        to: autoModelSwitch.to,
+      })
+    : null;
 
   // Smart row on a LIVE session: there is no "auto" runtime state to fall
   // back into (the session already has a resolved model), so this reaches
@@ -2461,11 +2658,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         saved: formatTokenCount(compactSavedTokens, locale),
       })
     : null;
-  const thinkingDisplayLabel = (() => {
+  const currentThinkingDisplayLabel = (() => {
     const lvl = thinkingLevel ?? "auto";
-    if (lvl === "auto" || !thinkingLevelMap) return lvl;
-    return thinkingLevelMap[lvl] ?? lvl;
+    return thinkingLevelLabel(lvl, t);
   })();
+  const thinkingDisplayLabel = thinkingLevelPending
+    ? t("chatInput.reasoningApplyingLevel", {
+        level: thinkingLevelLabel(thinkingLevelTarget ?? thinkingLevel ?? "auto", t),
+      })
+    : currentThinkingDisplayLabel;
   // The ring gauges the binding PLAN QUOTA window OF THE SELECTED MODEL; the
   // context window has its own readout in the top bar.
   //
@@ -2480,15 +2681,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       usageLoading,
       usageFailed,
       quotaProvider && quotaModelId ? { provider: quotaProvider, modelId: quotaModelId } : null,
+      activeModels,
     ),
-    [usageSnapshot, usageLoading, usageFailed, quotaProvider, quotaModelId],
+    [usageSnapshot, usageLoading, usageFailed, quotaProvider, quotaModelId, activeModels],
   );
-  // The balance is only read when an OpenRouter model is actually selected.
-  // Gating on the same predicate `buildQuotaView` branches on keeps the two
-  // in lockstep: the popover can never say "prepaid" and then have no balance
-  // to show. An Anthropic-only user never issues one of these requests.
+  // A gateway balance matters whenever THIS session routes work through it,
+  // including an OpenRouter subagent under a non-OpenRouter selected model.
   const openRouterSelected = isPrepaidProvider(quotaProvider);
-  const openRouterAccount = useOpenRouterAccount(openRouterSelected);
+  const openRouterActive = openRouterSelected || activeModels.some((active) => isPrepaidProvider(active.provider));
+  const openRouterAccount = useOpenRouterAccount(openRouterActive);
   const quotaPercentText = quota.known ? `${Math.round(quota.percent)}%` : "—";
   // The tooltip names the window AND the model it is about, so a ring read at a
   // glance can never be attributed to the wrong conversation.
@@ -2519,8 +2720,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (!contextPopoverOpen) return;
     refreshUsage();
     refreshResetCredits();
-    if (openRouterSelected) refreshOpenRouter();
-  }, [contextPopoverOpen, refreshUsage, refreshResetCredits, openRouterSelected, refreshOpenRouter]);
+    if (openRouterActive) refreshOpenRouter();
+  }, [contextPopoverOpen, refreshUsage, refreshResetCredits, openRouterActive, refreshOpenRouter]);
   // A brand-new conversation must open with an honest ring, and the composer
   // may have been idle for a whole background poll before it. Keyed on the
   // session (draftKey), never on the model: switching models re-filters the
@@ -3271,7 +3472,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
             {/* Model selector — compact text button with dropdown */}
             {(modelOptions.length > 0 || currentName || modelError || showModelsLoading) && onModelChange && (
-              <div ref={dropdownRef} style={{ position: "relative", minWidth: 0, flex: isMobile ? "1 1 auto" : undefined }}>
+              <div ref={dropdownRef} style={{ position: "relative", minWidth: 0, flex: isMobile ? "1 1 auto" : undefined, display: "flex", alignItems: "center", gap: 5 }}>
                 <button
                   onClick={(e) => {
                     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -3299,7 +3500,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
                   }}
                   onMouseEnter={(e) => {
-                    if (isStreaming) return;
+                    if (modelSelectorDisabled) return;
                     e.currentTarget.style.background = "var(--bg-hover)";
                     e.currentTarget.style.color = "var(--text)";
                   }}
@@ -3344,13 +3545,24 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   )}
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
                     {isAutoModelSelection
-                      ? (currentName ? `${t("chatInput.smartModel", { name: engineName })} · ${currentName}` : t("chatInput.smartModel", { name: engineName }))
+                      ? t("chatInput.smartModel")
                       : currentName ?? (modelOptions.length > 0
                         ? t("chatInput.selectModel")
                         : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noModels"))}
                   </span>
                   <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7 }} aria-hidden="true" />
                 </button>
+                {modelSwitchStatus && (
+                  <span
+                    data-testid="model-switch-pending"
+                    role="status"
+                    title={t("chatInput.modelSwitchHint")}
+                    style={{ display: "inline-flex", alignItems: "center", gap: 4, minWidth: 0, color: "var(--text-dim)", fontSize: 11, whiteSpace: "nowrap" }}
+                  >
+                    <Loader2 size={11} strokeWidth={2} style={{ flexShrink: 0, animation: "spin 0.8s linear infinite" }} aria-hidden="true" />
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{modelSwitchStatus}</span>
+                  </span>
+                )}
                 {modelDropdownOpen && modelDropdownRect && (() => {
                   const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
                   const bottom = viewportHeight - modelDropdownRect.top + 6;
@@ -3398,7 +3610,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         : <span style={{ width: 10, flexShrink: 0 }} />}
                       <Sparkles size={13} strokeWidth={1.8} style={{ flexShrink: 0, marginTop: 2, color: isAutoModelSelection ? "var(--accent)" : "var(--text-dim)" }} />
                       <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
-                        <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t("chatInput.smartModel", { name: engineName })}</span>
+                        <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t("chatInput.smartModel")}</span>
                         <span style={{ fontSize: 11, color: "var(--text-dim)", fontWeight: 400, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t("chatInput.smartModelHint", { name: engineName })}</span>
                       </span>
                     </button>
@@ -3502,15 +3714,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               <button
                 type="button"
                 onClick={() => {
-                  const detail = [
-                    t("chatInput.autoSwitchDetail", { from: autoModelSwitch.from, to: autoModelSwitch.to }),
-                    autoModelSwitch.role ? t("agentSession.fallbackAppliedDetail", { role: autoModelSwitch.role, name: engineName }) : null,
-                    autoModelSwitch.reason ? t("agentSession.fallbackReason", { reason: autoModelSwitch.reason }) : null,
-                  ].filter(Boolean).join("\n");
-                  toast.info(t("chatInput.autoSwitchChip"), detail, { durationMs: 12_000, clamp: true });
+                  if (autoSwitchDetail) toast.info(t("chatInput.autoSwitchChip"), autoSwitchDetail, { durationMs: 12_000, clamp: true });
                 }}
-                title={t("chatInput.autoSwitchTitle")}
-                aria-label={t("chatInput.autoSwitchTitle")}
+                title={autoSwitchDetail ?? t("chatInput.autoSwitchTitle")}
+                aria-label={autoSwitchDetail ?? t("chatInput.autoSwitchTitle")}
                 style={{
                   display: "inline-flex", alignItems: "center", gap: 4,
                   // Icon-only on a phone: its text is what would push the
@@ -3533,8 +3740,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
             {(onThinkingLevelChange || (fastModeCapable && onFastModeChange)) && (
             <div style={{ display: "inline-flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
-            {/* Reasoning level selector — stays visible while the agent
-                runs (disabled) so the level never looks like it reset. */}
+            {/* Reasoning level selector stays available during an active run:
+                an accepted change applies to the next model request. */}
             {onThinkingLevelChange && (
               <div ref={thinkingDropdownRef} style={{ position: "relative", flexShrink: isMobile ? 0 : undefined }}>
                 <button
@@ -3543,11 +3750,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     setThinkingAnchorTop(rect.top);
                     setThinkingDropdownOpen((v) => !v);
                   }}
-                  disabled={isStreaming}
-                  title={t("chatInput.changeReasoningTitle", { level: thinkingDisplayLabel })}
-                  // The aria-label already carried the level, which is what the
-                  // icon-only phone button now leans on entirely.
-                  aria-label={`${t("chatInput.changeReasoning")}: ${thinkingDisplayLabel}`}
+                   disabled={thinkingLevelPending}
+                   data-testid="thinking-level-toggle"
+                   title={thinkingLevelPending ? t("chatInput.reasoningApplyingHint") : t("chatInput.reasoningChangeHint")}
+                   aria-label={[t("chatInput.changeReasoning"), thinkingDisplayLabel].filter(Boolean).join(": ")}
                   style={{
                     display: "flex", alignItems: "center", gap: 5,
                     justifyContent: isMobile ? "center" : undefined,
@@ -3558,16 +3764,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     border: "none",
                     borderRadius: 7,
                     color: "var(--text-muted)",
-                    cursor: isStreaming ? "not-allowed" : "pointer",
-                    opacity: isStreaming ? 0.5 : 1,
+                     cursor: thinkingLevelPending ? "wait" : "pointer",
+                     opacity: thinkingLevelPending ? 0.65 : 1,
                     fontSize: 12,
                     transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
                   }}
-                  onMouseEnter={(e) => {
-                    if (isStreaming) return;
-                    e.currentTarget.style.background = "var(--bg-hover)";
-                    e.currentTarget.style.color = "var(--text)";
-                  }}
+                   onMouseEnter={(e) => {
+                     if (thinkingLevelPending) return;
+                     e.currentTarget.style.background = "var(--bg-hover)";
+                     e.currentTarget.style.color = "var(--text)";
+                   }}
                   onMouseLeave={(e) => {
                     e.currentTarget.style.background = thinkingDropdownOpen ? "var(--bg-hover)" : "none";
                     e.currentTarget.style.color = "var(--text-muted)";
@@ -3578,8 +3784,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     <line x1="7" y1="18" x2="12" y2="18" />
                     <line x1="8" y1="21" x2="11" y2="21" />
                   </svg>
-                  {!isMobile && <span style={{ whiteSpace: "nowrap" }}>{thinkingDisplayLabel}</span>}
-                  {!isMobile && <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7 }} aria-hidden="true" />}
+                   {!isMobile && <span style={{ whiteSpace: "nowrap" }}>{thinkingDisplayLabel}</span>}
+                   {thinkingLevelPending && <Loader2 size={isMobile ? 13 : 11} strokeWidth={2} style={{ flexShrink: 0, animation: "spin 0.8s linear infinite" }} aria-hidden="true" />}
+                   {!isMobile && <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7 }} aria-hidden="true" />}
                 </button>
                 {thinkingDropdownOpen && (
                   <div className="dropdown-surface" style={isMobile && thinkingAnchorTop != null ? {
@@ -3599,31 +3806,30 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       // "auto" means "whatever the engine defaults to", so
                       // its description names the ACTIVE engine.
                       const desc = descKey ? t(descKey, { name: engineName }) : "";
-                      const mappedVal = (lvl !== "auto" && thinkingLevelMap) ? thinkingLevelMap[lvl] : undefined;
-                      const displayLabel = (mappedVal != null && mappedVal !== lvl) ? mappedVal : lvl;
-                      const showOriginal = mappedVal != null && mappedVal !== lvl;
+                      const displayLabel = thinkingLevelLabel(lvl, t);
                       return (
                         <button
                           className="dropdown-item"
                           key={lvl}
-                          onClick={() => { setThinkingDropdownOpen(false); if (!isActive && !isStreaming) onThinkingLevelChange(lvl); }}
+                           disabled={thinkingLevelPending}
+                           onClick={() => { setThinkingDropdownOpen(false); if (!isActive && !thinkingLevelPending) onThinkingLevelChange(lvl); }}
                           style={{
                             display: "flex", alignItems: "center", gap: 8,
                             width: "100%", padding: "7px 12px",
                             background: isActive ? "var(--bg-selected)" : "transparent",
                             border: "none",
                             color: isActive ? "var(--text)" : "var(--text-muted)",
-                            cursor: "pointer", fontSize: 12, textAlign: "left",
-                            fontWeight: isActive ? 600 : 400,
+                             cursor: thinkingLevelPending ? "wait" : "pointer", fontSize: 12, textAlign: "left",
+                             fontWeight: isActive ? 600 : 400, opacity: thinkingLevelPending ? 0.65 : 1,
                             whiteSpace: "nowrap",
                           }}
-                          onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                          onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
+                           onMouseEnter={(e) => { if (!isActive && !thinkingLevelPending) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                           onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
                         >
                           {isActive
                             ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
                             : <span style={{ width: 10, flexShrink: 0 }} />}
-                          <span style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{displayLabel}{showOriginal && <span style={{ color: "var(--text-dim)", fontWeight: 400 }}> ({lvl})</span>}</span>
+                          <span style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{displayLabel}</span>
                           {desc && (
                             <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>
                               {desc}
@@ -3636,36 +3842,85 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 )}
               </div>
             )}
-            {fastModeCapable && onFastModeChange && (
-              <button
-                type="button"
-                onClick={() => {
-                  if (!fastModeSupported) {
-                    toast.info(t("chatInput.fastModeUnavailable"));
-                    return;
-                  }
-                  onFastModeChange(!fastModeEnabled);
-                }}
-                title={fastModeSupported
-                  ? (fastModeActive ? t("chatInput.fastModeActive") : t("chatInput.fastModeHint"))
-                  : t("chatInput.fastModeUnavailable")}
-                aria-label={fastModeSupported
-                  ? (fastModeActive ? t("chatInput.fastModeActive") : t("chatInput.fastLabel"))
-                  : t("chatInput.fastModeUnavailable")}
-                aria-pressed={Boolean(fastModeActive && fastModeSupported)}
-                style={{
-                  display: "inline-flex", alignItems: "center", justifyContent: "center",
-                  width: isMobile ? 38 : 28, height: isMobile ? 38 : 28, padding: 0,
-                  background: fastModeActive && fastModeSupported ? "var(--bg-hover)" : "none",
-                  border: "none", borderRadius: 7,
-                  color: fastModeActive && fastModeSupported ? "var(--accent)" : "var(--text-muted)",
-                  cursor: "pointer", flexShrink: 0,
-                  transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
-                }}
-              >
-                <Zap size={isMobile ? 16 : 14} strokeWidth={2} aria-hidden="true" />
-              </button>
-            )}
+            {fastModeCapable && onFastModeChange && (() => {
+              // The preference and engine state are distinct: a request can be
+              // accepted on the wire without the provider confirming service.
+              const fastState = fastModePending
+                ? "checking"
+                : fastModeActive === true
+                  ? "requested"
+                  : fastModeUnavailable === true
+                    ? "unavailable"
+                    : fastModeEnabled && fastModeActive === false
+                      ? "inactive"
+                      : fastModeSupported === false
+                        ? "unavailable"
+                        : fastModeEnabled
+                          ? "unverified"
+                          : fastModeSupported === true
+                            ? "off"
+                            : "unverified";
+              const fastLabels = {
+                checking: t("chatInput.fastModeChecking"),
+                requested: t("chatInput.fastModeRequested"),
+                inactive: t("chatInput.fastModeInactive"),
+                unavailable: t("chatInput.fastModeUnavailable"),
+                unverified: t("chatInput.fastModeUnverified"),
+                off: t("chatInput.fastModeOff"),
+              };
+              const fastLabel = fastLabels[fastState];
+              const fastTitle = fastState === "requested"
+                ? t("chatInput.fastModeRequestedHint")
+                : fastState === "inactive"
+                  ? t("chatInput.fastModeInactiveHint")
+                  : fastState === "unavailable"
+                    ? t("chatInput.fastModeUnavailableHint")
+                    : fastState === "unverified"
+                      ? t("chatInput.fastModeUnverifiedHint")
+                      : fastState === "checking"
+                        ? t("chatInput.fastModeCheckingHint")
+                        : t("chatInput.fastModeOffHint");
+              const isWarning = fastState === "inactive" || fastState === "unavailable";
+              return (
+                <button
+                  type="button"
+                  data-testid="fast-mode-toggle"
+                  onClick={() => {
+                    if (fastModePending) return;
+                    // Always preserve the ability to turn off an enabled but
+                    // inactive Fast request.
+                    if (fastModeEnabled) {
+                      onFastModeChange(false);
+                      return;
+                    }
+                    if (fastModeUnavailable || fastModeSupported === false) {
+                      toast.info(t("chatInput.fastModeUnavailableHint"));
+                      return;
+                    }
+                    onFastModeChange(true);
+                  }}
+                  disabled={fastModePending}
+                  title={fastTitle}
+                  aria-label={fastLabel}
+                  aria-pressed={Boolean(fastModeEnabled)}
+                  style={{
+                    display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4,
+                    height: isMobile ? 38 : 28, padding: isMobile ? "0 9px" : "0 7px",
+                    background: fastState === "requested" ? "var(--bg-hover)" : "none",
+                    border: "none", borderRadius: 7,
+                    color: fastState === "requested" ? "var(--accent)" : isWarning ? "var(--status-warning)" : "var(--text-muted)",
+                    cursor: fastModePending ? "wait" : "pointer", flexShrink: 0,
+                    opacity: fastModePending ? 0.65 : 1,
+                    transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
+                  }}
+                >
+                  {isWarning
+                    ? <TriangleAlert size={isMobile ? 16 : 14} strokeWidth={2} aria-hidden="true" />
+                    : <Zap size={isMobile ? 16 : 14} strokeWidth={2} aria-hidden="true" />}
+                  <span style={{ whiteSpace: "nowrap", fontSize: 11, fontWeight: fastState === "requested" ? 600 : 500 }}>{fastLabel}</span>
+                </button>
+              );
+            })()}
             </div>
             )}
             {/* Agent-mode selector — the engine's own session modes, offered
@@ -3774,7 +4029,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 circle. An OpenRouter model is a reason to show it even when
                 the engine reports no windows: the popover then carries the
                 credit balance, which is the only spend signal that exists. */}
-              {(quotaReported || openRouterSelected || Boolean(resetCredits.snapshot?.available)) && (
+              {(quotaReported || openRouterActive || Boolean(resetCredits.snapshot?.available)) && (
               <div
                 ref={contextPopoverRef}
                 // marginRight doubles the visual space between the gauge and
@@ -3833,8 +4088,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 {contextPopoverOpen && (
                   <QuotaPopover
                     resetCredits={resetCredits}
-                    openRouter={openRouterSelected ? openRouterAccount : undefined}
+                    openRouter={openRouterActive ? openRouterAccount : undefined}
                     quota={quota}
+                    activeModels={activeModels}
                     provider={quotaProvider ?? null}
                     modelName={displayModelName}
                     now={usageNow}

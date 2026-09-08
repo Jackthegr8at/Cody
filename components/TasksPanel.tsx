@@ -8,6 +8,8 @@ import { TASKS_CONFIG_RELATIVE_PATH, groupTasks, type WorkspaceTask } from "@/li
 export interface TasksPanelProps {
   cwd: string | null;
   active: boolean;
+  /** Render only the command runner body inside another workspace surface. */
+  embedded?: boolean;
   /** Switch the shell to the Terminal tab, focusing `terminalId` when given. */
   onOpenTerminal: (terminalId?: string) => void;
   /** Lets the tab strip render a "!" badge while the config is broken. */
@@ -71,7 +73,7 @@ function hoverOut(event: React.MouseEvent<HTMLButtonElement>) {
   event.currentTarget.style.background = "var(--bg-panel)";
 }
 
-export function TasksPanel({ cwd, active, onOpenTerminal, onConfigStateChange }: TasksPanelProps): React.ReactElement | null {
+export function TasksPanel({ cwd, active, embedded = false, onOpenTerminal, onConfigStateChange }: TasksPanelProps): React.ReactElement | null {
   const { t, tn } = useI18n();
   const [status, setStatus] = useState<PanelStatus>("loading");
   const [tasks, setTasks] = useState<WorkspaceTask[]>([]);
@@ -208,52 +210,61 @@ export function TasksPanel({ cwd, active, onOpenTerminal, onConfigStateChange }:
   return (
     <section
       aria-label={t("tasks.title")}
-      style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, overflow: "hidden", background: "var(--bg)" }}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        height: embedded ? "auto" : "100%",
+        minHeight: 0,
+        overflow: embedded ? "visible" : "hidden",
+        background: embedded ? "transparent" : "var(--bg)",
+      }}
     >
-      <div
-        className="workspace-subtitle-bar"
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          flexShrink: 0,
-          borderBottom: "1px solid var(--border)",
-          background: "var(--bg-panel)",
-        }}
-      >
-        <span style={{ flex: 1, minWidth: 0, fontSize: 11, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {t("tasks.title")}
-        </span>
-        <button
-          type="button"
-          className="ui-focus-ring"
-          onClick={() => void load(true)}
-          disabled={status === "loading"}
-          title={t("tasks.refresh")}
-          aria-label={t("tasks.refresh")}
-          style={toolbarButtonStyle(status === "loading")}
-          onMouseEnter={hoverIn}
-          onMouseLeave={hoverOut}
+      {!embedded && (
+        <div
+          className="workspace-subtitle-bar"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            flexShrink: 0,
+            borderBottom: "1px solid var(--border)",
+            background: "var(--bg-panel)",
+          }}
         >
-          <RotateCw size={11} strokeWidth={2.2} aria-hidden="true" />
-          {t("tasks.refresh")}
-        </button>
-        <button
-          type="button"
-          className="ui-focus-ring"
-          onClick={() => onOpenTerminal()}
-          title={t("tasks.openTerminal")}
-          aria-label={t("tasks.openTerminal")}
-          style={toolbarButtonStyle(false)}
-          onMouseEnter={hoverIn}
-          onMouseLeave={hoverOut}
-        >
-          <Terminal size={11} strokeWidth={2.2} aria-hidden="true" />
-          {t("tasks.openTerminal")}
-        </button>
-      </div>
+          <span style={{ flex: 1, minWidth: 0, fontSize: 11, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {t("tasks.title")}
+          </span>
+          <button
+            type="button"
+            className="ui-focus-ring"
+            onClick={() => void load(true)}
+            disabled={status === "loading"}
+            title={t("tasks.refresh")}
+            aria-label={t("tasks.refresh")}
+            style={toolbarButtonStyle(status === "loading")}
+            onMouseEnter={hoverIn}
+            onMouseLeave={hoverOut}
+          >
+            <RotateCw size={11} strokeWidth={2.2} aria-hidden="true" />
+            {t("tasks.refresh")}
+          </button>
+          <button
+            type="button"
+            className="ui-focus-ring"
+            onClick={() => onOpenTerminal()}
+            title={t("tasks.openTerminal")}
+            aria-label={t("tasks.openTerminal")}
+            style={toolbarButtonStyle(false)}
+            onMouseEnter={hoverIn}
+            onMouseLeave={hoverOut}
+          >
+            <Terminal size={11} strokeWidth={2.2} aria-hidden="true" />
+            {t("tasks.openTerminal")}
+          </button>
+        </div>
+      )}
 
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 12 }}>
+      <div style={{ flex: embedded ? "0 1 auto" : 1, minHeight: 0, overflowY: embedded ? "visible" : "auto", padding: embedded ? "0 0 4px" : 12 }}>
         {note && (
           <div
             role={note.kind === "error" ? "alert" : "status"}

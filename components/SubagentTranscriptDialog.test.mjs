@@ -8,7 +8,8 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { TaskBlock, CompletionBlock } = await jiti.import("./SubagentTranscriptDialog.tsx");
+const { TaskBlock, CompletionBlock, ModelAndReasoningBlock, subagentActivityLabel } = await jiti.import("./SubagentTranscriptDialog.tsx");
+const { translate } = await jiti.import("../lib/i18n/index.tsx");
 
 test("renders the task as markdown with its label", () => {
   const html = renderToStaticMarkup(React.createElement(TaskBlock, {
@@ -68,4 +69,26 @@ test("shows an empty state when no completion exists yet", () => {
     truncated: false,
   }));
   assert.match(html, /No output yet/);
+});
+
+test("exposes the resolved model, fallback state, role, and reasoning", () => {
+  const html = renderToStaticMarkup(React.createElement(ModelAndReasoningBlock, {
+    progress: {
+      resolvedModel: "openai-codex/gpt-5.6",
+      resolvedModelIsFallback: true,
+      modelRole: "task",
+      thinkingLevel: "high",
+    },
+  }));
+
+  assert.match(html, /openai-codex\/gpt-5\.6/);
+  assert.match(html, /fallback/);
+  assert.match(html, />task</);
+  assert.match(html, />High</);
+});
+
+test("formats structured model, reasoning, and fallback activity", () => {
+  assert.equal(subagentActivityLabel({ kind: "model_changed", label: "raw", to: "new-model", ts: 1 }, translate), "Switched model to new-model.");
+  assert.equal(subagentActivityLabel({ kind: "thinking_level_changed", label: "raw", thinkingLevel: "high", ts: 1 }, translate), "Set reasoning to High.");
+  assert.equal(subagentActivityLabel({ kind: "retry_fallback_applied", label: "raw", from: "first", to: "second", ts: 1 }, translate), "Fell back from first to second.");
 });

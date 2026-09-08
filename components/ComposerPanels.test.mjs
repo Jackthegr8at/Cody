@@ -93,6 +93,7 @@ test("live chips show current tool, telemetry, and async marker", () => {
         contextTokens: 8000,
         contextWindow: 32000,
         resolvedModel: "provider/gpt-x:high",
+        thinkingLevel: "high",
       },
     }],
     onSelectSubagent: noop,
@@ -103,7 +104,7 @@ test("live chips show current tool, telemetry, and async marker", () => {
   assert.match(html, /read: Inspect foo\.ts/);
   assert.match(html, /data-subagent-metric="2\.2k tok"/);
   assert.match(html, /data-subagent-metric="8k\/32k ctx"/);
-  assert.match(html, /data-subagent-metric="gpt-x"/);
+  assert.match(html, /aria-label="gpt-x · High"/);
   assert.doesNotMatch(html, />2\.2k tok</);
   assert.doesNotMatch(html, />8k\/32k ctx</);
   assert.match(html, /⤴/);
