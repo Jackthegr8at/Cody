@@ -92,6 +92,7 @@ app/api/
   agent/[id]/display/route.ts     POST publish a display request | GET latest (auth-gated)
   agent/[id]/display/events/route.ts GET SSE stream of display requests (snapshot + live)
   internal/display/route.ts       POST publish from engine MCP servers (capability-token auth)
+  internal/todo/route.ts          POST project To-do MCP operations (capability-token auth)
   auth/**                         omp's provider list + login flow (via RPC); every
                                    route refuses `unsupported` unless omp is active
   cwd/validate/route.ts           POST validate/select a cwd
@@ -100,6 +101,7 @@ app/api/
   git/status/route.ts             GET repo status + branch/ahead-behind for a cwd
   git/diff/route.ts               GET one file's HEAD->worktree patch
   info/route.ts                   GET server facts for the Info panel
+  todo/route.ts                   GET/POST project .cody/todo.json (validated, atomic)
   tasks/route.ts                  GET .cody/tasks.json (validated)
   tasks/run/route.ts              POST run a task by id into a new terminal
   home/route.ts                   GET user home directory
@@ -177,11 +179,11 @@ lib/
     types.ts           DisplayRequestV1 + DisplayCandidate + bus event types
     validation.ts      loopback-only http(s) URL normalization (rejects credentials)
     bus.ts             globalThis per-session latest+listeners; publish/subscribe/alias
-    capability.ts      HMAC session-scoped tokens (CODY_INTERNAL_DISPLAY_SECRET/ORIGIN)
+    capability.ts      HMAC session-scoped display/to-do tokens (CODY_INTERNAL_DISPLAY_SECRET/ORIGIN)
     provider.ts        RasterWebProvider: puppeteer-core + system Chromium → JPEG WS stream
     native-gateway.ts  candidate ranking; optional CODY_PREVIEW_BASE_URL
                        wildcard-subdomain reverse proxy
-    engine-tools.ts    bundled display-MCP launch descriptors: --mcp-config JSON for a
+    engine-tools.ts    bundled display/to-do MCP launch descriptors: --mcp-config JSON for a
                        per-turn CLI, an ACP McpServerStdio for an ACP session
     access.ts          authorizeDisplaySession(): request auth for display routes
     csp.ts             buildContentSecurityPolicy(): loopback + this host's
@@ -267,7 +269,7 @@ lib/
   composer-model-visibility.ts  browser-side mirror of the visibility file so
                        the composer repaints without a round trip, and the
                        store of record on an open instance (no accounts)
-  rpc-manager.ts       session registry + startRpcSession over RpcProcess
+  rpc-manager.ts       session registry + Cody-owned host tools + startRpcSession over RpcProcess
   session-active-models.ts  every model in use in the CURRENT run (live model,
                        Smart resolution, subagents' resolvedModel, fallback
                        targets, this run's assistant turns) with what uses
@@ -296,6 +298,7 @@ lib/
   thinking-level-labels.ts  the one raw-reasoning-level → label-key map shared
                        by the composer selector, its pending status, chat
                        notices and the subagent dialog
+  project-todo.ts      .cody/todo.json schema, atomic mutation/history + agent summary
   workspace-tasks.ts   .cody/tasks.json schema validation + grouping
   tool-presets.ts      PRESET_NONE/DEFAULT/FULL + getPresetFromTools()
   types.ts             shared TypeScript types
@@ -316,7 +319,9 @@ components/
   BranchNavigator.tsx in-session branch switcher
   DiffView.tsx        folding unified-diff renderer (FileViewer + GitPanel)
   GitPanel.tsx        right-panel Git tool: changed files + diffs + branch info
-  TasksPanel.tsx      right-panel Tasks tool: .cody/tasks.json runner
+  TodoPanel.tsx       right-panel Tasks content: manual .cody/todo.json To-do list
+                      with an embedded collapsed Commands section when .cody/tasks.json exists
+  TasksPanel.tsx      embedded Commands runner for .cody/tasks.json
   PreviewPanel.tsx    right-panel Preview: walks the display candidate ladder —
                       direct/gateway iframe, else the streamed surface below —
                       plus clipboard/pop-out controls and manual URL mode
@@ -442,8 +447,8 @@ bin/
   cody-server.js           custom server; also WS upgrade for /api/display/socket
                            (stream frames + input) and native-gateway host routing;
                            mints the display capability secret at boot
-  cody-display-mcp.js      bundled stdio MCP server exposing open_preview to
-                           Claude/Codex engines (posts to /api/internal/display)
+  cody-display-mcp.js      bundled stdio MCP server exposing open_preview and cody_todo to
+                           Claude/Codex engines (posts to /api/internal/display and /api/internal/todo)
   cody-pi-login.mjs        pi's provider sign-in helper: imports the INSTALLED pi
                            package's AuthStorage/OAuth flows and speaks JSON
                            lines to lib/harness/pi-login.ts (list / login /
@@ -1187,22 +1192,32 @@ setting added upstream appears without a Cody change.
   one server can serve a local webview and a remote tablet at the same time and
   each resolves correctly from the same candidate list.
 - **Capability tokens** (`capability.ts`): engine-side MCP servers post to
-  `/api/internal/display` with an HMAC session-scoped token.
+  `/api/internal/display` and `/api/internal/todo` with an HMAC session-scoped token.
   `CODY_INTERNAL_DISPLAY_SECRET`/`CODY_INTERNAL_DISPLAY_ORIGIN` are minted by
-  `bin/cody-server.js` at boot and live only in the environment — never
-  persisted.
-- **Per-engine wiring**: omp gets a Cody-owned `open_preview` host tool —
-  `lib/rpc-manager.ts` sends `set_host_tools` at session start, merges it into
-  any browser-registered tool list, and routes the `host_tool_call` to
-  `publishDisplayRequest`. Every other engine gets the bundled stdio MCP
-  server (`bin/cody-display-mcp.js`) via `lib/display/engine-tools.ts` —
-  `claudeDisplayMcpConfig` for a per-turn CLI's `--mcp-config`,
-  `displayMcpAcpServer` for an ACP session's `mcpServers`. The ACP builder
-  MINTS a capability token, so it throws when the server's internal display
-  origin/secret are absent; an adapter's `mcpServers` hook must catch that and
-  report an empty list. `scripts/engine-bringup.mjs` drives adapters with no
-  server behind them, and a throw there aborts `session/new` — no bridge is a
-  missing Preview button, a throw is a chat that will not open.
+  `bin/cody-server.js` at boot and live only in the environment, never persisted.
+- **Per-engine wiring**: omp gets Cody-owned `open_preview` and `cody_todo` host
+  tools. `lib/rpc-manager.ts` sends `set_host_tools` at session start, merges them
+  into any browser-registered tool list, and routes their `host_tool_call`s to their
+  server implementations. Every other engine gets the bundled stdio MCP server
+  (`bin/cody-display-mcp.js`) via `lib/display/engine-tools.ts`: `claudeDisplayMcpConfig`
+  for a per-turn CLI's `--mcp-config`, `displayMcpAcpServer` for an ACP session's
+  `mcpServers`. The ACP builder mints a capability token, so it throws when the server's
+  internal display origin/secret are absent; an adapter's `mcpServers` hook must catch
+  that and report an empty list. `scripts/engine-bringup.mjs` drives adapters with no
+  server behind them, and a throw there aborts `session/new`: no bridge is a missing
+  Preview button, a throw is a chat that will not open.
+- **Project To-do list is durable user intent, not an engine plan.** `.cody/todo.json`
+  sits at the resolved project root so it is visible in the project and survives session
+  or engine changes. Cody writes it atomically, preserves unknown top-level keys, and
+  keeps append-only history capped to the newest 500 entries, so users can audit or reopen
+  an agent completion. omp reaches it through the RPC `cody_todo` host tool; Claude Code
+  and Codex use the bundled MCP server with a session-scoped capability token that resolves
+  the session cwd. Hermes and any engine without a tool bridge still reach it as a plain
+  file: the panel's "Ask the agent" button drops a prompt into the composer that names
+  the path and the tool, so discoverability never depends on prompt injection Cody does
+  not do. This remains separate from an engine execution plan (`omp todo` to
+  Composer `TodoList`): the Tasks tab calls the user-owned section To-do, while the legacy
+  `.cody/tasks.json` runner is its collapsed Commands section only when that file exists.
 - **Client**: `hooks/useDisplayRequests.ts` subscribes to the SSE route;
   `AppShell` auto-opens the right panel in `preview` mode on live requests —
   the explicit, server-driven trigger alongside the client-side URL sniffing

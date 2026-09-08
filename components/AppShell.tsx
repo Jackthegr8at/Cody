@@ -59,7 +59,7 @@ const GitPanel = dynamic(() => import("./GitPanel").then((module) => module.GitP
   ssr: false,
   loading: () => <PanelLoadingFallback />,
 });
-const TasksPanel = dynamic(() => import("./TasksPanel").then((module) => module.TasksPanel), {
+const TodoPanel = dynamic(() => import("./TodoPanel"), {
   ssr: false,
   loading: () => <PanelLoadingFallback />,
 });
@@ -639,7 +639,7 @@ export function AppShell() {
   // Tab badges + workspace git identity (branch/repo root for the Info panel).
   const [gitBadgeCount, setGitBadgeCount] = useState<number | null>(null);
   const [gitMeta, setGitMeta] = useState<{ branch: string | null; repoRoot: string | null }>({ branch: null, repoRoot: null });
-  const [tasksConfigInvalid, setTasksConfigInvalid] = useState(false);
+  const [openCommandsRequest, setOpenCommandsRequest] = useState(0);
   // One-shot: the token makes each dispatch distinct, so a stale request is
   // never replayed by later cwd changes (TerminalPanel tracks consumed tokens).
   const [focusTerminalRequest, setFocusTerminalRequest] = useState<{ id: string; token: number } | null>(null);
@@ -764,9 +764,13 @@ export function AppShell() {
   const handleGitMetaChange = useCallback((meta: { branch: string | null; repoRoot: string | null } | null) => {
     setGitMeta(meta ?? { branch: null, repoRoot: null });
   }, []);
-  const handleTasksConfigStateChange = useCallback((state: "missing" | "invalid" | "loaded" | null) => {
-    setTasksConfigInvalid(state === "invalid");
-  }, []);
+  const handleOpenCommands = useCallback(() => {
+    setRightPanelMode("tasks");
+    setRightPanelOpen(true);
+    setOpenCommandsRequest((request) => request + 1);
+    // On mobile the workspace panel is full-screen; close the drawer so it shows.
+    if (isMobile) setSidebarOpen(false);
+  }, [isMobile, setRightPanelMode]);
 
   // Same @mention format as the chat input's @ autocomplete, so the agent's
   // read tool resolves it the same way (it strips the @ prefix).
@@ -2015,7 +2019,7 @@ export function AppShell() {
               },
               { id: "terminal", icon: <Terminal size={15} aria-hidden="true" />, label: t("workspace.terminal") },
               { id: "preview", icon: <AppWindow size={15} aria-hidden="true" />, label: t("workspace.preview") },
-              { id: "tasks", icon: <ListTodo size={15} aria-hidden="true" />, label: t("workspace.tasks"), badge: tasksConfigInvalid ? "!" : null },
+              { id: "tasks", icon: <ListTodo size={15} aria-hidden="true" />, label: t("workspace.tasks") },
               { id: "info", icon: <Info size={15} aria-hidden="true" />, label: t("workspace.info") },
             ];
             const selectPanelAt = (index: number) => {
@@ -2156,7 +2160,7 @@ export function AppShell() {
               sessionId={selectedSession?.id ?? null}
               request={displayRequest}
               active={rightPanelMode === "preview" && rightPanelOpen}
-              onOpenTasks={() => setRightPanelMode("tasks")}
+              onOpenCommands={handleOpenCommands}
               onCaptureToChat={handleCaptureToChat}
             />
           )}
@@ -2168,15 +2172,16 @@ export function AppShell() {
           style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "tasks" ? "flex" : "none", flexDirection: "column" }}
         >
           {mountedPanels.has("tasks") && (
-            <TasksPanel
+            <TodoPanel
               cwd={activeCwd}
               active={rightPanelMode === "tasks" && rightPanelOpen}
-              onOpenTerminal={(terminalId) => {
+              openCommandsRequest={openCommandsRequest}
+              chatInputRef={chatInputRef}
+              onOpenTerminalTask={(terminalId) => {
                 if (terminalId) setFocusTerminalRequest({ id: terminalId, token: ++focusTerminalTokenRef.current });
                 setRightPanelMode("terminal");
                 setRightPanelOpen(true);
               }}
-              onConfigStateChange={handleTasksConfigStateChange}
             />
           )}
         </div>

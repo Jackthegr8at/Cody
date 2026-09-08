@@ -1,23 +1,27 @@
 import * as path from "node:path";
-import { displayInternalEndpoint, issueDisplayCapability } from "./capability";
+import { displayInternalEndpoint, issueDisplayCapability, todoInternalEndpoint } from "./capability";
 
 export interface DisplayMcpLaunch {
   serverPath: string;
   endpoint: string;
+  todoEndpoint: string;
   capability: string;
+  engineLabel: string;
 }
 
-export function createDisplayMcpLaunch(sessionId: string): DisplayMcpLaunch {
+export function createDisplayMcpLaunch(sessionId: string, engineLabel = "Cody"): DisplayMcpLaunch {
   const packageRoot = process.env.CODY_PACKAGE_DIR || process.cwd();
   return {
     serverPath: path.join(packageRoot, "bin", "cody-display-mcp.js"),
     endpoint: displayInternalEndpoint(),
+    todoEndpoint: todoInternalEndpoint(),
     capability: issueDisplayCapability(sessionId),
+    engineLabel,
   };
 }
 
 export function claudeDisplayMcpConfig(sessionId: string): string {
-  const launch = createDisplayMcpLaunch(sessionId);
+  const launch = createDisplayMcpLaunch(sessionId, "Claude Code");
   return JSON.stringify({
     mcpServers: {
       cody_display: {
@@ -28,6 +32,8 @@ export function claudeDisplayMcpConfig(sessionId: string): string {
           CODY_DISPLAY_SESSION_ID: sessionId,
           CODY_DISPLAY_CAPABILITY: launch.capability,
           CODY_DISPLAY_ENDPOINT: launch.endpoint,
+          CODY_TODO_ENDPOINT: launch.todoEndpoint,
+          CODY_ENGINE_LABEL: launch.engineLabel,
         },
       },
     },
@@ -35,25 +41,22 @@ export function claudeDisplayMcpConfig(sessionId: string): string {
 }
 
 /**
- * The same display bridge as an ACP `McpServerStdio` descriptor, for engines
- * Cody drives over ACP rather than by building a per-turn CLI argv.
+ * The same MCP bridge as an ACP McpServerStdio descriptor, for engines Cody
+ * drives over ACP rather than by building a per-turn CLI argv.
  *
- * Environment is a LIST of `{name, value}` pairs, not an object — that is the
- * protocol's shape, and an agent handed the object form connects a server with
- * no capability token, which then fails every call.
+ * Environment is a LIST of {name, value} pairs, not an object. The protocol
+ * requires that shape; an object reaches the server with no capability token.
  *
- * No `type` field: ACP discriminates a stdio server by the ABSENCE of one, and
- * at least one adapter tests `!("type" in server)` before connecting it. A
- * well-meaning `type: "stdio"` is therefore not a no-op — it silently drops
- * the server, leaving an agent with no display tools and no error to show.
+ * No type field: ACP discriminates a stdio server by its absence. Some
+ * adapters silently drop a descriptor that carries type: "stdio".
  */
-export function displayMcpAcpServer(sessionId: string): {
+export function displayMcpAcpServer(sessionId: string, engineLabel = "Cody"): {
   name: string;
   command: string;
   args: string[];
   env: Array<{ name: string; value: string }>;
 } {
-  const launch = createDisplayMcpLaunch(sessionId);
+  const launch = createDisplayMcpLaunch(sessionId, engineLabel);
   return {
     name: "cody_display",
     command: process.execPath,
@@ -62,6 +65,8 @@ export function displayMcpAcpServer(sessionId: string): {
       { name: "CODY_DISPLAY_SESSION_ID", value: sessionId },
       { name: "CODY_DISPLAY_CAPABILITY", value: launch.capability },
       { name: "CODY_DISPLAY_ENDPOINT", value: launch.endpoint },
+      { name: "CODY_TODO_ENDPOINT", value: launch.todoEndpoint },
+      { name: "CODY_ENGINE_LABEL", value: launch.engineLabel },
     ],
   };
 }
