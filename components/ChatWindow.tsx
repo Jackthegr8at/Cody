@@ -143,9 +143,8 @@ function phaseElapsed(phase: AgentPhase, now: number): string | null {
   return elapsed >= LONG_TOOL_THRESHOLD_MS ? formatToolElapsed(elapsed) : null;
 }
 
-const CHAT_MINIMAP_WIDTH = 36;
 const CHAT_COLUMN_PADDING = 16;
-const CHAT_INPUT_RIGHT_PADDING = CHAT_COLUMN_PADDING + CHAT_MINIMAP_WIDTH;// Trigger the next history page while the sentinel is still this far below
+// Trigger the next history page while the sentinel is still this far below
 // the top edge, so a normal upward scroll seamlessly continues into the newly
 // loaded messages. Triggering only at the very top made the load invisible:
 // the restore anchored the viewport to the old content, so the user parked on
@@ -1219,7 +1218,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
 
   return (
     <div
-      className="relative flex h-full flex-col overflow-hidden"
+      className={`chat-window-shell relative flex h-full min-w-0 flex-col overflow-hidden${isEmptyNew ? "" : " chat-window-shell--with-minimap"}`}
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -1316,28 +1315,28 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
         )
       ) : (
       <>
-      <div className="relative flex flex-1 overflow-hidden">
+      <div className="chat-transcript-layout relative min-w-0 flex-1 overflow-hidden">
         <div
+          className="chat-notice-overlay"
           style={{
             position: "absolute",
             top: 12,
             left: 0,
-            right: isMobile ? 0 : CHAT_MINIMAP_WIDTH,
+            right: "var(--chat-minimap-width)",
             zIndex: 40,
             padding: `0 ${CHAT_COLUMN_PADDING}px`,
             pointerEvents: "none",
           }}
         >
-          <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
+          <div style={{ width: "100%", maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
             <NoticeShelf notices={notices} onDismiss={dismissNotice} floating align="right" />
           </div>
         </div>
-        {/* Hide the Firefox scrollbar on desktop only: ChatMinimap provides the
-            position indicator there, but on mobile there is no minimap and
-            users need the scrollbar (Chrome's overlay scrollbar still shows). */}
-        <div ref={scrollContainerRef} className={`chat-scroll-region flex-1 overflow-y-auto pt-6` + (isMobile ? "" : " [scrollbar-width:none]")} style={tuningCssVars}>
-          <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
-            <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
+        {/* Keep the native scrollbar on touch layouts for direct scrolling;
+            ChatMinimap remains visible as the compact position overview. */}
+        <div ref={scrollContainerRef} className={`chat-scroll-region chat-transcript-scroll min-w-0 flex-1 overflow-y-auto pt-6` + (isMobile ? "" : " [scrollbar-width:none]")} style={tuningCssVars}>
+          <div className="chat-transcript-gutter" style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
+            <div className="chat-column-frame" style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
               <ExtensionStatusBar statuses={extensionStatuses} />
               <ExtensionWidgets widgets={aboveEditorWidgets} />
 
@@ -1497,13 +1496,11 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
             </div>
           </div>
         </div>
-        {isMobile ? null : (
-          <ChatMinimap
-            messages={messages}
-            scrollContainer={scrollContainerRef}
-            messageRefs={messageRefs}
-          />
-        )}
+        <ChatMinimap
+          messages={messages}
+          scrollContainer={scrollContainerRef}
+          messageRefs={messageRefs}
+        />
       </div>
 
       <div
@@ -1519,7 +1516,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
         <div
           style={{
             padding: `0 ${CHAT_COLUMN_PADDING}px`,
-            paddingRight: isMobile ? CHAT_COLUMN_PADDING : CHAT_INPUT_RIGHT_PADDING,
+            paddingRight: `calc(${CHAT_COLUMN_PADDING}px + var(--chat-minimap-width))`,
           }}
         >
           <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
