@@ -643,6 +643,95 @@ test("the popover keeps the selected quota primary and collapses unrelated limit
   assert.match(html, /Claude account/);
   assert.match(html, /<button/);
 });
+
+
+test("the popover expands windows used by this session and keeps unrelated limits collapsed", () => {
+  const selected = { provider: "anthropic", modelId: "claude-fable-5" };
+  const activeModels = [
+    { provider: "anthropic", modelId: "claude-fable-5", uses: [{ kind: "main", label: "this conversation" }] },
+    {
+      provider: "openai-codex",
+      modelId: "gpt-5.6-terra",
+      uses: [
+        { kind: "subagent", label: "scout" },
+        { kind: "fallback", label: "this conversation" },
+      ],
+    },
+  ];
+  const quota = buildQuotaView(usageSnapshot({
+    accounts: [
+      usageAccount({ windows: [usageWindow({ id: "anthropic:weekly", label: "weekly", utilization: 34 })] }),
+      usageAccount({
+        provider: "openai-codex",
+        label: "Openai Codex",
+        planType: "plus",
+        windows: [usageWindow({ id: "codex:weekly", label: "weekly", utilization: 78, state: "warning" })],
+      }),
+      usageAccount({
+        provider: "google",
+        label: "Google",
+        planType: null,
+        windows: [usageWindow({ id: "google:daily", label: "daily", utilization: 91, state: "warning" })],
+      }),
+    ],
+  }), false, false, selected, activeModels);
+
+  assert.deepEqual(
+    quota.inUse.map((entry) => [entry.provider, entry.label, entry.uses.map((use) => use.kind)]),
+    [["openai-codex", "Codex · weekly", ["subagent", "fallback"]]],
+  );
+  assert.deepEqual(quota.others.map((entry) => entry.provider), ["google"]);
+
+  const html = renderToStaticMarkup(
+    React.createElement(QuotaPopover, {
+      quota,
+      provider: selected.provider,
+      modelName: "Claude Fable 5",
+      activeModels,
+      now: Date.parse("2026-08-18T12:30:00.000Z"),
+    }),
+  );
+
+  // The session-used window is a normal section, while the unrelated one is
+  // still the one collapsed details group that cannot affect the selected model.
+  assert.ok(html.includes("Also in use (1)"));
+  assert.match(html, /Codex · Weekly/);
+  assert.match(html, /Subagent scout, Fallback for this conversation/);
+  assert.equal((html.match(/<details/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /<details open/);
+  assert.ok(html.includes("Other limits (1) · Does not affect this model"));
+  assert.match(html, /Selected model, all sessions · Also in use in this session/);
+});
+
+test("the quota primary follows Smart's actual resolved model", () => {
+  const actualModel = { provider: "openai-codex", modelId: "gpt-5.6-terra" };
+  const quota = buildQuotaView(usageSnapshot({
+    accounts: [usageAccount({
+      provider: "openai-codex",
+      label: "Openai Codex",
+      planType: "plus",
+      windows: [usageWindow({ id: "codex:weekly", label: "weekly", utilization: 41 })],
+    })],
+  }), false, false, actualModel, [{
+    ...actualModel,
+    uses: [{ kind: "smart", label: "this conversation" }],
+  }]);
+
+  assert.equal(quota.known, true);
+  assert.equal(quota.provider, "openai-codex");
+  const html = renderToStaticMarkup(
+    React.createElement(QuotaPopover, {
+      quota,
+      provider: actualModel.provider,
+      modelName: "GPT 5.6 Terra",
+      now: Date.parse("2026-08-18T12:30:00.000Z"),
+    }),
+  );
+  assert.ok(html.includes("GPT 5.6 Terra Usage"));
+  assert.match(html, /Weekly/);
+  assert.doesNotMatch(html, /Smart Usage/);
+});
+
 test("the popover retains an explicitly reported zero saved-reset balance", () => {
   const quota = buildQuotaView(usageSnapshot({
     accounts: [usageAccount({
@@ -703,8 +792,6 @@ test("engine-specific composer copy names the active engine while Smart remains 
     "chatInput.toolPresetCoreWarningNoSubagents",
     "chatInput.groupEngineBuiltin",
     "agentSession.startingAgent",
-    "agentSession.fallbackAppliedDetail",
-    "agentSession.fallbackSucceededDetail",
   ];
   for (const [name, dict] of Object.entries(locales)) {
     assert.equal(dict["chatInput.smartModel"], "Smart", name + ".json must keep Smart neutral");
@@ -806,6 +893,38 @@ test("the popover states the balance, the cycle and today's spend", () => {
   assert.doesNotMatch(html, /reports no plan limits/);
 });
 
+
+
+test("the gateway balance remains visible when an active subagent uses OpenRouter", () => {
+  const selected = { provider: "anthropic", modelId: "claude-fable-5" };
+  const activeModels = [
+    { ...selected, uses: [{ kind: "main", label: "this conversation" }] },
+    {
+      provider: "openrouter",
+      modelId: "deepseek/deepseek-r1:free",
+      uses: [{ kind: "subagent", label: "scout" }],
+    },
+  ];
+  const quota = buildQuotaView(usageSnapshot({
+    accounts: [usageAccount({ windows: [usageWindow({ id: "anthropic:weekly", label: "weekly", utilization: 34 })] })],
+  }), false, false, selected, activeModels);
+  const html = renderToStaticMarkup(
+    React.createElement(QuotaPopover, {
+      quota,
+      openRouter: openRouterAccount(),
+      provider: selected.provider,
+      modelName: "Claude Fable 5",
+      activeModels,
+      now: Date.parse("2026-08-20T09:05:00.000Z"),
+    }),
+  );
+
+  assert.ok(html.includes("OpenRouter credits"));
+  assert.ok(html.includes("$8.26"));
+  assert.ok(html.includes("In use by Subagent scout"));
+  assert.ok(html.includes("Selected model, all sessions · Also in use in this session"));
+});
+
 test("the popover shows no credit section without an OpenRouter model", () => {
   // Every other provider sells a subscription and has no balance; the section
   // must not appear for one.
@@ -873,4 +992,55 @@ test("keeps Smart model selection free of engine and model suffixes", () => {
 
   assert.match(html, />Smart</);
   assert.doesNotMatch(html, /Smart[^<]*[·—]/);
+});
+test("keeps rpc model switches available at a turn boundary and marks session-scoped pickers unavailable", () => {
+  const renderStreamingPicker = (modelChangeWhileStreaming) => renderToStaticMarkup(
+    React.createElement(ChatInput, {
+      onSend() {},
+      onAbort() {},
+      onModelChange() {},
+      isStreaming: true,
+      modelChangeWhileStreaming,
+      model: { provider: "test", modelId: "test-model" },
+      modelList: [{ provider: "test", id: "test-model", modelId: "test-model", name: "Test model" }],
+    }),
+  );
+  const picker = (html) => html.match(/<button(?=[^>]*title="Change model")[^>]*>/)?.[0];
+
+  const rpcPicker = picker(renderStreamingPicker(true));
+  assert.ok(rpcPicker, "expected rpc-dialect model picker");
+  assert.doesNotMatch(rpcPicker, /\sdisabled(?:=|\s|>)/);
+
+  const sessionScopedPicker = picker(renderStreamingPicker(false));
+  assert.ok(sessionScopedPicker, "expected session-scoped model picker");
+  assert.match(sessionScopedPicker, /\sdisabled(?:=|\s|>)/);
+});
+
+test("renders pending switch, target reasoning, and attributed fallback detail", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ChatInput, {
+      onSend() {},
+      onAbort() {},
+      onModelChange() {},
+      onThinkingLevelChange() {},
+      isStreaming: true,
+      modelChangeWhileStreaming: true,
+      model: { provider: "test", modelId: "test-model" },
+      modelList: [{ provider: "test", id: "test-model", modelId: "test-model", name: "Test model" }],
+      modelSwitchPending: { provider: "test", modelId: "next-model", name: "Next model", phase: "waiting" },
+      thinkingLevel: "low",
+      thinkingLevelPending: true,
+      thinkingLevelTarget: "high",
+      autoModelSwitch: {
+        from: "Primary",
+        to: "Fallback",
+        reason: "rate limit",
+        job: { kind: "main", roleLabelKey: "agentSession.job.default" },
+      },
+    }),
+  );
+
+  assert.match(html, /data-testid="model-switch-pending"[^>]*>[\s\S]*?Switching to Next model at next step/);
+  assert.match(html, />Applying High</);
+  assert.match(html, /title="This conversation requested Primary; failed: rate limit; using Fallback."/);
 });

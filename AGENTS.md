@@ -268,6 +268,10 @@ lib/
                        the composer repaints without a round trip, and the
                        store of record on an open instance (no accounts)
   rpc-manager.ts       session registry + startRpcSession over RpcProcess
+  session-active-models.ts  every model in use in the CURRENT run (live model,
+                       Smart resolution, subagents' resolvedModel, fallback
+                       targets, this run's assistant turns) with what uses
+                       each; feeds the quota popup's "Also in use" section
   session-namer.ts     3-4 word model-written session names: a one-shot run of the
                        ACTIVE rpc-dialect engine (omp's `tiny` role only when omp
                        is that engine; null for ACP engines), plus the pure
@@ -289,6 +293,9 @@ lib/
                        engine switch (session ids, pinned models)
   stream-tuning.ts     tunable streaming pacing/motion params: defaults, clamping,
                        CSS-var diffing, localStorage store (playground: /dev/stream-tuner)
+  thinking-level-labels.ts  the one raw-reasoning-level → label-key map shared
+                       by the composer selector, its pending status, chat
+                       notices and the subagent dialog
   workspace-tasks.ts   .cody/tasks.json schema validation + grouping
   tool-presets.ts      PRESET_NONE/DEFAULT/FULL + getPresetFromTools()
   types.ts             shared TypeScript types
@@ -1474,16 +1481,54 @@ handled or safely ignored.
   Advisor indicator is ShieldCheck, never Sparkles: Sparkles is the Smart glyph,
   and an accent sparkle beside the model name read as "auto-picked".
 - **Display names and picker controls stay presentation-only.** `formatModelDisplayName()` in `lib/model-display.ts` is the shared display boundary for the composer, transcript, and usage surfaces; it may improve a catalog label but never changes the routing identifier. Fast remains beside the existing Composer model picker, and its adjacent Manage models gear opens Settings › Models. Only Smart is pinned; the ordinary named-model list has no sticky selection.
-- **Composer quota is model-scoped.** Select usage windows for the actual selected model: a reported tier explicitly scopes its bucket even when it is also marked shared; only untiered buckets apply to the account as a whole. Render the raw engine-reported plan without inferring a `$tier` convention. Saved resets are a separate single summary that keeps explicit zero visible; only meaningful positive account rows expand it. Keep unrelated provider or tier limits in collapsed details that explicitly say they cannot stop the selected model.
-- **Engine-initiated model switches wear a persistent marker**
-  (`autoModelSwitch`): `retry_fallback_applied` (error and usage-aware
+- **Composer quota is model-scoped, but the popup covers the whole session.** The RING gauges the selected/live model: select usage windows for that model; a reported tier explicitly scopes its bucket even when it is also marked shared; only untiered buckets apply to the account as a whole. Render the raw engine-reported plan without inferring a `$tier` convention. Saved resets are a separate single summary that keeps explicit zero visible; only meaningful positive account rows expand it. Under Smart routing, subagents and fallback chains other providers consume quota in the same session, so `lib/session-active-models.ts` derives every model in use this run (live model, Smart resolution, each subagent's `resolvedModel`, fallback `to`, this run's assistant turns) and the popup renders their windows EXPANDED under "Also in use", each attributed to what uses it ("Subagent scout (research)", "Fallback for this conversation"); OpenRouter credits appear the same way when only a subagent rides that gateway. Limits nothing in the session touches stay in the collapsed "Other limits" section that says they cannot stop the selected model.
+- **Engine-initiated model switches wear a persistent marker and name the
+  job** (`autoModelSwitch`): `retry_fallback_applied` (error and usage-aware
   routing both emit it) and any bare `model_changed` whose model differs
   from the last authoritative one set a warning chip beside the model
-  control — from → to, role, and the last provider error; click re-shows the
-  detail as a toast. The echo of Cody's own `set_model`
-  (`lastUserModelPickRef`, 15s window) is never dressed up as an engine
-  switch. The 10s fallback toast stays; the marker is what outlives it,
-  clearing on the next user pick or model move.
+  control; click re-shows the detail as a toast. The frame carries only
+  `{from, to, role}`, so the JOB is derived from `role`: a built-in role
+  (`default` = this conversation, `tiny` = session naming, `task`, `advisor`,
+  ...) or `subagent:<id>`, and a CHILD subagent's fallback never arrives as
+  a top-level frame at all: it comes wrapped in `subagent_event
+  {payload:{id, event}}`, attributed to that subagent by roster name, and
+  never repaints the composer's model marker (`announceFallbackApplied`,
+  `hooks/session-control-scope.ts` `fallbackAttributionFor*`). The provider
+  error is remembered PER JOB from `auto_retry_start`, because usage-aware
+  fallback fires before any request with no retry at all: such a switch says
+  "hit a usage limit or error" rather than borrowing another job's error.
+  The echo of Cody's own `set_model` (`recentUserModelPicksRef`, 15s
+  window) is never dressed up as an engine switch.
+- **Live model and reasoning switches apply at the step boundary steering
+  uses, never mid-stream.** omp's `steer` does not abort an in-flight
+  provider stream either: it is delivered after the current assistant
+  message and its tools, and `getModel`/`getReasoning` are sampled before
+  EACH provider call. `set_thinking_level` is therefore safe any time (sent
+  immediately, `thinkingLevelTarget` shown as "Applying High" until the
+  engine confirms). `set_model` is NOT: on the Codex WebSocket provider,
+  omp's model switch closes the socket and the running response ends as a
+  provider ERROR whose turn is dropped from replay. So a live pick is held
+  as `modelSwitchPending` (`phase: "waiting"`, status "Switching to X at
+  next step") while `assistantProviderCallRef` says a stream is open, and
+  dispatched at the first boundary frame (assistant `message_end`,
+  `tool_execution_start`, `turn_end`, `agent_end`); a newer pick replaces
+  the waiting one, a re-pick of the current model cancels it, and the
+  applied `model_changed` posts an inline notice "Model switched to X.
+  Applies from the next step." (`dispatchPendingModelSwitch`). ACP engines
+  keep the picker disabled while a turn runs: mid-prompt `set_model`
+  acceptance is unverified there, and `handleModelChange` refuses it
+  without `chatExtras` regardless of the UI.
+- **Running subagents cannot be switched, and Cody says so instead of
+  pretending.** omp's RPC exposes only `get_subagents`,
+  `get_subagent_messages` and `set_subagent_subscription`; `set_model` and
+  `set_thinking_level` address the root session. A child resolves its model
+  and effort once at spawn (request model > `task.agentModelOverrides` >
+  agent frontmatter, with the task role expanded from settings re-read from
+  disk per spawn), so role changes reach subagents started AFTERWARDS. The
+  transcript dialog shows each child's resolved model (with a fallback
+  marker), role and reasoning (`progress.thinkingLevel`, parsed from the
+  `:<level>` suffix omp appends to `resolvedModel` or from wrapped
+  `thinking_level_changed` events) plus that explanation, with no control.
 - **Tools preset control** (composer, Wrench icon): "full" leaves omp's
   toolset alone; "default"/Core spawns omp with `--tools read,bash,edit,write`,
   which also kills the `task`, `todo`, `github` and `web_search` builtins —

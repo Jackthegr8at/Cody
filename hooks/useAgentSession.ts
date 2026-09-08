@@ -22,6 +22,7 @@ import type { ThinkingModelMeta } from "@/lib/thinking-levels";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { engineSupports } from "@/lib/engine-capabilities";
 import { translate } from "@/lib/i18n";
+import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { createMessageUpdateCoalescer, type MessageUpdateCoalescer } from "@/lib/message-update-coalescer";
 import {
@@ -41,9 +42,18 @@ import {
   type SmartModelProvenance,
 } from "@/hooks/session-model-provenance";
 import {
+  fallbackAttributionForRole,
+  fallbackAttributionForSubagentEvent,
   isFastModeUnavailableError,
+  pendingModelSwitchApplied,
+  queueModelSwitch,
+  releaseModelSwitchAtBoundary,
   sameSessionControlScope,
   sessionControlScope,
+  resolveThinkingSelector,
+  type ModelFallbackAttribution,
+  type ModelFallbackJob,
+  type PendingModelSwitch,
   type ScopedModel,
 } from "@/hooks/session-control-scope";
 import { SESSION_PROMPT_IMAGE, SESSION_PROMPT_STEERING, sessionPromptCapabilityBits } from "@/hooks/session-prompt-capabilities";
@@ -58,6 +68,7 @@ import {
   parseSubagentActivityEvent,
   parseSubagentLifecycle,
   parseSubagentProgress,
+  parseSubagentProgressEvent,
   parseSubagentSnapshot,
   type SubagentActivityEvent,
   type SubagentInfo,
@@ -352,12 +363,6 @@ function clearPersistedSmartModel(sessionId: string | null): void {
   }
 }
 
-function normalizeThinkingLevel(level: string | undefined): ThinkingLevelOption {
-  // omp's "inherit" sentinel means "no explicit selection" — show as auto.
-  if (!level || level === "inherit") return "auto";
-  return level as ThinkingLevelOption;
-}
-
 /** Narrow the live state's model (OmpModel: id-based) to the composer's shape. */
 function toThinkingModelMeta(model: { provider?: string; id?: string; name?: string; reasoning?: boolean; thinking?: { efforts?: string[] } } | null | undefined): ThinkingModelMeta | null {
   if (!model?.provider || !model.id) return null;
@@ -407,11 +412,47 @@ export interface RunningToolInfo {
  * wear a persistent marker — the 10s toast alone is easy to miss and the
  * downgraded model outlives it. `role`/`reason` are known only for switches
  * omp attributed via its retry_fallback_applied event. */
+export type AutoModelSwitchJob = ModelFallbackJob;
+
 export interface AutoModelSwitchInfo {
   from: string;
   to: string;
   role?: string;
   reason?: string;
+  job: AutoModelSwitchJob;
+}
+
+/** Public composer state for a user model pick waiting for a safe boundary. */
+export interface ModelSwitchPending {
+  provider: string;
+  modelId: string;
+  name: string;
+  phase: "waiting" | "applying";
+}
+
+type PendingModelSwitchRequest = PendingModelSwitch & {
+  selection: "manual" | "smart";
+  pick: { provider: string; modelId: string; at: number };
+};
+
+function fallbackJobKey(job: ModelFallbackJob): string {
+  return job.kind === "subagent" ? "subagent:" + job.subagentId : "main";
+}
+
+function fallbackJobLabel(attribution: ModelFallbackAttribution): string {
+  const { job, role } = attribution;
+  return translate(job.roleLabelKey, { name: job.agent ?? job.subagentId ?? "", role });
+}
+
+function fallbackAppliedMessage(attribution: ModelFallbackAttribution, from: string, to: string, reason: string | undefined): string {
+  const job = fallbackJobLabel(attribution);
+  return reason
+    ? translate("agentSession.fallbackApplied", { job, from, to, reason })
+    : translate("agentSession.fallbackAppliedUnknownReason", { job, from, to });
+}
+
+function fallbackSucceededMessage(attribution: ModelFallbackAttribution, model: string): string {
+  return translate("agentSession.fallbackSucceeded", { job: fallbackJobLabel(attribution), model });
 }
 
 export type AgentPhase =
@@ -811,6 +852,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useEffect(() => subscribeToPreferredToolPreset(setToolPreset), []);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
   const [thinkingLevelPending, setThinkingLevelPending] = useState(false);
+  const [thinkingLevelTarget, setThinkingLevelTarget] = useState<string | null>(null);
+  // The configured selector must be remembered between engine reports; the
+  // rule and its reasons live in resolveThinkingSelector.
+  const thinkingConfiguredAutoRef = useRef(false);
+  const adoptThinkingLevel = useCallback((effective: string | undefined, configured?: string) => {
+    const next = resolveThinkingSelector(effective, configured, thinkingConfiguredAutoRef.current);
+    thinkingConfiguredAutoRef.current = next.rememberedAuto;
+    setThinkingLevel(next.display);
+  }, []);
   const [fastModeEnabled, setFastModeEnabled] = useState(false);
   const [fastModeActive, setFastModeActive] = useState<boolean | undefined>(undefined);
   const [fastModePending, setFastModePending] = useState(false);
@@ -826,9 +876,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [steeringMode, setSteeringMode] = useState<"all" | "one-at-a-time">("all");
   const [followUpMode, setFollowUpMode] = useState<"all" | "one-at-a-time">("all");
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
-  // The last provider error auto-retry reported, kept past auto_retry_end so a
-  // retry_fallback_applied toast can name the reason for the model switch.
-  const lastRetryErrorRef = useRef<string | null>(null);
+  // Retry errors are scoped to the requesting job so a child fallback never
+  // inherits a provider error from the main conversation or another child.
+  const retryErrorByJobRef = useRef(new Map<string, string>());
   /** Naming attempts already spent, per session id — the auto-name call must
    * not repeat once a session has a name (or has proved unnameable). */
   const autoNameAttemptsRef = useRef(new Map<string, number>());
@@ -844,6 +894,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [forkingEntryId, setForkingEntryId] = useState<string | null>(null);
   const [currentModelOverride, setCurrentModelOverride] = useState<{ provider: string; modelId: string } | null>(null);
   const [pendingModel, setPendingModel] = useState<{ provider: string; modelId: string } | null>(null);
+  const [modelSwitchPending, setModelSwitchPending] = useState<PendingModelSwitchRequest | null>(null);
   // The model Smart resolved — a live-session Smart pick, or the engine's own
   // resolution of a Smart new session. Smart-ness must survive the pin: while
   // the running model still IS this model, the composer keeps saying
@@ -862,9 +913,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // sync for a different session (switched away mid-spawn) can never claim it.
   const smartPinnedModelRef = useRef<SmartModelProvenance | null>(null);
     const pendingSmartSpawnRef = useRef<string | null>(null);
-  // The user's last explicit pick, so the model_changed echo of our own
-  // set_model is never dressed up as an engine-initiated switch.
-  const lastUserModelPickRef = useRef<{ provider: string; modelId: string; at: number } | null>(null);
+  // Recent explicit picks suppress bare model_changed markers for every
+  // command still in flight, not just the most recently chosen model.
+  const recentUserModelPicksRef = useRef<Array<{ provider: string; modelId: string; at: number }>>([]);
   // Previous authoritative model, for naming the "from" side of a bare
   // model_changed that arrives without any fallback attribution.
   const lastAuthoritativeModelRef = useRef<{ provider: string; modelId: string } | null>(null);
@@ -889,6 +940,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [extensionWidgets, setExtensionWidgets] = useState<ExtensionWidgetItem[]>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
   const [subagents, setSubagents] = useState<SubagentInfo[]>([]);
+  const subagentsRef = useRef<SubagentInfo[]>(subagents);
+  subagentsRef.current = subagents;
   const [subagentEvents, setSubagentEvents] = useState<Record<string, SubagentActivityEvent[]>>({});
   const [subagentTranscriptVersions, setSubagentTranscriptVersions] = useState<Record<string, number>>({});
   const [todoPhases, setTodoPhases] = useState<TodoPhase[]>([]);
@@ -922,6 +975,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // Commands can outlive a session/model switch. Their replies must never
   // repaint controls that now belong to another selection.
   const fastModeScopeRef = useRef(sessionControlScope(session?.id ?? null, null));
+  const modelSwitchScopeRef = useRef(sessionControlScope(session?.id ?? null, null));
   const thinkingLevelScopeRef = useRef(sessionControlScope(session?.id ?? null, null));
   const fastModePendingRequestRef = useRef(0);
   const fastModePendingLatchRef = useRef(false);
@@ -929,7 +983,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const fastModeActiveRef = useRef<boolean | undefined>(undefined);
   const fastModeInactiveNoticeScopeRef = useRef<string | null>(null);
   const addNoticeRef = useRef<(notice: { id?: string; message: string; type?: NoticeType }) => void>(() => {});
-  const thinkingLevelEventVersionRef = useRef(0);
+  const modelSwitchDispatchingSessionRef = useRef<string | null>(null);
+  const dispatchPendingModelSwitchRef = useRef<(() => void) | null>(null);
+  const modelSwitchPendingRef = useRef<PendingModelSwitchRequest | null>(null);
+  const writeModelSwitchPending = useCallback((next: PendingModelSwitchRequest | null) => {
+    modelSwitchPendingRef.current = next;
+    setModelSwitchPending(next);
+  }, []);
+  const settlePendingModelSwitch = useCallback((sessionId: string | null, model: ScopedModel): boolean => {
+    const pending = modelSwitchPendingRef.current;
+    if (!pending || !pendingModelSwitchApplied(pending, sessionId, model)) return false;
+    writeModelSwitchPending(null);
+    addNoticeRef.current({
+      type: "info",
+      message: translate("agentSession.modelSwitchApplied", { name: pending.name }),
+    });
+    return true;
+  }, [writeModelSwitchPending]);
     const setSmartModelProvenance = useCallback((provenance: SmartModelProvenance | null) => {
       smartPinnedModelRef.current = provenance;
       setSmartPinnedModel(provenance);
@@ -958,6 +1028,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // reporting queuedMessageCount === 0 must not wipe a queue we just wrote.
   const queueMutatedAtRef = useRef(0);
   const agentRunningRef = useRef(false);
+  // True from a provider call's start until a known safe step boundary. A
+  // model command must never interrupt this stream on engines where close()
+  // terminates the live response.
+  const assistantProviderCallRef = useRef(false);
   const bashRunningRef = useRef(false);
   const bashRecoveryIdRef = useRef(0);
   const handleAgentEventRef = useRef<((event: AgentEvent) => void) | null>(null);
@@ -1266,6 +1340,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   /** Invalidate controls whose reply belongs to a different session or model. */
   const updateSessionControlScope = useCallback((sid: string | null, model: ScopedModel, preserveFastModePending = false) => {
     const next = sessionControlScope(sid, model);
+    const previous = modelSwitchScopeRef.current;
+    modelSwitchScopeRef.current = next;
+    if (previous.sessionId !== next.sessionId) {
+      recentUserModelPicksRef.current = [];
+      retryErrorByJobRef.current.clear();
+      // Another session's configured selector is unknown until its own
+      // thinking_level_changed says so: fall back to the effective level.
+      thinkingConfiguredAutoRef.current = false;
+    }
+    const pendingModelSwitch = modelSwitchPendingRef.current;
+    if (pendingModelSwitch && pendingModelSwitch.scope.sessionId !== next.sessionId) {
+      writeModelSwitchPending(null);
+    }
     if (!sameSessionControlScope(fastModeScopeRef.current, next)) {
       fastModeScopeRef.current = next;
       fastModeActiveRef.current = undefined;
@@ -1282,9 +1369,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       thinkingLevelScopeRef.current = next;
       thinkingLevelPendingRequestRef.current += 1;
       setThinkingLevelPending(false);
+      setThinkingLevelTarget(null);
     }
     return next;
-  }, []);
+  }, [writeModelSwitchPending]);
 
 
   // Authoritative resolved-model sync (model_changed / config_update events,
@@ -1303,6 +1391,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!model) return true;
       lastAuthoritativeModelRef.current = { provider: model.provider, modelId: model.modelId };
       const resolvedModel = { provider: model.provider, modelId: model.modelId };
+      settlePendingModelSwitch(sessionId, resolvedModel);
+      if (!assistantProviderCallRef.current) dispatchPendingModelSwitchRef.current?.();
       // A Smart new session's first resolved model is explicit Smart provenance,
       // even when ensure_session sent the configured default as a concrete model.
       if (sessionId && pendingSmartSpawnRef.current === sessionId) {
@@ -1316,7 +1406,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         prev && (prev.provider !== model.provider || prev.modelId !== model.modelId) ? null : prev
       );
       return true;
-    }, [setSmartModelProvenance, updateSessionControlScope]);
+    }, [setSmartModelProvenance, settlePendingModelSwitch, updateSessionControlScope]);
 
   // Lightweight live-state sync after composer commands. A command against an
   // idle-disposed session restarts omp, which re-resolves the model from the
@@ -1409,7 +1499,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const applied = applyAuthoritativeModel(toThinkingModelMeta(agentState.state?.model), token);
       if (!applied) return false; // stale snapshot — drop its derived state too
       if (agentState.state?.thinkingLevel !== undefined) {
-        setThinkingLevel(normalizeThinkingLevel(agentState.state.thinkingLevel));
+        adoptThinkingLevel(agentState.state.thinkingLevel);
       }
       adoptFastModeState(agentState.state, sid);
       if (agentState.state?.autoRetryEnabled !== undefined) setAutoRetryEnabled(agentState.state.autoRetryEnabled);
@@ -1422,7 +1512,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Best effort; the next loadSession/reconcile re-syncs.
       return false;
     }
-  }, [adoptFastModeState, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities]);
+  }, [adoptFastModeState, adoptThinkingLevel, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities]);
 
   /**
    * Adopt a `get_state.pendingPermissions` snapshot.
@@ -1532,7 +1622,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (liveState) {
           if (liveState.contextUsage !== undefined) setLiveContextUsage(readLiveContextUsage(liveState.contextUsage));
           if (liveState.systemPrompt !== undefined) setSystemPrompt(liveState.systemPrompt || null);
-          if (modelApplied && liveState.thinkingLevel !== undefined) setThinkingLevel(normalizeThinkingLevel(liveState.thinkingLevel));
+          if (modelApplied && liveState.thinkingLevel !== undefined) adoptThinkingLevel(liveState.thinkingLevel);
           if (modelApplied) adoptFastModeState(liveState, sid);
           if (liveState.autoRetryEnabled !== undefined) setAutoRetryEnabled(liveState.autoRetryEnabled);
           if (liveState.interruptMode !== undefined) setInterruptMode(liveState.interruptMode);
@@ -1571,7 +1661,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, [refreshSubagentUsage, adoptFastModeState, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptPermissionRequests, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities]);
+  }, [refreshSubagentUsage, adoptFastModeState, adoptThinkingLevel, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptPermissionRequests, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
     const seq = ++contextRequestSeqRef.current;
@@ -2055,6 +2145,80 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, []);
   addNoticeRef.current = addNotice;
 
+  const dispatchPendingModelSwitch = useCallback(async (): Promise<boolean> => {
+    const pending = modelSwitchPendingRef.current;
+    if (!pending) return false;
+    const dispatchingSession = modelSwitchDispatchingSessionRef.current;
+    if (dispatchingSession !== null && dispatchingSession === pending.scope.sessionId) return true;
+    const released = releaseModelSwitchAtBoundary(pending, modelSwitchScopeRef.current, true);
+    if (!released.command) {
+      if (released.pending === null) writeModelSwitchPending(null);
+      return false;
+    }
+    const applying: PendingModelSwitchRequest = { ...pending, phase: "applying" };
+    const sid = applying.scope.sessionId;
+    if (!sid) {
+      writeModelSwitchPending(null);
+      return false;
+    }
+    modelSwitchDispatchingSessionRef.current = sid;
+    writeModelSwitchPending(applying);
+    try {
+      await sendAgentCommand(sid, { type: "set_model", provider: applying.provider, modelId: applying.modelId });
+      if (modelSwitchPendingRef.current === applying && sameSessionControlScope(modelSwitchScopeRef.current, applying.scope)) {
+        pendingSmartSpawnRef.current = null;
+        if (applying.selection === "smart") {
+          setSmartModelProvenance(resolveSmartModel({ forSession: sid }, sid, { provider: applying.provider, modelId: applying.modelId }));
+        } else {
+          clearSmartModelProvenance(sid, true);
+        }
+        setAutoModelSwitch(null);
+      }
+      void refreshLiveModelState(sid);
+      return true;
+    } catch (error) {
+      const current = modelSwitchPendingRef.current;
+      if (current === applying && sameSessionControlScope(modelSwitchScopeRef.current, applying.scope)) {
+        writeModelSwitchPending(null);
+        addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+      } else if (
+        current?.phase === "waiting"
+        && sameSessionControlScope(current.scope, sessionControlScope(sid, { provider: applying.provider, modelId: applying.modelId }))
+        && sameSessionControlScope(modelSwitchScopeRef.current, applying.scope)
+      ) {
+        // A newer pick was waiting for this rejected command's target. Rebase
+        // it to the still-authoritative model so the user's latest choice wins.
+        writeModelSwitchPending({ ...current, scope: applying.scope });
+      }
+      return false;
+    } finally {
+      if (modelSwitchDispatchingSessionRef.current === sid) modelSwitchDispatchingSessionRef.current = null;
+      const next = modelSwitchPendingRef.current;
+      if (!assistantProviderCallRef.current && next?.phase === "waiting" && sameSessionControlScope(next.scope, modelSwitchScopeRef.current)) {
+        dispatchPendingModelSwitchRef.current?.();
+      }
+    }
+  }, [addNotice, clearSmartModelProvenance, refreshLiveModelState, setSmartModelProvenance, writeModelSwitchPending]);
+  dispatchPendingModelSwitchRef.current = () => { void dispatchPendingModelSwitch(); };
+
+  const announceFallbackApplied = useCallback((attribution: ModelFallbackAttribution, from: string, to: string) => {
+    const reason = retryErrorByJobRef.current.get(fallbackJobKey(attribution.job));
+    const message = fallbackAppliedMessage(attribution, from, to, reason);
+    if (attribution.job.kind === "main" && sessionIdRef.current) {
+      setAutoModelSwitch({ from, to, role: attribution.role, reason, job: attribution.job, forSession: sessionIdRef.current });
+      setSmartPinnedModel(null);
+    }
+    toast.info(message, undefined, { durationMs: MODEL_SWITCH_TOAST_MS, clamp: true });
+    addNotice({ type: "info", message });
+  }, [addNotice]);
+
+  const announceFallbackSucceeded = useCallback((attribution: ModelFallbackAttribution, model: string) => {
+    retryErrorByJobRef.current.delete(fallbackJobKey(attribution.job));
+    const message = fallbackSucceededMessage(attribution, model);
+    toast.success(message, undefined, { durationMs: MODEL_SWITCH_TOAST_MS });
+    addNotice({ type: "success", message });
+  }, [addNotice]);
+
   // Declared after addNotice: the dependency array below is evaluated during
   // render, so addNotice must already be initialized.
   const ensureEventsConnected = useCallback(async (sid: string) => {
@@ -2170,10 +2334,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       optimisticUserMessageKeyRef.current = null;
       if (!agentRunningRef.current) return;
       agentRunningRef.current = false;
+      assistantProviderCallRef.current = false;
+      void dispatchPendingModelSwitch();
       setAgentRunning(false);
       setAgentPhase(null);
       setRetryInfo(null);
-      lastRetryErrorRef.current = null;
+      retryErrorByJobRef.current.clear();
       setSubagents([]);
       subagentRosterGenerationRef.current += 1;
       // Bound per-run activity state: without this, subagentEvents and the
@@ -2186,7 +2352,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       dispatch({ type: "end" });
       onAgentEnd?.();
     }
-  }, [loadSession, onAgentEnd, refreshSubagentUsage, resetSubagentActivityState]);
+  }, [dispatchPendingModelSwitch, loadSession, onAgentEnd, refreshSubagentUsage, resetSubagentActivityState]);
 
   // The engine restarted (container restart, crash) while this client was
   // waiting for a turn: the resumed engine is idle and no agent_end will ever
@@ -2479,6 +2645,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "agent_start":
         interruptReplyPendingRef.current = false;
         agentRunningRef.current = true;
+        assistantProviderCallRef.current = true;
+        retryErrorByJobRef.current.clear();
         // The engine acknowledged this run, so from here a `connected` frame
         // reporting an idle engine means the run was lost, not that it never
         // started. A new run also resolves any stale lost-turn banner.
@@ -2507,9 +2675,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const endedSid = sessionIdRef.current;
         const endedRunId = promptRunIdRef.current;
         agentRunningRef.current = false;
+        assistantProviderCallRef.current = false;
+        void dispatchPendingModelSwitch();
         setAgentRunning(false);
         setAgentPhase(null);
         setRetryInfo(null);
+        retryErrorByJobRef.current.clear();
         setSubagents([]);
         subagentRosterGenerationRef.current += 1;
         resetSubagentActivityState();
@@ -2617,8 +2788,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "thinking_level_changed":
-        thinkingLevelEventVersionRef.current += 1;
-        setThinkingLevel(normalizeThinkingLevel(event.thinkingLevel as string | undefined));
+        adoptThinkingLevel(event.thinkingLevel as string | undefined, event.configured as string | undefined);
         break;
       case "mode_changed": {
         // The agent moved itself (a command typed at it, an escalation after a
@@ -2654,22 +2824,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             // marker whose `to` already matches (the fallback event landed
             // first, with role + reason) is kept, not overwritten.
             const next = { provider: String(d.state.model.provider ?? ""), modelId: String(d.state.model.id ?? "") };
-            const pick = lastUserModelPickRef.current;
-            const isOwnEcho = pick !== null && Date.now() - pick.at < 15_000
-              && pick.provider === next.provider && pick.modelId === next.modelId;
+            const now = Date.now();
+            const recentPicks = recentUserModelPicksRef.current.filter((pick) => now - pick.at < 15_000);
+            recentUserModelPicksRef.current = recentPicks;
+            const isOwnEcho = recentPicks.some((pick) => pick.provider === next.provider && pick.modelId === next.modelId);
             if (!isOwnEcho && previous && (previous.provider !== next.provider || previous.modelId !== next.modelId)) {
               const from = `${previous.provider}/${previous.modelId}`;
               const to = `${next.provider}/${next.modelId}`;
               setAutoModelSwitch((current) => (
                 current && current.forSession === sid && current.to.endsWith(next.modelId)
                   ? current
-                  : { from, to, forSession: sid }
+                  : { from, to, job: fallbackAttributionForRole("default", subagentsRef.current).job, forSession: sid }
               ));
               setSmartPinnedModel((current) => (
                 current && current.provider === next.provider && current.modelId === next.modelId ? current : null
               ));
             }
-            if (d.state.thinkingLevel !== undefined) setThinkingLevel(normalizeThinkingLevel(d.state.thinkingLevel));
+            if (d.state.thinkingLevel !== undefined) adoptThinkingLevel(d.state.thinkingLevel);
             adoptFastModeState(d.state, sid);
             if (d.state.autoRetryEnabled !== undefined) setAutoRetryEnabled(d.state.autoRetryEnabled);
             if (d.state.interruptMode !== undefined) setInterruptMode(d.state.interruptMode);
@@ -2685,7 +2856,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // config-affecting slash command (e.g. /model).
         const model = event.model as { provider?: string; id?: string; name?: string; reasoning?: boolean; thinking?: { efforts?: string[] } } | undefined;
         if (model) applyAuthoritativeModel(toThinkingModelMeta(model));
-        if (event.thinkingLevel !== undefined) setThinkingLevel(normalizeThinkingLevel(event.thinkingLevel as string | undefined));
+        if (event.thinkingLevel !== undefined) adoptThinkingLevel(event.thinkingLevel as string | undefined);
         break;
       }
       case "available_commands_update": {
@@ -2703,6 +2874,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (msg?.role === "user") {
           break;
         }
+        assistantProviderCallRef.current = true;
         if (msg) {
           dispatch({ type: "update", message: normalizeToolCalls(msg as AgentMessage) });
         }
@@ -2768,10 +2940,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
         }
         dispatch({ type: "reset" });
+        if (completed?.role === "assistant") {
+          assistantProviderCallRef.current = false;
+          void dispatchPendingModelSwitch();
+        }
         setAgentPhase({ kind: "waiting_model" });
         break;
       }
       case "tool_execution_start": {
+        assistantProviderCallRef.current = false;
+        void dispatchPendingModelSwitch();
         const id = event.toolCallId as string;
         const name = event.toolName as string;
         setAgentPhase((prev) => {
@@ -2800,6 +2978,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "tool_execution_end": {
+        assistantProviderCallRef.current = true;
         const id = event.toolCallId as string;
         if (event.toolName === "todo" && sessionIdRef.current) {
           void reconcileAgentState(sessionIdRef.current);
@@ -2816,51 +2995,33 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "todo_auto_clear":
         if (sessionIdRef.current) void reconcileAgentState(sessionIdRef.current);
         break;
-      case "auto_retry_start":
-        setRetryInfo({ attempt: event.attempt as number, maxAttempts: event.maxAttempts as number, errorMessage: event.errorMessage as string | undefined });
-        // Remembered past auto_retry_end: a fallback that follows exhausted
-        // retries names this error as its reason.
-        if (typeof event.errorMessage === "string" && event.errorMessage.trim()) {
-          lastRetryErrorRef.current = event.errorMessage.trim();
+      case "auto_retry_start": {
+        const attribution = fallbackAttributionForRole(event.role, subagentsRef.current);
+        const errorMessage = typeof event.errorMessage === "string" && event.errorMessage.trim()
+          ? event.errorMessage.trim()
+          : undefined;
+        if (attribution.job.kind === "main") {
+          setRetryInfo({ attempt: event.attempt as number, maxAttempts: event.maxAttempts as number, errorMessage });
         }
+        if (errorMessage) retryErrorByJobRef.current.set(fallbackJobKey(attribution.job), errorMessage);
         break;
-      case "auto_retry_end":
-        setRetryInfo(null);
+      }
+      case "auto_retry_end": {
+        const attribution = fallbackAttributionForRole(event.role, subagentsRef.current);
+        if (attribution.job.kind === "main") setRetryInfo(null);
         break;
-      // A silent model swap is the confusing half of retry fallback: the run
-      // continues, the composer badge changes, and nothing says why. Surface
-      // omp's own fallback events so the switch always announces its reason —
-      // including the provider error that caused it — and give the toast time
-      // to actually be read (10s, dismissible).
+      }
       case "retry_fallback_applied": {
+        const attribution = fallbackAttributionForRole(event.role, subagentsRef.current);
         const from = typeof event.from === "string" ? event.from : "?";
         const to = typeof event.to === "string" ? event.to : "?";
-        const role = typeof event.role === "string" ? event.role : "default";
-        const reason = lastRetryErrorRef.current;
-        const detail = translate("agentSession.fallbackAppliedDetail", { role, name: engineNameRef.current })
-          + (reason ? `\n${translate("agentSession.fallbackReason", { reason })}` : "");
-        // The toast announces the switch once; the marker outlives it on the
-        // composer until the model moves again, so a downgraded session never
-        // reads as if the downgrade were the user's own pick.
-        if (sessionIdRef.current) {
-          setAutoModelSwitch({ from, to, role, reason: reason ?? undefined, forSession: sessionIdRef.current });
-        }
-        setSmartPinnedModel(null);
-        toast.info(
-          translate("agentSession.fallbackApplied", { from, to }),
-          detail,
-          { durationMs: MODEL_SWITCH_TOAST_MS, clamp: true },
-        );
+        announceFallbackApplied(attribution, from, to);
         break;
       }
       case "retry_fallback_succeeded": {
+        const attribution = fallbackAttributionForRole(event.role, subagentsRef.current);
         const model = typeof event.model === "string" ? event.model : "?";
-        lastRetryErrorRef.current = null;
-        toast.success(
-          translate("agentSession.fallbackSucceeded", { model }),
-          translate("agentSession.fallbackSucceededDetail", { name: engineNameRef.current }),
-          { durationMs: MODEL_SWITCH_TOAST_MS },
-        );
+        announceFallbackSucceeded(attribution, model);
         break;
       }
       // Turn boundaries are where todo items flip (the model checks phases
@@ -2869,6 +3030,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 15s reconcile poll, so items check off as they complete instead of
       // arriving in poll-sized batches.
       case "turn_end":
+        assistantProviderCallRef.current = false;
+        void dispatchPendingModelSwitch();
         if (sessionIdRef.current) {
           void reconcileAgentState(sessionIdRef.current);
           maybeAutoNameSession(sessionIdRef.current);
@@ -2941,6 +3104,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const payload = event.payload as { index?: unknown; agent?: unknown; agentSource?: unknown; task?: unknown; parentToolCallId?: unknown; sessionFile?: unknown; assignment?: unknown; detached?: unknown; progress?: unknown } | undefined;
         const progress = parseSubagentProgress(payload?.progress);
         const progressId = progress?.id;
+        if (progressId && progress?.retryState?.errorMessage) {
+          retryErrorByJobRef.current.set("subagent:" + progressId, progress.retryState.errorMessage);
+        }
         const index = typeof payload?.index === "number" ? payload.index : (progress?.index ?? -1);
         const parentToolCallId = typeof payload?.parentToolCallId === "string" ? payload.parentToolCallId : null;
         const task = typeof payload?.task === "string" && payload.task.trim() ? payload.task : (progress?.task ?? null);
@@ -3000,6 +3166,41 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // keep a bounded live-activity buffer for the transcript dialog.
         const payload = event.payload as { id?: unknown; event?: unknown } | undefined;
         const subagentId = typeof payload?.id === "string" ? payload.id : null;
+        const childEvent = isRecord(payload?.event) ? payload.event : null;
+        const childType = typeof childEvent?.type === "string" ? childEvent.type : null;
+        const attribution = fallbackAttributionForSubagentEvent(payload, subagentsRef.current);
+        if (attribution && childType === "auto_retry_start") {
+          const errorMessage = typeof childEvent?.errorMessage === "string" && childEvent.errorMessage.trim()
+            ? childEvent.errorMessage.trim()
+            : undefined;
+          if (errorMessage) retryErrorByJobRef.current.set(fallbackJobKey(attribution.job), errorMessage);
+        } else if (attribution && childType === "retry_fallback_applied") {
+          announceFallbackApplied(
+            attribution,
+            typeof childEvent?.from === "string" ? childEvent.from : "?",
+            typeof childEvent?.to === "string" ? childEvent.to : "?",
+          );
+        } else if (attribution && childType === "retry_fallback_succeeded") {
+          announceFallbackSucceeded(attribution, typeof childEvent?.model === "string" ? childEvent.model : "?");
+        }
+        const progressPatch = parseSubagentProgressEvent(payload);
+        if (subagentId && progressPatch) {
+          setSubagents((prev) => {
+            const target = prev.findIndex((subagent) => subagent.id === subagentId);
+            if (target === -1) return prev;
+            const current = prev[target];
+            const nextEntry: SubagentInfo = {
+              ...current,
+              progress: { ...current.progress, ...progressPatch },
+              lastUpdate: Date.now(),
+              source: "live",
+            };
+            const next = [...prev];
+            next[target] = nextEntry;
+            subagentsRef.current = next;
+            return next;
+          });
+        }
         if (subagentId) {
           const pending = subagentVersionFlushRef.current ?? (subagentVersionFlushRef.current = new Set());
           pending.add(subagentId);
@@ -3039,7 +3240,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, consumeQueuedMessage, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, resetSubagentActivityState, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptFastModeState, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities]);
+  }, [addNotice, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, beginAuthoritativeModelSync, consumeQueuedMessage, dispatchPendingModelSwitch, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, resetSubagentActivityState]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {
@@ -3078,6 +3279,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
     promptRunIdRef.current = promptRunId;
     agentRunningRef.current = true;
+    assistantProviderCallRef.current = true;
     // Optimistic: the stream is opened and the prompt posted below, so the
     // server has not acknowledged this run yet (see runConfirmedRef).
     runConfirmedRef.current = false;
@@ -3166,6 +3368,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (message) opts.chatInputRef?.current?.insertIfEmpty(message);
       optimisticUserMessageKeyRef.current = null;
       agentRunningRef.current = false;
+      assistantProviderCallRef.current = false;
       setAgentRunning(false);
       setAgentPhase(null);
       dispatch({ type: "end" });
@@ -3320,8 +3523,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [loadContext]);
 
   const handleModelChange = useCallback(async (provider: string, modelId: string, selection: "manual" | "smart" = "manual"): Promise<boolean> => {
-    const pick = { provider, modelId, at: Date.now() };
-    lastUserModelPickRef.current = pick;
     if (isNew) {
       setNewSessionModel({ provider, modelId });
       setPendingModel({ provider, modelId });
@@ -3329,25 +3530,55 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
     if (!sid) return isNew;
-    try {
-      await sendAgentCommand(sid, { type: "set_model", provider, modelId });
-      if (sessionIdRef.current !== sid || lastUserModelPickRef.current !== pick) return false;
-      pendingSmartSpawnRef.current = null;
-      if (selection === "smart") {
-        setSmartModelProvenance(resolveSmartModel({ forSession: sid }, sid, { provider, modelId }));
-      } else {
-        clearSmartModelProvenance(sid, true);
-      }
+    if (sessionIdRef.current !== sid) return false;
+    // ACP transports do not yet guarantee that set_model is safe while a
+    // prompt is live. The picker is disabled there, and this guards races.
+    if (agentRunningRef.current && !(await engineSupports("chatExtras"))) return false;
+    if (sessionIdRef.current !== sid) return false;
+
+    const scope = modelSwitchScopeRef.current.sessionId === sid
+      ? modelSwitchScopeRef.current
+      : updateSessionControlScope(
+        sid,
+        isNew
+          ? { provider, modelId }
+          : (liveModelMeta ? { provider: liveModelMeta.provider, modelId: liveModelMeta.modelId } : null),
+      );
+    const applying = modelSwitchPendingRef.current?.phase === "applying"
+      && modelSwitchPendingRef.current.scope.sessionId === sid
+      ? modelSwitchPendingRef.current
+      : null;
+    if (applying && applying.provider === provider && applying.modelId === modelId) return true;
+    // Re-selecting the current model cancels a waiting request. If a previous
+    // command is already applying, it instead queues a reversal after that
+    // command's acknowledgement so the latest user choice still wins.
+    if (!isNew && !applying && scope.provider === provider && scope.modelId === modelId) {
+      writeModelSwitchPending(null);
       setAutoModelSwitch(null);
-      updateSessionControlScope(sid, { provider, modelId });
-      if (!isNew) setCurrentModelOverride({ provider, modelId });
-      void refreshLiveModelState(sid);
       return true;
-    } catch (error) {
-      addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
-      return false;
     }
-  }, [addNotice, clearSmartModelProvenance, isNew, setNewSessionModel, setSmartModelProvenance, refreshLiveModelState, updateSessionControlScope]);
+
+    const name = (modelCatalogSource === "session"
+      ? sessionModels.list.find((entry) => entry.provider === provider && entry.id === modelId)?.name
+      : modelNames[provider + ":" + modelId]) ?? modelId;
+    const now = Date.now();
+    const pick = { provider, modelId, at: now };
+    recentUserModelPicksRef.current = [
+      ...recentUserModelPicksRef.current.filter((recent) => now - recent.at < 15_000),
+      pick,
+    ].slice(-4);
+    const requestScope = applying
+      ? sessionControlScope(sid, { provider: applying.provider, modelId: applying.modelId })
+      : scope;
+    const pending: PendingModelSwitchRequest = {
+      ...queueModelSwitch(requestScope, { provider, modelId, name }),
+      selection,
+      pick,
+    };
+    writeModelSwitchPending(pending);
+    if (agentRunningRef.current && assistantProviderCallRef.current) return true;
+    return dispatchPendingModelSwitch();
+  }, [dispatchPendingModelSwitch, isNew, liveModelMeta, modelCatalogSource, modelNames, sessionModels.list, setNewSessionModel, updateSessionControlScope, writeModelSwitchPending]);
 
   // An unspawned session delegates the default choice to the engine's role plan.
   const selectSmartModel = useCallback(() => {
@@ -3783,26 +4014,31 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sid) return;
     const scope = thinkingLevelScopeRef.current;
     const request = thinkingLevelPendingRequestRef.current + 1;
-    const eventVersion = thinkingLevelEventVersionRef.current;
     thinkingLevelPendingRequestRef.current = request;
     setThinkingLevelPending(true);
+    setThinkingLevelTarget(level);
     // The accepted level must win over any snapshot captured before this request.
     beginAuthoritativeModelSync();
+    // An explicit level's thinking_level_changed echo carries no `configured`
+    // field, so the selector the user asked for is recorded up front and put
+    // back if the engine refuses.
+    const previousConfiguredAuto = thinkingConfiguredAutoRef.current;
+    thinkingConfiguredAutoRef.current = level === "auto";
     try {
       await sendAgentCommand(sid, { type: "set_thinking_level", level });
       if (thinkingLevelPendingRequestRef.current !== request || !sameSessionControlScope(thinkingLevelScopeRef.current, scope)) return;
-      const refreshed = await refreshLiveModelState(sid);
+      await refreshLiveModelState(sid);
       if (thinkingLevelPendingRequestRef.current !== request || !sameSessionControlScope(thinkingLevelScopeRef.current, scope)) return;
-      if (refreshed || thinkingLevelEventVersionRef.current !== eventVersion) {
-        addNotice({ type: "info", message: translate("agentSession.thinkingLevelAppliesNextRequest") });
-      }
+      addNotice({ type: "info", message: translate("agentSession.thinkingLevelApplied", { level: thinkingLevelLabel(level, translate) }) });
     } catch (error) {
       if (thinkingLevelPendingRequestRef.current !== request || !sameSessionControlScope(thinkingLevelScopeRef.current, scope)) return;
+      thinkingConfiguredAutoRef.current = previousConfiguredAuto;
       console.error("Failed to set thinking level:", error);
       addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
     } finally {
       if (thinkingLevelPendingRequestRef.current === request && sameSessionControlScope(thinkingLevelScopeRef.current, scope)) {
         setThinkingLevelPending(false);
+        setThinkingLevelTarget(null);
       }
     }
   }, [addNotice, beginAuthoritativeModelSync, refreshLiveModelState]);
@@ -3873,6 +4109,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (agentState?.running) {
           if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
             agentRunningRef.current = true;
+            assistantProviderCallRef.current = agentState.state.isStreaming === true;
             // The server itself reported this run in flight, so it counts as
             // acknowledged: if the engine dies later, the reconnect's
             // `connected` frame is allowed to declare the turn lost.
@@ -4162,8 +4399,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   return {
     // State
     data, loading, error, activeLeafId, messages, entryIds, streamState,
-    agentRunning, modelNames: effectiveModelNames, modelList: effectiveModelList, modelSelectable, modelsLoading, modelError, modelThinkingLevels, newSessionModel, toolPreset, thinkingLevel, thinkingLevelPending, fastModeEnabled, fastModeActive, fastModePending, fastModeUnavailable, promptCapabilities, steeringSupported, autoRetryEnabled, interruptMode, autoCompactionEnabled, steeringMode, followUpMode,
+    agentRunning, modelNames: effectiveModelNames, modelList: effectiveModelList, modelSelectable, modelsLoading, modelError, modelThinkingLevels, newSessionModel, toolPreset, thinkingLevel, thinkingLevelPending, thinkingLevelTarget, fastModeEnabled, fastModeActive, fastModePending, fastModeUnavailable, promptCapabilities, steeringSupported, autoRetryEnabled, interruptMode, autoCompactionEnabled, steeringMode, followUpMode,
     liveModelMeta,
+    // Keep provenance session-scoped at the public boundary too: consumers
+    // must never infer this conversation's routing from a prior session's pin.
+    smartPinnedModel: smartModelForSession(smartPinnedModel, session?.id ?? sessionIdRef.current),
+    modelSwitchPending: modelSwitchPending && modelSwitchPending.scope.sessionId === (session?.id ?? sessionIdRef.current)
+      ? { provider: modelSwitchPending.provider, modelId: modelSwitchPending.modelId, name: modelSwitchPending.name, phase: modelSwitchPending.phase }
+      : null,
     // Mode list and current mode, only while they belong to THIS session.
     availableModes: sessionModes.forSession === (session?.id ?? sessionIdRef.current) ? sessionModes.options : NO_MODES,
     currentModeId: sessionModes.forSession === (session?.id ?? sessionIdRef.current) ? sessionModes.current : null,
@@ -4183,7 +4426,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         && displayModelProvider === smartPinnedModel.provider
         && displayModelId === smartPinnedModel.modelId),
     autoModelSwitch: autoModelSwitch && autoModelSwitch.forSession === (session?.id ?? sessionIdRef.current)
-      ? { from: autoModelSwitch.from, to: autoModelSwitch.to, role: autoModelSwitch.role, reason: autoModelSwitch.reason }
+      ? { from: autoModelSwitch.from, to: autoModelSwitch.to, role: autoModelSwitch.role, reason: autoModelSwitch.reason, job: autoModelSwitch.job }
       : null,
     agentPhase,
     // Event-stream health: `streamDegraded` replaces the "Waiting for model…"

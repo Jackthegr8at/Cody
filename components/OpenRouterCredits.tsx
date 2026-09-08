@@ -50,7 +50,14 @@ function formatCredits(value: number, locale: string): string {
   }).format(value);
 }
 
-export function OpenRouterCredits({ account }: { account: UseOpenRouterAccountResult }) {
+export function OpenRouterCredits({
+  account,
+  usageLabel,
+}: {
+  account: UseOpenRouterAccountResult;
+  /** Present when OpenRouter is spending through a non-selected session model. */
+  usageLabel?: string;
+}) {
   const { t, locale } = useI18n();
   const { snapshot, loading, refreshNow } = account;
   const [checking, setChecking] = useState(false);
@@ -125,8 +132,15 @@ export function OpenRouterCredits({ account }: { account: UseOpenRouterAccountRe
 
   return (
     <Section>
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
-        <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text)" }}>{t("openrouter.creditsTitle")}</div>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text)" }}>{t("openrouter.creditsTitle")}</div>
+          {usageLabel && (
+            <div style={{ marginTop: 2, fontSize: 10, lineHeight: 1.35, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {usageLabel}
+            </div>
+          )}
+        </div>
         <div style={{ flexShrink: 0, fontSize: 13, fontWeight: 700, color: tone, fontVariantNumeric: "tabular-nums" }}>
           {formatCredits(credits.remaining, locale)}
         </div>

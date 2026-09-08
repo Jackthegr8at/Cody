@@ -48,11 +48,13 @@ import { brandAccountLabel } from "@/lib/provider-brand";
 import { ModelIcon, ProviderIcon } from "./ProviderIcon";
 import { useI18n } from "@/lib/i18n";
 import { selectableThinkingLevels } from "@/lib/thinking-levels";
+import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { STORAGE_EVENTS } from "@/lib/storage-keys";
 import { migrateComposerAllowlist, mirrorServerVisibility, modelVisibilityKey, pushRecentModel, readComposerVisibility, type ComposerVisibility } from "@/lib/composer-model-visibility";
 import { useSettingsRoute } from "@/hooks/useSettingsData";
 import { useSettingsOpener } from "./settings/shell-context";
 import { formatModelDisplayName } from "@/lib/model-display";
+import type { SessionActiveModel } from "@/lib/session-active-models";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix (already compressed if it needed to be)
@@ -74,6 +76,8 @@ interface ModelOption {
 
 /** Stable empty list, so a composer without modes never re-renders for a fresh `[]`. */
 const NO_MODES: SessionModeOption[] = [];
+/** Stable empty list keeps quota derivation memo-friendly when no session is live. */
+const NO_ACTIVE_MODELS: readonly SessionActiveModel[] = [];
 
 interface Props {
   onSend: (message: string, images?: AttachedImage[]) => void;
@@ -96,6 +100,8 @@ interface Props {
    * was running, and to scope per-engine browser storage. */
   engine?: ActiveEngineInfo | null;
   model?: { provider: string; modelId: string } | null;
+  /** Every concrete model with work attributable to this session. */
+  activeModels?: readonly SessionActiveModel[];
   isAutoModelSelection?: boolean;
   modelNames?: Record<string, string>;
   modelList?: { id: string; name: string; provider: string; supportsFastMode?: boolean }[];
@@ -112,7 +118,17 @@ interface Props {
   /** The engine's last unprompted model switch for this session (retry
    * fallback, usage-aware routing). Renders a persistent marker beside the
    * model control naming what moved and why — the switch outlives its toast. */
-  autoModelSwitch?: { from: string; to: string; role?: string; reason?: string } | null;
+  autoModelSwitch?: {
+    from: string;
+    to: string;
+    role?: string;
+    reason?: string;
+    job?: { kind: "main" | "subagent"; subagentId?: string; agent?: string; roleLabelKey: string };
+  } | null;
+  /** RPC-dialect engines can queue a safe model switch while a turn is running. */
+  modelChangeWhileStreaming?: boolean;
+  /** A live model switch queued for the next safe provider-call boundary. */
+  modelSwitchPending?: { provider: string; modelId: string; name: string; phase: "waiting" | "applying" } | null;
   fastModeEnabled?: boolean;
   fastModeActive?: boolean;
   fastModeCapable?: boolean;
@@ -129,6 +145,8 @@ interface Props {
   onThinkingLevelChange?: (level: string) => void;
   /** A reasoning-level command is awaiting engine acknowledgement. */
   thinkingLevelPending?: boolean;
+  /** The requested reasoning level while an acknowledgement is pending. */
+  thinkingLevelTarget?: string | null;
   /** The engine's own session modes (ACP `session/new` → `modes`): its
    * permission posture — Manual / Accept edits / Plan / Auto on Claude,
    * Default / Accept Edits / Don't Ask on Hermes. Empty for an engine without
@@ -217,6 +235,12 @@ export interface QuotaWindowView {
   resetsAt: string | null;
 }
 
+/** A non-selected window that constrains work still active in this session. */
+export interface QuotaInUseWindowView extends QuotaWindowView {
+  provider: string;
+  uses: SessionActiveModel["uses"];
+}
+
 /** One quota window the ring is deliberately NOT gauging — another provider's
  *  subscription, or another model tier on this one. Reported so a spent window
  *  is never a surprise, but kept out of everything that colours the ring. */
@@ -244,6 +268,8 @@ export interface QuotaKnownView {
   label: string;
   resetsAt: string | null;
   windows: QuotaWindowView[];
+  /** Non-selected models with work in this session, always expanded. */
+  inUse: QuotaInUseWindowView[];
   /** Everything the section above does not cover, de-emphasised. */
   others: QuotaOtherWindowView[];
   fetchedAt: string | null;
@@ -266,6 +292,7 @@ export interface QuotaAbsentView {
   /** Engine-supplied prose explaining the gap, when it gave one. */
   reason: string | null;
   others: QuotaOtherWindowView[];
+  inUse: QuotaInUseWindowView[];
 }
 
 /** What the ring and the popover's quota half should say. A missing signal is
@@ -282,6 +309,7 @@ const QUOTA_UNREPORTED: QuotaAbsentView = {
   noteKey: "usage.notReportedNote",
   scopeKey: "usage.noQuotaSignal",
   reason: null,
+  inUse: [],
   others: [],
 };
 
@@ -294,6 +322,7 @@ const QUOTA_MODEL_UNMETERED: QuotaAbsentView = {
   noteKey: "usage.modelUnmeteredNote",
   scopeKey: "usage.modelUnmeteredScope",
   reason: null,
+  inUse: [],
   others: [],
 };
 
@@ -309,6 +338,7 @@ const QUOTA_MODEL_PREPAID: QuotaAbsentView = {
   noteKey: null,
   scopeKey: "usage.prepaidScope",
   reason: null,
+  inUse: [],
   others: [],
 };
 
@@ -332,6 +362,7 @@ const QUOTA_MODEL_UNCONSTRAINED: QuotaAbsentView = {
   noteKey: "usage.modelUnconstrainedNote",
   scopeKey: "usage.modelUnconstrainedScope",
   reason: null,
+  inUse: [],
   others: [],
 };
 
@@ -345,6 +376,7 @@ const QUOTA_UNAVAILABLE: QuotaAbsentView = {
   noteKey: "usage.unavailableNote",
   scopeKey: "usage.unavailableScope",
   reason: null,
+  inUse: [],
   others: [],
 };
 
@@ -356,6 +388,7 @@ const QUOTA_CHECKING: QuotaAbsentView = {
   noteKey: null,
   scopeKey: "usage.checkingScope",
   reason: null,
+  inUse: [],
   others: [],
 };
 
@@ -376,33 +409,108 @@ function clampQuotaPercent(value: number): number {
  *  merely-full one, exactly as lib/usage/select ranks the binding one. */
 const OTHER_STATE_RANK: Record<UsageWindowState, number> = { exhausted: 2, warning: 1, ok: 0 };
 
+function accountWindowKey(accountIndex: number, account: UsageAccount, window: Pick<UsageWindow, "id">): string {
+  return accountIndex + ":" + account.provider + ":" + window.id;
+}
+
+function isSelectedModel(active: SessionActiveModel, selected: ModelRef): boolean {
+  return active.provider.trim().toLocaleLowerCase() === selected.provider.trim().toLocaleLowerCase()
+    && active.modelId.trim() === selected.modelId.trim();
+}
+
+function mergeModelUses(target: SessionActiveModel["uses"], incoming: SessionActiveModel["uses"]): void {
+  for (const use of incoming) {
+    if (!target.some((candidate) => candidate.kind === use.kind && candidate.label === use.label)) {
+      target.push({ kind: use.kind, label: use.label });
+    }
+  }
+}
+
 /**
- * Everything the primary section does not cover, one row per account.
- *
- * Scoping the ring to one model drops two things out of view: the other
- * providers' subscriptions, and this provider's windows that belong to another
- * model tier. Neither may colour the ring — they cannot stop this turn — but
- * neither may vanish either: discovering a spent week by running into it is
- * exactly the failure this whole change is fixing. So each account reports its
- * own binding window among whatever is left over.
+ * Windows for concrete non-selected models with attributable session work.
+ * A shared provider window is rendered once with every reason it is active;
+ * tiered windows remain separate, exactly like the selected model's rows.
+ */
+function buildInUseWindows(
+  accounts: UsageAccount[],
+  primary: { account: UsageAccount; windows: UsageWindow[] } | null,
+  activeModels: readonly SessionActiveModel[],
+  selectedModel: ModelRef,
+  nameWindow: (account: UsageAccount, windowLabel: string) => string,
+): QuotaInUseWindowView[] {
+  const primaryAccountIndex = primary ? accounts.indexOf(primary.account) : -1;
+  const primaryKeys = new Set(
+    primary && primaryAccountIndex >= 0
+      ? primary.windows.map((window) => accountWindowKey(primaryAccountIndex, primary.account, window))
+      : [],
+  );
+  const rows = new Map<string, QuotaInUseWindowView>();
+
+  for (const active of activeModels) {
+    if (isSelectedModel(active, selectedModel) || active.uses.length === 0) continue;
+    const match = selectWindowsForModel(accounts, active);
+    if (!match) continue;
+    const accountIndex = accounts.indexOf(match.account);
+    if (accountIndex < 0) continue;
+
+    for (const quotaWindow of match.windows) {
+      const key = accountWindowKey(accountIndex, match.account, quotaWindow);
+      if (primaryKeys.has(key)) continue;
+      const existing = rows.get(key);
+      if (existing) {
+        mergeModelUses(existing.uses, active.uses);
+        continue;
+      }
+      const percent = clampQuotaPercent(quotaWindow.utilization);
+      rows.set(key, {
+        key,
+        provider: match.account.provider,
+        label: nameWindow(match.account, quotaWindow.label),
+        percent,
+        color: usageToneColor(percent, quotaWindow.state),
+        state: quotaWindow.state,
+        exhausted: quotaWindow.state === "exhausted",
+        resetsAt: quotaWindow.resetsAt,
+        uses: active.uses.map((use) => ({ kind: use.kind, label: use.label })),
+      });
+    }
+  }
+
+  return [...rows.values()].sort((a, b) => (
+    (OTHER_STATE_RANK[b.state] ?? 0) - (OTHER_STATE_RANK[a.state] ?? 0) || b.percent - a.percent
+  ));
+}
+
+/**
+ * Everything the selected model and the active-session rows do not cover,
+ * one binding row per account. These limits remain visible, but explicitly
+ * cannot stop the selected model.
  */
 function buildOtherWindows(
   accounts: UsageAccount[],
   primary: { account: UsageAccount; windows: UsageWindow[] } | null,
+  inUseKeys: ReadonlySet<string>,
 ): QuotaOtherWindowView[] {
-  const shown = new Set((primary?.windows ?? []).map((window) => window.id));
+  const primaryAccountIndex = primary ? accounts.indexOf(primary.account) : -1;
+  const primaryKeys = new Set(
+    primary && primaryAccountIndex >= 0
+      ? primary.windows.map((window) => accountWindowKey(primaryAccountIndex, primary.account, window))
+      : [],
+  );
   const rows: QuotaOtherWindowView[] = [];
   accounts.forEach((account, index) => {
     if (!account) return;
-    const leftover = (account.windows ?? []).filter((window) => (
-      Boolean(window) && !(account === primary?.account && shown.has(window.id))
+    const leftover = (account.windows ?? []).filter((window): window is UsageWindow => (
+      Boolean(window)
+      && !primaryKeys.has(accountWindowKey(index, account, window))
+      && !inUseKeys.has(accountWindowKey(index, account, window))
     ));
     // Same comparator as the ring's own pick, so the row a user reads first is
     // the one that would stop them first on that account.
     const binding = selectBindingWindow([{ ...account, windows: leftover }]);
     if (!binding) return;
     rows.push({
-      key: `${index}:${account.provider}:${binding.window.id}`,
+      key: accountWindowKey(index, account, binding.window),
       provider: account.provider,
       account: brandAccountLabel(account.provider, account.label || account.provider),
       label: binding.window.label,
@@ -416,7 +524,6 @@ function buildOtherWindows(
     (OTHER_STATE_RANK[b.state] ?? 0) - (OTHER_STATE_RANK[a.state] ?? 0) || b.percent - a.percent
   ));
 }
-
 /** Turns the usage snapshot into the ring's states. Pure, so the thresholds and
  *  the absence cases are testable without a DOM.
  *
@@ -436,6 +543,7 @@ export function buildQuotaView(
   loading: boolean,
   failed = false,
   model?: ModelRef | null,
+  activeModels: readonly SessionActiveModel[] = NO_ACTIVE_MODELS,
 ): QuotaView {
   if (!snapshot) {
     // A first read still in flight says "checking"; once one has failed, the
@@ -458,6 +566,7 @@ export function buildQuotaView(
       noteKey: "usage.unlimitedNote",
       scopeKey: "usage.unlimited",
       reason: readableReason(snapshot.reason),
+      inUse: [],
       others: [],
     };
   }
@@ -478,7 +587,8 @@ export function buildQuotaView(
     // selects once over the snapshot instead of twice, and guarantees the ring
     // and the list below it name the same window.
     const modelBinding = match?.windows[0] ?? null;
-    const others = buildOtherWindows(accounts, modelBinding ? match : null);
+    const inUse = buildInUseWindows(accounts, match, activeModels, model, nameWindow);
+    const others = buildOtherWindows(accounts, match, new Set(inUse.map((entry) => entry.key)));
     const reason = readableReason(snapshot.reason);
 
     if (!match || !modelBinding) {
@@ -486,7 +596,7 @@ export function buildQuotaView(
       // in windows. It has to be checked BEFORE the unmetered fallback, which
       // would otherwise claim "nothing it runs counts against a quota" about
       // an account that is literally spending money per token.
-      if (isPrepaidProvider(model.provider)) return { ...QUOTA_MODEL_PREPAID, others };
+      if (isPrepaidProvider(model.provider)) return { ...QUOTA_MODEL_PREPAID, inUse, others };
       // Three different silences, and the copy has to tell them apart: no
       // account serves this provider / the account is unmetered / the account
       // reports quota that all belongs to other models.
@@ -494,8 +604,8 @@ export function buildQuotaView(
         && match.account.unlimited !== true
         && (match.account.windows ?? []).some(Boolean);
       return providerReportsQuota
-        ? { ...QUOTA_MODEL_UNCONSTRAINED, reason, others }
-        : { ...QUOTA_MODEL_UNMETERED, reason, others };
+        ? { ...QUOTA_MODEL_UNCONSTRAINED, reason, inUse, others }
+        : { ...QUOTA_MODEL_UNMETERED, reason, inUse, others };
     }
 
     const accountIndex = accounts.indexOf(match.account);
@@ -523,6 +633,7 @@ export function buildQuotaView(
         };
       }),
       others,
+      inUse,
       fetchedAt: snapshot.fetchedAt ?? null,
       stale: snapshot.stale === true,
       planType: match.account.planType,
@@ -563,6 +674,7 @@ export function buildQuotaView(
     resetsAt: binding.window.resetsAt,
     windows,
     // The account-wide list above already shows every window there is.
+    inUse: [],
     others: [],
     fetchedAt: snapshot.fetchedAt ?? null,
     stale: snapshot.stale === true,
@@ -619,6 +731,7 @@ function QuotaWindowRow({
   exhausted,
   resetsAt,
   now,
+  uses,
   muted = false,
 }: {
   icon?: React.ReactNode;
@@ -629,6 +742,8 @@ function QuotaWindowRow({
   exhausted: boolean;
   resetsAt: string | null;
   now: number;
+  /** Compact attribution for a window used by another live session model. */
+  uses?: readonly string[];
   muted?: boolean;
 }) {
   const { t, locale } = useI18n();
@@ -674,6 +789,11 @@ function QuotaWindowRow({
         </div>
       </div>
       <QuotaBar percent={percent} color={color} dimmed={muted && !exhausted} />
+      {uses && uses.length > 0 && (
+        <div style={{ fontSize: 10, lineHeight: 1.35, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {uses.join(", ")}
+        </div>
+      )}
       {reset && (
         <div style={{ fontSize: 10, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
           {t("usage.resetsAt", { time: reset })}
@@ -683,13 +803,15 @@ function QuotaWindowRow({
   );
 }
 
-/** The quota ring's popover: plan quota for the selected model and nothing
- *  else — context usage and token traffic live in the top bar. Exported so the
- *  SSR tests can render it open, which the composer's own state never is. */
+/** The quota ring's popover keeps the selected model primary while spelling
+ *  out every other model with attributable work in this session. Context usage
+ *  and token traffic live in the top bar. Exported so SSR tests can render it
+ *  open, which the composer's own state never is. */
 export function QuotaPopover({
   resetCredits,
   openRouter,
   quota,
+  activeModels = NO_ACTIVE_MODELS,
   provider,
   modelName,
   now,
@@ -697,9 +819,11 @@ export function QuotaPopover({
   anchorRight = null,
 }: {
   resetCredits?: ReturnType<typeof useResetCredits>;
-  /** OpenRouter's prepaid balance, passed only when an OpenRouter model is
-   * selected. Absent for every other provider — a subscription has no
-   * balance, and the section must not appear for one. */
+  /** Concrete models with work attributable to this session. */
+  activeModels?: readonly SessionActiveModel[];
+  /** OpenRouter's prepaid balance when it is selected or actively used by this
+   * session. Absent otherwise: subscription providers have no credit balance
+   * and must not grow a gateway section. */
   openRouter?: UseOpenRouterAccountResult;
   quota: QuotaView;
   /** Selected model's provider, naming the header before anything binds. */
@@ -710,6 +834,20 @@ export function QuotaPopover({
   anchorRight?: number | null;
 }) {
   const { t, locale } = useI18n();
+  const formatUse = (use: SessionActiveModel["uses"][number]): string => {
+    if (use.kind === "main") return t("usage.useMain", { label: use.label });
+    if (use.kind === "smart") return t("usage.useSmart", { label: use.label });
+    if (use.kind === "subagent") return t("usage.useSubagent", { label: use.label });
+    return t("usage.useFallback", { label: use.label });
+  };
+  const openRouterUses: SessionActiveModel["uses"] = [];
+  for (const active of activeModels) {
+    if (isPrepaidProvider(active.provider)) mergeModelUses(openRouterUses, active.uses);
+  }
+  const openRouterSessionLabel = !isPrepaidProvider(provider) && openRouterUses.length > 0
+    ? t("usage.openRouterInUse", { uses: openRouterUses.map(formatUse).join(", ") })
+    : null;
+  const hasSessionUsage = quota.inUse.length > 0 || openRouterSessionLabel !== null;
   const [resetSelection, setResetSelection] = useState<{ accountId: string; creditId: string; account: string } | null>(null);
   const resetPendingRef = useRef(false);
   const redeemSelectedReset = useCallback(async () => {
@@ -821,7 +959,7 @@ export function QuotaPopover({
             and other providers' windows: for an OpenRouter model it is THE
             number that decides whether the next turn runs, so it must not be
             below the fold of a 320px popover. */}
-        {openRouter && <OpenRouterCredits account={openRouter} />}
+        {openRouter && <OpenRouterCredits account={openRouter} usageLabel={openRouterSessionLabel ?? undefined} />}
         {resetCredits && (
           <section style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>
@@ -898,6 +1036,31 @@ export function QuotaPopover({
           </div>
         )}
 
+        {/* Non-selected models in this session remain visible without ever
+            changing the selected model's ring. This is a section, not details:
+            routing work is active context, not optional diagnostics. */}
+        {quota.inUse.length > 0 && (
+          <section style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)" }}>
+              {t("usage.alsoInUseSummary", { count: quota.inUse.length })}
+            </div>
+            <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 12 }}>
+              {quota.inUse.map((entry) => (
+                <QuotaWindowRow
+                  key={entry.key}
+                  label={entry.label}
+                  percent={entry.percent}
+                  color={entry.color}
+                  exhausted={entry.exhausted}
+                  resetsAt={entry.resetsAt}
+                  uses={entry.uses.map(formatUse)}
+                  now={now}
+                />
+              ))}
+            </div>
+          </section>
+        )}
+
         {/* Everything the model above is NOT charged against — other
             providers' subscriptions and this one's other tiers. Same row
             design as the list above, dimmed: a spent window here must stay
@@ -928,9 +1091,14 @@ export function QuotaPopover({
           </details>
         )}
 
-        {/* Footer — whose limits these are, and how fresh the reading is. */}
+        {/* Footer — the primary window is all-session; the added section is
+            explicitly scoped to this run. */}
         <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)", fontSize: 11, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
-          {[!quota.known ? t(quota.scopeKey) : modelName ? t("usage.modelScope") : t("usage.accountWide"), freshness].filter(Boolean).join(" · ")}
+          {[
+            !quota.known ? t(quota.scopeKey) : provider ? t("usage.modelScope") : t("usage.accountWide"),
+            hasSessionUsage ? t("usage.sessionInUseScope") : null,
+            freshness,
+          ].filter(Boolean).join(" · ")}
         </div>
       </div>
     </div>
@@ -962,16 +1130,6 @@ type SlashCommandPaletteItem = {
   source: SlashCommandSource;
 };
 
-const THINKING_LEVEL_LABEL_KEYS: Record<string, string> = {
-  auto: "chatInput.reasoningLevelAuto",
-  off: "chatInput.reasoningLevelOff",
-  minimal: "chatInput.reasoningLevelMinimal",
-  low: "chatInput.reasoningLevelLow",
-  medium: "chatInput.reasoningLevelMedium",
-  high: "chatInput.reasoningLevelHigh",
-  xhigh: "chatInput.reasoningLevelXhigh",
-  max: "chatInput.reasoningLevelMax",
-};
 
 function isDormantSkillCommand(command: SlashCommandPaletteItem, dormantNames: Set<string>): boolean {
   return command.source === "skill" && dormantNames.has(command.name);
@@ -1221,9 +1379,9 @@ function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; plan?: A
 }
 
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, canAttachWhileStreaming = false, canAttachImagesWhileStreaming = false, capabilities = ALL_CAPABILITIES, engine = null, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, autoModelSwitch, fastModeEnabled, fastModeActive, fastModeCapable, fastModeSupported, fastModePending, fastModeUnavailable, onFastModeChange,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, canAttachWhileStreaming = false, canAttachImagesWhileStreaming = false, capabilities = ALL_CAPABILITIES, engine = null, model, activeModels = NO_ACTIVE_MODELS, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, autoModelSwitch, modelSwitchPending, modelChangeWhileStreaming = false, fastModeEnabled, fastModeActive, fastModeCapable, fastModeSupported, fastModePending, fastModeUnavailable, onFastModeChange,
   onAbortCompaction, isCompacting, compactResult,
-  thinkingLevel, onThinkingLevelChange, thinkingLevelPending, availableModes = NO_MODES, currentModeId = null, onModeChange, availableThinkingLevels, modelNameOverride,
+  thinkingLevel, onThinkingLevelChange, thinkingLevelPending, thinkingLevelTarget, availableModes = NO_MODES, currentModeId = null, onModeChange, availableThinkingLevels, modelNameOverride,
   retryInfo, queuedMessages, inputHistory = [], onAbortRetry,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
@@ -2419,7 +2577,26 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   // A failed load surfaces modelError; only an in-flight load shows the
   // loading chip, so "no models" can only appear after the fetch settled.
   const showModelsLoading = Boolean(modelsLoading) && !modelError;
-  const modelSelectorDisabled = isStreaming || (showModelsLoading && modelOptions.length === 0);
+  const modelSelectorDisabled = (isStreaming && !modelChangeWhileStreaming) || (showModelsLoading && modelOptions.length === 0);
+  const modelSwitchStatus = modelSwitchPending
+    ? t(modelSwitchPending.phase === "waiting" ? "chatInput.modelSwitchWaiting" : "chatInput.modelSwitchApplying", { name: modelSwitchPending.name })
+    : null;
+  const autoSwitchJobKey = autoModelSwitch?.job?.roleLabelKey ?? "agentSession.job.default";
+  const autoSwitchJobLabel = t(autoSwitchJobKey, {
+    name: autoModelSwitch?.job?.agent ?? autoModelSwitch?.job?.subagentId ?? "",
+    role: autoModelSwitch?.role ?? "",
+  });
+  const autoSwitchJob = autoSwitchJobLabel === autoSwitchJobKey
+    ? t("agentSession.job.default")
+    : autoSwitchJobLabel;
+  const autoSwitchDetail = autoModelSwitch
+    ? t("chatInput.autoSwitchDetail", {
+        job: autoSwitchJob,
+        from: autoModelSwitch.from,
+        reason: autoModelSwitch.reason ?? t("chatInput.autoSwitchUnknownReason"),
+        to: autoModelSwitch.to,
+      })
+    : null;
 
   // Smart row on a LIVE session: there is no "auto" runtime state to fall
   // back into (the session already has a resolved model), so this reaches
@@ -2481,10 +2658,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         saved: formatTokenCount(compactSavedTokens, locale),
       })
     : null;
-  const thinkingDisplayLabel = (() => {
+  const currentThinkingDisplayLabel = (() => {
     const lvl = thinkingLevel ?? "auto";
-    return t(THINKING_LEVEL_LABEL_KEYS[lvl] ?? "chatInput.reasoningLevelAuto");
+    return thinkingLevelLabel(lvl, t);
   })();
+  const thinkingDisplayLabel = thinkingLevelPending
+    ? t("chatInput.reasoningApplyingLevel", {
+        level: thinkingLevelLabel(thinkingLevelTarget ?? thinkingLevel ?? "auto", t),
+      })
+    : currentThinkingDisplayLabel;
   // The ring gauges the binding PLAN QUOTA window OF THE SELECTED MODEL; the
   // context window has its own readout in the top bar.
   //
@@ -2499,15 +2681,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       usageLoading,
       usageFailed,
       quotaProvider && quotaModelId ? { provider: quotaProvider, modelId: quotaModelId } : null,
+      activeModels,
     ),
-    [usageSnapshot, usageLoading, usageFailed, quotaProvider, quotaModelId],
+    [usageSnapshot, usageLoading, usageFailed, quotaProvider, quotaModelId, activeModels],
   );
-  // The balance is only read when an OpenRouter model is actually selected.
-  // Gating on the same predicate `buildQuotaView` branches on keeps the two
-  // in lockstep: the popover can never say "prepaid" and then have no balance
-  // to show. An Anthropic-only user never issues one of these requests.
+  // A gateway balance matters whenever THIS session routes work through it,
+  // including an OpenRouter subagent under a non-OpenRouter selected model.
   const openRouterSelected = isPrepaidProvider(quotaProvider);
-  const openRouterAccount = useOpenRouterAccount(openRouterSelected);
+  const openRouterActive = openRouterSelected || activeModels.some((active) => isPrepaidProvider(active.provider));
+  const openRouterAccount = useOpenRouterAccount(openRouterActive);
   const quotaPercentText = quota.known ? `${Math.round(quota.percent)}%` : "—";
   // The tooltip names the window AND the model it is about, so a ring read at a
   // glance can never be attributed to the wrong conversation.
@@ -2538,8 +2720,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (!contextPopoverOpen) return;
     refreshUsage();
     refreshResetCredits();
-    if (openRouterSelected) refreshOpenRouter();
-  }, [contextPopoverOpen, refreshUsage, refreshResetCredits, openRouterSelected, refreshOpenRouter]);
+    if (openRouterActive) refreshOpenRouter();
+  }, [contextPopoverOpen, refreshUsage, refreshResetCredits, openRouterActive, refreshOpenRouter]);
   // A brand-new conversation must open with an honest ring, and the composer
   // may have been idle for a whole background poll before it. Keyed on the
   // session (draftKey), never on the model: switching models re-filters the
@@ -3290,7 +3472,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
             {/* Model selector — compact text button with dropdown */}
             {(modelOptions.length > 0 || currentName || modelError || showModelsLoading) && onModelChange && (
-              <div ref={dropdownRef} style={{ position: "relative", minWidth: 0, flex: isMobile ? "1 1 auto" : undefined }}>
+              <div ref={dropdownRef} style={{ position: "relative", minWidth: 0, flex: isMobile ? "1 1 auto" : undefined, display: "flex", alignItems: "center", gap: 5 }}>
                 <button
                   onClick={(e) => {
                     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -3318,7 +3500,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
                   }}
                   onMouseEnter={(e) => {
-                    if (isStreaming) return;
+                    if (modelSelectorDisabled) return;
                     e.currentTarget.style.background = "var(--bg-hover)";
                     e.currentTarget.style.color = "var(--text)";
                   }}
@@ -3370,6 +3552,17 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   </span>
                   <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7 }} aria-hidden="true" />
                 </button>
+                {modelSwitchStatus && (
+                  <span
+                    data-testid="model-switch-pending"
+                    role="status"
+                    title={t("chatInput.modelSwitchHint")}
+                    style={{ display: "inline-flex", alignItems: "center", gap: 4, minWidth: 0, color: "var(--text-dim)", fontSize: 11, whiteSpace: "nowrap" }}
+                  >
+                    <Loader2 size={11} strokeWidth={2} style={{ flexShrink: 0, animation: "spin 0.8s linear infinite" }} aria-hidden="true" />
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{modelSwitchStatus}</span>
+                  </span>
+                )}
                 {modelDropdownOpen && modelDropdownRect && (() => {
                   const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
                   const bottom = viewportHeight - modelDropdownRect.top + 6;
@@ -3521,15 +3714,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               <button
                 type="button"
                 onClick={() => {
-                  const detail = [
-                    t("chatInput.autoSwitchDetail", { from: autoModelSwitch.from, to: autoModelSwitch.to }),
-                    autoModelSwitch.role ? t("agentSession.fallbackAppliedDetail", { role: autoModelSwitch.role, name: engineName }) : null,
-                    autoModelSwitch.reason ? t("agentSession.fallbackReason", { reason: autoModelSwitch.reason }) : null,
-                  ].filter(Boolean).join("\n");
-                  toast.info(t("chatInput.autoSwitchChip"), detail, { durationMs: 12_000, clamp: true });
+                  if (autoSwitchDetail) toast.info(t("chatInput.autoSwitchChip"), autoSwitchDetail, { durationMs: 12_000, clamp: true });
                 }}
-                title={t("chatInput.autoSwitchTitle")}
-                aria-label={t("chatInput.autoSwitchTitle")}
+                title={autoSwitchDetail ?? t("chatInput.autoSwitchTitle")}
+                aria-label={autoSwitchDetail ?? t("chatInput.autoSwitchTitle")}
                 style={{
                   display: "inline-flex", alignItems: "center", gap: 4,
                   // Icon-only on a phone: its text is what would push the
@@ -3565,7 +3753,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                    disabled={thinkingLevelPending}
                    data-testid="thinking-level-toggle"
                    title={thinkingLevelPending ? t("chatInput.reasoningApplyingHint") : t("chatInput.reasoningChangeHint")}
-                   aria-label={[t("chatInput.changeReasoning"), thinkingDisplayLabel, thinkingLevelPending ? t("chatInput.reasoningApplying") : null].filter(Boolean).join(": ")}
+                   aria-label={[t("chatInput.changeReasoning"), thinkingDisplayLabel].filter(Boolean).join(": ")}
                   style={{
                     display: "flex", alignItems: "center", gap: 5,
                     justifyContent: isMobile ? "center" : undefined,
@@ -3618,7 +3806,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       // "auto" means "whatever the engine defaults to", so
                       // its description names the ACTIVE engine.
                       const desc = descKey ? t(descKey, { name: engineName }) : "";
-                       const displayLabel = t(THINKING_LEVEL_LABEL_KEYS[lvl] ?? "chatInput.reasoningLevelAuto");
+                      const displayLabel = thinkingLevelLabel(lvl, t);
                       return (
                         <button
                           className="dropdown-item"
@@ -3841,7 +4029,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 circle. An OpenRouter model is a reason to show it even when
                 the engine reports no windows: the popover then carries the
                 credit balance, which is the only spend signal that exists. */}
-              {(quotaReported || openRouterSelected || Boolean(resetCredits.snapshot?.available)) && (
+              {(quotaReported || openRouterActive || Boolean(resetCredits.snapshot?.available)) && (
               <div
                 ref={contextPopoverRef}
                 // marginRight doubles the visual space between the gauge and
@@ -3900,8 +4088,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 {contextPopoverOpen && (
                   <QuotaPopover
                     resetCredits={resetCredits}
-                    openRouter={openRouterSelected ? openRouterAccount : undefined}
+                    openRouter={openRouterActive ? openRouterAccount : undefined}
                     quota={quota}
+                    activeModels={activeModels}
                     provider={quotaProvider ?? null}
                     modelName={displayModelName}
                     now={usageNow}

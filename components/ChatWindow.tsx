@@ -35,6 +35,7 @@ import {
   VISIBLE_PAGE_SIZE,
 } from "@/lib/chat-lazy-load";
 import { formatModelDisplayName } from "@/lib/model-display";
+import { deriveSessionActiveModels } from "@/lib/session-active-models";
 
 interface Props {
   session: SessionInfo | null;
@@ -735,14 +736,14 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
 
   const {
     loading, error, messages, entryIds, streamState,
-    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelSelectable, modelsLoading, modelError, modelThinkingLevels, thinkingLevel, thinkingLevelPending, fastModeEnabled, fastModeActive, fastModePending, fastModeUnavailable, promptCapabilities, steeringSupported,
-    liveModelMeta, availableModes, currentModeId,
+    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelSelectable, modelsLoading, modelError, modelThinkingLevels, thinkingLevel, thinkingLevelPending, thinkingLevelTarget, fastModeEnabled, fastModeActive, fastModePending, fastModeUnavailable, promptCapabilities, steeringSupported,
+    liveModelMeta, smartPinnedModel, availableModes, currentModeId,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactResult, displayModel: displayModelValue, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
     notices, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     permissionRequests, respondToPermission,
-    isAutoModelSelection, autoModelSwitch,
+    isAutoModelSelection, autoModelSwitch, modelSwitchPending,
     agentPhase, streamDegraded, streamAlert, dismissStreamAlert, retryEventStream, activeGoal, activePlan,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
     isNew,
@@ -1021,6 +1022,20 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       : null
   ), [displayModelValue, modelThinkingLevels, liveModelMeta]);
 
+  // Session usage is wider than the selected model: live routing, child work,
+  // fallbacks, and committed turns can all consume a provider in parallel.
+  // The popover receives the derivation as data so its ring stays selected-model
+  // scoped while its secondary sections stay honest about this run.
+  const activeModels = useMemo(() => deriveSessionActiveModels({
+    sessionId: session?.id ?? null,
+    liveModelMeta,
+    smartPinnedModel,
+    subagents,
+    autoModelSwitch,
+    messages,
+    conversationLabel: t("usage.thisConversation"),
+  }), [session?.id, liveModelMeta, smartPinnedModel, subagents, autoModelSwitch, messages, t]);
+
 
   // The quota popover used to render this list itself; it now feeds the top
   // bar's session popover, which is where the rest of the session's token
@@ -1100,6 +1115,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
   // depends on the account it opened with, which is why no capability flag can
   // stand in for it.
   const canChangeModel = modelSelectable === null ? chatExtras : modelSelectable;
+  const modelChangeWhileStreaming = modelSelectable === null && chatExtras;
   const chatInputElement = (
     <ChatInput
       ref={chatInputRef}
@@ -1114,6 +1130,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       capabilities={capabilities}
       engine={engine}
       model={displayModelValue}
+      activeModels={activeModels}
       isAutoModelSelection={smartModelCapable && isAutoModelSelection}
       modelNames={modelNames}
       modelList={modelList}
@@ -1123,11 +1140,14 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       onModelChange={canChangeModel ? handleModelChange : undefined}
       onSelectSmartModel={smartModelCapable && isNew ? selectSmartModel : undefined}
       autoModelSwitch={autoModelSwitch}
+      modelSwitchPending={modelSwitchPending}
+      modelChangeWhileStreaming={modelChangeWhileStreaming}
       onAbortCompaction={handleAbortCompaction}
       isCompacting={isCompacting}
       compactResult={compactResult}
       thinkingLevel={thinkingLevel}
        thinkingLevelPending={thinkingLevelPending}
+      thinkingLevelTarget={thinkingLevelTarget}
       onThinkingLevelChange={chatExtras && (session || isNew) ? handleThinkingLevelChange : undefined}
       availableModes={availableModes}
       currentModeId={currentModeId}

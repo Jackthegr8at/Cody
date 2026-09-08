@@ -10,6 +10,7 @@ import { useI18n } from "@/lib/i18n";
 import type { SubagentInfo } from "@/hooks/useAgentSession";
 import type { TodoPhase } from "@/lib/pi-types";
 import { countNestedSubagents, formatCost, formatDuration, formatTokens, shortModel } from "@/lib/subagent-format";
+import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { TodoList } from "./TodoList";
 import { SubagentStatusIcon } from "./SubagentStatusIcon";
 
@@ -83,6 +84,9 @@ function SubagentActivityLine({ subagent }: { subagent: SubagentInfo }) {
     ? `${ctxTokens}/${formatTokens(progress?.contextWindow) ?? "?"}`
     : null;
   const model = shortModel(progress?.resolvedModel);
+  const modelAndReasoning = model
+    ? progress?.thinkingLevel ? model + " · " + thinkingLevelLabel(progress.thinkingLevel, t) : model
+    : null;
   const duration = subagent.source === "history" ? formatDuration(progress?.durationMs) : null;
   const meta: ReactNode[] = [
     source ? <SubagentMetric key="source" icon={UserRound} label={source}>{source === "user" ? null : source}</SubagentMetric> : null,
@@ -90,7 +94,7 @@ function SubagentActivityLine({ subagent }: { subagent: SubagentInfo }) {
     tokens ? <SubagentMetric key="tokens" icon={Cpu} label={t("chatWindow.tokensUnit", { count: tokens })}>{tokens}</SubagentMetric> : null,
     cost ? <SubagentMetric key="cost" icon={CircleDollarSign} label={cost}>{cost}</SubagentMetric> : null,
     context ? <SubagentMetric key="context" icon={Gauge} label={t("chatWindow.contextGauge", { used: ctxTokens ?? "?", total: formatTokens(progress?.contextWindow) ?? "?" })}>{context}</SubagentMetric> : null,
-    model ? <SubagentMetric key="model" icon={Bot} label={model}>{model}</SubagentMetric> : null,
+    modelAndReasoning ? <SubagentMetric key="model" icon={Bot} label={modelAndReasoning}>{modelAndReasoning}</SubagentMetric> : null,
     duration ? <SubagentMetric key="duration" icon={Clock3} label={duration}>{duration}</SubagentMetric> : null,
   ].filter(Boolean);
   if (meta.length > 0) {
