@@ -19,6 +19,17 @@ export interface SendAgentCommandOptions {
    */
   timeoutMs?: number;
 }
+/** Structured route failure retained for callers that need an exact engine code. */
+export class AgentCommandError extends Error {
+  readonly code?: string;
+
+  constructor(message: string, code?: string) {
+    super(message);
+    this.name = "AgentCommandError";
+    this.code = code;
+  }
+}
+
 
 export async function sendAgentCommand<T = unknown>(
   sessionId: string,
@@ -52,8 +63,9 @@ export async function sendAgentCommand<T = unknown>(
   if (!res.ok || body.error) {
     // Routes attach a stable `code` for well-known failures; these messages are
     // surfaced to the user as notices, so localize before throwing.
-    throw new Error(
-      body.error || body.code ? formatApiError(body) : `HTTP ${res.status}`,
+    throw new AgentCommandError(
+      body.error || body.code ? formatApiError(body) : "HTTP " + res.status,
+      body.code,
     );
   }
   return body.data as T;

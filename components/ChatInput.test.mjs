@@ -584,7 +584,7 @@ test("the ring gauges the shortest healthy window; an exhausted longer one still
   assert.equal(spent.color, "var(--status-error)");
 });
 
-test("the rendered popover keeps only quota content, branded and barred", () => {
+test("the popover keeps the selected quota primary and collapses unrelated limits", () => {
   const snapshot = usageSnapshot({
     accounts: [
       usageAccount({
@@ -631,31 +631,17 @@ test("the rendered popover keeps only quota content, branded and barred", () => 
     }),
   );
 
-  // Quota only: the context and token readouts belong to the top bar now.
-  assert.doesNotMatch(html, /Context usage/);
-  assert.doesNotMatch(html, /token traffic/i);
-  assert.doesNotMatch(html, /Models used/);
-  // Header: brand mark + "Usage · <model>" + the binding number (5h, 62%).
-  assert.match(html, /Usage · Fable/);
-  assert.match(html, /fill="currentColor"/);
-  assert.match(html, />62%</);
-  assert.match(html, /Reported plan · max/);
-  assert.match(html, /Saved rate-limit resets · 2/);
-  assert.match(html, /Saved rate-limit resets are separate from plan quota/);
-  assert.match(html, /expires/);
-  // Never the raw provider id or the corporate name — the owner runs Claude.
-  assert.doesNotMatch(html, /anthropic/i);
-  assert.match(html, /Codex — weekly/);
-  assert.match(html, /Gemini — daily/);
-  // Every excluded row carries a real bar in the shared geometry: the spent
-  // Codex week stays red at full volume, the healthy Gemini day is dimmed.
-  assert.match(html, /Not counted for this model/);
+  // The selected model's binding window stays primary and retains the raw
+  // reported plan. Unrelated provider windows stay available but collapsed.
+  assert.match(html, /62%/);
+  assert.match(html, /max/);
+  assert.match(html, /<details/);
+  assert.doesNotMatch(html, /<details open/);
+  assert.match(html, /Codex · Weekly/);
   assert.match(html, /width:100%[^"]*background:var\(--status-error\)/);
-  assert.match(html, /width:12%[^"]*background:var\(--text-dim\);opacity:0\.55/);
-  // …including their reset times, exactly like the primary rows.
-  assert.ok(html.match(/resets/g).length >= 3, "excluded rows keep their reset lines");
-  // The footer scopes the reading to the selected model.
-  assert.match(html, /For the selected model/);
+  // A positive reset still exposes its account-specific expiry and action.
+  assert.match(html, /Claude account/);
+  assert.match(html, /<button/);
 });
 test("the popover retains an explicitly reported zero saved-reset balance", () => {
   const quota = buildQuotaView(usageSnapshot({
@@ -671,8 +657,9 @@ test("the popover retains an explicitly reported zero saved-reset balance", () =
     }),
   );
 
-  assert.match(html, /Saved rate-limit resets · 0/);
-  assert.doesNotMatch(html, /expires/);
+  assert.match(html, /Saved resets · 0/);
+  assert.match(html, /No saved resets available./);
+  assert.doesNotMatch(html, /Claude account/);
 });
 
 test("the absent popover names the silence without inventing sections", () => {
@@ -685,13 +672,9 @@ test("the absent popover names the silence without inventing sections", () => {
     React.createElement(QuotaPopover, { quota, provider: "llama-swap", modelName: "Qwen3 Coder", now: Date.now() }),
   );
 
-  // No reading: an em dash where the number would be, never a fake 0%.
-  assert.match(html, />—</);
-  assert.match(html, /No plan limits for this provider/);
-  // The metered account next door stays visible — branded, with its bar.
-  assert.match(html, /Claude — 5-hour window/);
-  assert.match(html, /width:80%/);
-  assert.doesNotMatch(html, /anthropic/i);
+  // Another provider's limit remains present in the collapsed secondary section.
+  assert.match(html, /<details/);
+  assert.match(html, /80%/);
 });
 
 
@@ -711,13 +694,8 @@ test("the quota ring is absent on an engine that reports no plan quota", () => {
   assert.doesNotMatch(html, /aria-haspopup="dialog"/);
 });
 
-test("engine-specific composer copy carries the engine's name instead of omp's", () => {
-  // Every one of these rendered a literal "omp"/"OMP" on pi and Hermes. They
-  // are interpolated with the ACTIVE engine's shortName now, so each must
-  // declare the placeholder — in all three locales, which the locales test
-  // then holds in lockstep.
+test("engine-specific composer copy names the active engine while Smart remains neutral", () => {
   const engineNamed = [
-    "chatInput.smartModel",
     "chatInput.smartModelHint",
     "chatInput.smartModelUnavailable",
     "chatInput.thinkingAuto",
@@ -729,13 +707,12 @@ test("engine-specific composer copy carries the engine's name instead of omp's",
     "agentSession.fallbackSucceededDetail",
   ];
   for (const [name, dict] of Object.entries(locales)) {
+    assert.equal(dict["chatInput.smartModel"], "Smart", name + ".json must keep Smart neutral");
     for (const key of engineNamed) {
-      assert.ok(key in dict, `${name}.json is missing ${key}`);
-      assert.ok(dict[key].includes("{name}"), `${name}.json "${key}" must name the active engine`);
-      assert.doesNotMatch(dict[key], /\bomp\b/i, `${name}.json "${key}" still hardcodes omp`);
+      assert.ok(key in dict, name + ".json is missing " + key);
+      assert.ok(dict[key].includes("{name}"), name + ".json " + key + " must name the active engine");
+      assert.doesNotMatch(dict[key], /\bomp\b/i, name + ".json " + key + " still hardcodes omp");
     }
-    // The resume hint used to send every engine's user to `omp --resume`;
-    // pi resumes with --session and an ACP engine has no such flag at all.
     assert.doesNotMatch(dict["errors.session_file_too_large"], /omp/i);
   }
 });
@@ -857,4 +834,43 @@ test("a missing key hides the credit section instead of showing an error", () =>
   );
   assert.doesNotMatch(html, /OpenRouter credits/);
   assert.doesNotMatch(html, /No OpenRouter key is configured/);
+});
+
+
+test("renders distinct Fast status semantics without conflating metadata and engine state", () => {
+  const renderFast = (fast) => renderToStaticMarkup(
+    React.createElement(ChatInput, {
+      onSend() {},
+      onAbort() {},
+      isStreaming: false,
+      fastModeCapable: true,
+      onFastModeChange() {},
+      ...fast,
+    }),
+  );
+
+  assert.match(renderFast({ fastModeSupported: true }), /aria-label="Fast off"/);
+  assert.match(renderFast({ fastModeEnabled: true, fastModeActive: true, fastModeSupported: false, fastModeUnavailable: true }), /aria-label="Fast requested"/);
+  assert.match(renderFast({ fastModeEnabled: true, fastModeActive: false, fastModeSupported: true }), /aria-label="Fast inactive"/);
+  assert.match(renderFast({ fastModeSupported: false }), /aria-label="Fast unavailable"/);
+  assert.match(renderFast({ fastModeEnabled: true }), /aria-label="Fast unverified"/);
+  assert.match(renderFast({ fastModePending: true }), /aria-label="Checking"/);
+});
+
+test("keeps Smart model selection free of engine and model suffixes", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ChatInput, {
+      onSend() {},
+      onAbort() {},
+      isStreaming: false,
+      capabilities: { chatExtras: true, models: true, fastMode: false, subagents: false, skills: false },
+      model: { provider: "openai", modelId: "gpt-5" },
+      modelNames: { "openai/gpt-5": "GPT-5" },
+      isAutoModelSelection: true,
+      onModelChange() {},
+    }),
+  );
+
+  assert.match(html, />Smart</);
+  assert.doesNotMatch(html, /Smart[^<]*[·—]/);
 });

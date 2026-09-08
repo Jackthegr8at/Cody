@@ -602,8 +602,8 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   `ChatWindow` → `ChatInput` and into `SessionSidebar`; the composer derives
   `chatExtras`/`fastMode`/`subagents` from that prop rather than receiving
   three booleans. The three-boolean version is what produced four separate
-  leaks at once: with `models` and `skills` never threaded, the "Smart — OMP
-  roles" row (which fetches omp's `config.yml`) rendered on pi because it was
+  leaks at once: with `models` and `skills` never threaded, the `Smart`
+  model-roles row (which fetches omp's `config.yml`) rendered on pi because it was
   gated on `chatExtras`, which pi HAS. When a control needs a flag nobody
   passed yet, read it off `capabilities` — do not add a fourth boolean.
 - **A few surfaces are one engine's own files, not a capability.** Session
@@ -617,14 +617,29 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   (`useUsage(enabled)` also stops the 90-second poll behind it).
 - **Engine-specific copy names the ACTIVE engine.** Every user-facing string
   that used to say "omp"/"OMP" now interpolates `{name}` from
-  `engine.shortName` (`chatInput.smartModel*`, `.thinkingAuto`,
-  `.toolPresetCoreWarning*`, `.groupEngineBuiltin`, `agentSession.startingAgent`,
-  `.fallbackAppliedDetail`, `.fallbackSucceededDetail`, `info.section.engine`).
-  `agentSession.startingAgent` fires on any slow first connect — i.e. exactly
-  the Hermes/Codex cold start — which is why it said "Starting omp…" to a
-  Hermes user. The Info panel's copyable diagnostics say
+  `engine.shortName` (`chatInput.smartModelHint`,
+  `.smartModelUnavailable`, `.thinkingAuto`, `.toolPresetCoreWarning*`,
+  `.groupEngineBuiltin`, `agentSession.startingAgent`,
+  `.fallbackAppliedDetail`, `.fallbackSucceededDetail`,
+  `info.section.engine`). The sole intentional exception is the Smart model
+  label: it is exactly `Smart`, with no engine, role, or resolved-model
+  suffix. `agentSession.startingAgent` fires on any slow first connect —
+  i.e. exactly the Hermes/Codex cold start — which is why it said
+  "Starting omp…" to a Hermes user. The Info panel's copyable diagnostics say
   `Engine: <shortName> <version>` for the same reason: the VALUE was always
   the active engine's, only the label lied.
+- **Composer request state has two authorities.** Fast catalog support is a
+  capability prediction, while `fastModeActive` and explicit
+  `fastModeUnavailable` come from the live engine. The compact Fast control
+  says **Fast off**, **Fast requested**, **Fast inactive**, **Fast unavailable**,
+  **Fast unverified**, or **Checking**. Requested means the engine accepted a
+  priority request; it is never positive confirmation that the provider is
+  actually servicing it. Inactive means the enabled request is not receiving
+  engine priority and normal service applies, not that it was rejected; it can
+  still be turned off. An active engine answer outranks stale catalog metadata.
+  Reasoning-level changes are allowed during a run, lock only while awaiting
+  engine acknowledgement, and apply to the next model invocation (including a
+  tool continuation), never the stream already in progress.
 - **A capability flag is a UI convenience; the ROUTE is the boundary**
   (`lib/engine-guard.ts`). Every omp-shaped endpoint used to answer 200
   whichever engine was selected — probed directly under Hermes they served
@@ -633,7 +648,7 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   through the UI too, because the flag that hid them is not the flag they
   needed: Hermes declares `nativeSettings` (it has its own config) and so
   rendered omp's `config.yml` panels with a Save that wrote to a file it
-  never reads; pi has `chatExtras` and so offered omp's "Smart — OMP roles"
+  never reads; pi has `chatExtras` and so offered omp's `Smart` model-roles
   row and an Export that shells `omp --export`. Every such route now either
   DISPATCHES on `getHarness()` (`/api/models`, `/api/omp-version`) or on an
   ADAPTER METHOD (`/api/omp-settings/schema` → `HarnessAdapter.settings`), or
@@ -1440,25 +1455,26 @@ handled or safely ignored.
   (`phaseElapsed`, tabular digits); only real status changes crossfade.
 
 ### Composer model + tools controls
-- **Smart model row**: the model dropdown's pinned first row ("Smart — OMP
-  roles") is the labeled face of auto model selection. A NEW session with no
-  explicit pick sends no `set_model`, so omp resolves `modelRoles.default`
+- **Smart model row**: the model dropdown's pinned first row is labeled
+  exactly `Smart`; engine roles and the resolved model are intentionally not
+  appended. It is the labeled face of auto model selection. A NEW session with
+  no explicit pick sends no `set_model`, so omp resolves `modelRoles.default`
   (the saved plan); Smart re-selects that state (`selectSmartModel()` clears
   `newSessionModel`). On a live session it resolves the configured default
   role to a concrete model client-side and pins it (omp's `set_model` RPC
-  takes exact provider/model — no role aliases). Picking any named model
-  pins it and OMP roles stop applying to that session's main turns.
+  takes exact provider/model — no role aliases). Picking any named model pins
+  it and OMP roles stop applying to that session's main turns.
 - **Smart-ness survives the pin** (`smartPinnedModel` in useAgentSession):
   both a live Smart pick (`markSmartPinnedModel`) and the engine's own
   resolution of a Smart spawn (`pendingSmartSpawnRef`, claimed by the first
   authoritative model) record the pin as Smart's answer, id-scoped to their
   session — loads and reconciles reuse `loadSession`, so a reset there would
-  wipe it mid-conversation. The composer keeps "✦ Smart · <model>" while the
-  running model still matches. The Advisor indicator is ShieldCheck, never
-  Sparkles: Sparkles is the Smart glyph, and an accent sparkle beside the
-  model name read as "auto-picked".
+  wipe it mid-conversation. The composer keeps the label `Smart` while the
+  running model still matches; it does not append that model to the label. The
+  Advisor indicator is ShieldCheck, never Sparkles: Sparkles is the Smart glyph,
+  and an accent sparkle beside the model name read as "auto-picked".
 - **Display names and picker controls stay presentation-only.** `formatModelDisplayName()` in `lib/model-display.ts` is the shared display boundary for the composer, transcript, and usage surfaces; it may improve a catalog label but never changes the routing identifier. Fast remains beside the existing Composer model picker, and its adjacent Manage models gear opens Settings › Models. Only Smart is pinned; the ordinary named-model list has no sticky selection.
-- **Composer quota is model-scoped.** Select usage windows for the actual selected model: a reported tier explicitly scopes its bucket even when it is also marked shared; only untiered buckets apply to the account as a whole. Render the raw engine-reported plan without inferring a `$tier` convention, and show saved reset credits as a separate count, including zero.
+- **Composer quota is model-scoped.** Select usage windows for the actual selected model: a reported tier explicitly scopes its bucket even when it is also marked shared; only untiered buckets apply to the account as a whole. Render the raw engine-reported plan without inferring a `$tier` convention. Saved resets are a separate single summary that keeps explicit zero visible; only meaningful positive account rows expand it. Keep unrelated provider or tier limits in collapsed details that explicitly say they cannot stop the selected model.
 - **Engine-initiated model switches wear a persistent marker**
   (`autoModelSwitch`): `retry_fallback_applied` (error and usage-aware
   routing both emit it) and any bare `model_changed` whose model differs

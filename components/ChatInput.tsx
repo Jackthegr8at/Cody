@@ -117,12 +117,18 @@ interface Props {
   fastModeActive?: boolean;
   fastModeCapable?: boolean;
   fastModeSupported?: boolean;
+  /** A Fast request is in flight; prevent a second click until the engine replies. */
+  fastModePending?: boolean;
+  /** The engine explicitly rejected Fast for this model/session. */
+  fastModeUnavailable?: boolean;
   onFastModeChange?: (enabled: boolean) => void;
   onAbortCompaction?: () => void;
   isCompacting?: boolean;
   compactResult?: CompactResultInfo | null;
   thinkingLevel?: string;
   onThinkingLevelChange?: (level: string) => void;
+  /** A reasoning-level command is awaiting engine acknowledgement. */
+  thinkingLevelPending?: boolean;
   /** The engine's own session modes (ACP `session/new` → `modes`): its
    * permission posture — Manual / Accept edits / Plan / Auto on Claude,
    * Default / Accept Edits / Don't Ask on Hermes. Empty for an engine without
@@ -131,7 +137,6 @@ interface Props {
   currentModeId?: string | null;
   onModeChange?: (modeId: string) => void;
   availableThinkingLevels?: string[] | null;
-  thinkingLevelMap?: Record<string, string | null> | null;
   /** Display name for the current model when the catalog does not know it. */
   modelNameOverride?: string | null;
   retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
@@ -578,6 +583,12 @@ function formatResetTime(iso: string | null, locale: string, now: number): strin
     ? at.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })
     : at.toLocaleString(locale, { weekday: "short", hour: "2-digit", minute: "2-digit" });
 }
+/** Usage-window labels are presentation text, unlike opaque plan and model
+ * identifiers. Give case-aware locales a readable capital to every visible
+ * window segment without changing the reported value itself. */
+function formatQuotaLabel(label: string, locale: string): string {
+  return label.replace(/(^|·\s*)(\p{Ll})/gu, (_match, prefix: string, letter: string) => prefix + letter.toLocaleUpperCase(locale));
+}
 
 /** The one bar geometry every quota row shares: 4px track, pill radius. The
  *  de-emphasised rows dim the fill rather than changing shape, so the whole
@@ -622,6 +633,7 @@ function QuotaWindowRow({
 }) {
   const { t, locale } = useI18n();
   const reset = formatResetTime(resetsAt, locale, now);
+  const displayLabel = formatQuotaLabel(label, locale);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
@@ -633,7 +645,7 @@ function QuotaWindowRow({
             color: muted ? "var(--text-muted)" : "var(--text)",
             whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
           }}>
-            {label}
+            {displayLabel}
           </div>
           {exhausted && (
             <div style={{
@@ -722,7 +734,13 @@ export function QuotaPopover({
   }, [resetCredits, resetSelection, t]);
   const resetAccounts = resetCredits?.snapshot?.accounts ?? [];
   const availableResetCount = resetAccounts.reduce((count, account) => count + account.availableCount, 0);
-  const percentText = quota.known ? `${Math.round(quota.percent)}%` : "—";
+  // The total remains visible even at zero. Per-account rows only earn their
+  // space when they can explain a positive balance, an expiry, or a failure.
+  const visibleResetAccounts = resetAccounts.filter((account) =>
+    (account.availableCount > 0 || Boolean(account.error))
+    && (resetAccounts.length > 1 || account.canRedeem || account.credits.length > 0 || Boolean(account.error)),
+  );
+  const percentText = quota.known ? t("usage.percentUsed", { percent: Math.round(quota.percent) }) : t("usage.unavailable");
   const headlineReset = quota.known ? formatResetTime(quota.resetsAt, locale, now) : null;
   const age = quota.known && quota.fetchedAt ? formatRelativeTime(quota.fetchedAt, locale, now) : null;
   // Age is only claimed when the snapshot carries a usable timestamp, and a
@@ -769,21 +787,21 @@ export function QuotaPopover({
             size={14}
             style={{ flexShrink: 0, color: "var(--text-muted)" }}
           />
-          <div style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 700, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          <div style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 700, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {modelName ? t("usage.titleForModel", { model: modelName }) : t("usage.title")}
           </div>
-          <div style={{ flexShrink: 0, fontSize: 16, fontWeight: 700, color: quota.color, fontVariantNumeric: "tabular-nums" }}>
+          <div style={{ flexShrink: 0, fontSize: 14, fontWeight: 700, color: quota.color, fontVariantNumeric: "tabular-nums" }}>
             {percentText}
           </div>
         </div>
         {/* The headline always names the window it is quoting — a bare
             percentage would not say what ran out. */}
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8, marginTop: 4 }}>
-          <div style={{ minWidth: 0, fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {quota.known ? quota.label : t(quota.titleKey)}
+          <div style={{ minWidth: 0, fontSize: 12, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {quota.known ? formatQuotaLabel(quota.label, locale) : t(quota.titleKey)}
           </div>
           {headlineReset && (
-            <div style={{ flexShrink: 0, fontSize: 11, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
+            <div style={{ flexShrink: 0, fontSize: 12, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
               {t("usage.resetsAt", { time: headlineReset })}
             </div>
           )}
@@ -795,7 +813,7 @@ export function QuotaPopover({
           </div>
         )}
         {quota.known && quota.planType && (
-          <div style={{ marginTop: 8, fontSize: 10, color: "var(--text-muted)" }}>
+          <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-muted)" }}>
             {t("usage.reportedPlan", { plan: quota.planType })}
           </div>
         )}
@@ -806,27 +824,27 @@ export function QuotaPopover({
         {openRouter && <OpenRouterCredits account={openRouter} />}
         {resetCredits && (
           <section style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text)" }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>
               {t("usage.savedResets", { count: availableResetCount })}
             </div>
-            <div style={{ marginTop: 4, fontSize: 10, lineHeight: 1.45, color: "var(--text-dim)" }}>
-              {t("usage.savedResetsNote")}
+            <div style={{ marginTop: 4, fontSize: 11, lineHeight: 1.45, color: "var(--text-dim)" }}>
+              {t(availableResetCount === 0 ? "usage.savedResetsEmpty" : "usage.savedResetsNote")}
             </div>
             {resetCredits.loading && !resetCredits.snapshot && (
-              <div style={{ marginTop: 6, fontSize: 10, color: "var(--text-muted)" }}>{t("usage.resetCreditChecking")}</div>
+              <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-muted)" }}>{t("usage.resetCreditChecking")}</div>
             )}
-            {resetCredits.snapshot?.accounts.map((account) => {
+            {visibleResetAccounts.map((account) => {
               const credit = account.credits[0];
               const expiry = credit ? formatResetTime(credit.expiresAt, locale, now) : null;
               const confirming = resetSelection?.accountId === account.id;
               return (
                 <div key={account.id} style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid color-mix(in srgb, var(--border) 60%, transparent)" }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                    <span style={{ minWidth: 0, fontSize: 11, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{account.label}</span>
-                    <span style={{ flexShrink: 0, fontSize: 11, fontVariantNumeric: "tabular-nums", color: "var(--text-muted)" }}>{t("usage.savedResets", { count: account.availableCount })}</span>
+                    <span style={{ minWidth: 0, fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{account.label}</span>
+                    <span style={{ flexShrink: 0, fontSize: 12, fontVariantNumeric: "tabular-nums", color: "var(--text-muted)" }}>{t("usage.resetCount", { count: account.availableCount })}</span>
                   </div>
-                  {expiry && <div style={{ marginTop: 2, fontSize: 10, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>{t("usage.expiresAt", { time: expiry })}</div>}
-                  {account.error && <div style={{ marginTop: 4, fontSize: 10, color: "var(--text-dim)" }}>{account.error}</div>}
+                  {expiry && <div style={{ marginTop: 2, fontSize: 11, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>{t("usage.expiresAt", { time: expiry })}</div>}
+                  {account.error && <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)" }}>{account.error}</div>}
                   {credit && account.canRedeem && !confirming && (
                     <button type="button" onClick={() => setResetSelection({ accountId: account.id, creditId: credit.id, account: account.label })} style={{ marginTop: 6, padding: "3px 7px", border: "1px solid var(--border)", borderRadius: 5, background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 10 }}>
                       {t("usage.useReset")}
@@ -845,7 +863,7 @@ export function QuotaPopover({
               );
             })}
             {resetCredits.snapshot && !resetCredits.snapshot.available && (
-              <div style={{ marginTop: 6, fontSize: 10, color: "var(--text-muted)" }}>{resetCredits.snapshot.reason ?? t("usage.resetCreditUnavailable")}</div>
+              <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-muted)" }}>{resetCredits.snapshot.reason ?? t("usage.resetCreditUnavailable")}</div>
             )}
           </section>
         )}
@@ -885,11 +903,14 @@ export function QuotaPopover({
             design as the list above, dimmed: a spent window here must stay
             visible, and must never colour the ring. */}
         {quota.others.length > 0 && (
-          <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
-            <div style={{ marginBottom: 8, fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.045em" }}>
-              {t("usage.notForThisModel")}
+          <details style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+            <summary style={{ cursor: "pointer", fontSize: 11, fontWeight: 700, color: "var(--text-muted)" }}>
+              {t("usage.otherLimitsSummary", { count: quota.others.length })}
+            </summary>
+            <div style={{ marginTop: 8, fontSize: 11, lineHeight: 1.45, color: "var(--text-dim)" }}>
+              {t("usage.notForThisModelNote")}
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 12 }}>
               {quota.others.map((entry) => (
                 <QuotaWindowRow
                   key={entry.key}
@@ -904,24 +925,12 @@ export function QuotaPopover({
                 />
               ))}
             </div>
-            <div style={{ marginTop: 8, fontSize: 10, lineHeight: 1.45, color: "var(--text-dim)" }}>
-              {t("usage.notForThisModelNote")}
-            </div>
-          </div>
+          </details>
         )}
 
         {/* Footer — whose limits these are, and how fresh the reading is. */}
-        <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)", display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
-          <div style={{ fontSize: 10, color: "var(--text-muted)" }}>
-            {!quota.known
-              ? t(quota.scopeKey)
-              : modelName ? t("usage.modelScope") : t("usage.accountWide")}
-          </div>
-          {freshness && (
-            <div style={{ flexShrink: 0, fontSize: 10, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
-              {freshness}
-            </div>
-          )}
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)", fontSize: 11, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
+          {[!quota.known ? t(quota.scopeKey) : modelName ? t("usage.modelScope") : t("usage.accountWide"), freshness].filter(Boolean).join(" · ")}
         </div>
       </div>
     </div>
@@ -951,6 +960,17 @@ type SlashCommandPaletteItem = {
   /** Bracketed argument hint rendered after the command name, e.g. "[goal]". */
   argumentHint?: string;
   source: SlashCommandSource;
+};
+
+const THINKING_LEVEL_LABEL_KEYS: Record<string, string> = {
+  auto: "chatInput.reasoningLevelAuto",
+  off: "chatInput.reasoningLevelOff",
+  minimal: "chatInput.reasoningLevelMinimal",
+  low: "chatInput.reasoningLevelLow",
+  medium: "chatInput.reasoningLevelMedium",
+  high: "chatInput.reasoningLevelHigh",
+  xhigh: "chatInput.reasoningLevelXhigh",
+  max: "chatInput.reasoningLevelMax",
 };
 
 function isDormantSkillCommand(command: SlashCommandPaletteItem, dormantNames: Set<string>): boolean {
@@ -1201,9 +1221,9 @@ function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; plan?: A
 }
 
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, canAttachWhileStreaming = false, canAttachImagesWhileStreaming = false, capabilities = ALL_CAPABILITIES, engine = null, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, autoModelSwitch, fastModeEnabled, fastModeActive, fastModeCapable, fastModeSupported, onFastModeChange,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, canAttachWhileStreaming = false, canAttachImagesWhileStreaming = false, capabilities = ALL_CAPABILITIES, engine = null, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, autoModelSwitch, fastModeEnabled, fastModeActive, fastModeCapable, fastModeSupported, fastModePending, fastModeUnavailable, onFastModeChange,
   onAbortCompaction, isCompacting, compactResult,
-  thinkingLevel, onThinkingLevelChange, availableModes = NO_MODES, currentModeId = null, onModeChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
+  thinkingLevel, onThinkingLevelChange, thinkingLevelPending, availableModes = NO_MODES, currentModeId = null, onModeChange, availableThinkingLevels, modelNameOverride,
   retryInfo, queuedMessages, inputHistory = [], onAbortRetry,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
@@ -2463,8 +2483,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     : null;
   const thinkingDisplayLabel = (() => {
     const lvl = thinkingLevel ?? "auto";
-    if (lvl === "auto" || !thinkingLevelMap) return lvl;
-    return thinkingLevelMap[lvl] ?? lvl;
+    return t(THINKING_LEVEL_LABEL_KEYS[lvl] ?? "chatInput.reasoningLevelAuto");
   })();
   // The ring gauges the binding PLAN QUOTA window OF THE SELECTED MODEL; the
   // context window has its own readout in the top bar.
@@ -3344,7 +3363,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   )}
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
                     {isAutoModelSelection
-                      ? (currentName ? `${t("chatInput.smartModel", { name: engineName })} · ${currentName}` : t("chatInput.smartModel", { name: engineName }))
+                      ? t("chatInput.smartModel")
                       : currentName ?? (modelOptions.length > 0
                         ? t("chatInput.selectModel")
                         : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noModels"))}
@@ -3398,7 +3417,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         : <span style={{ width: 10, flexShrink: 0 }} />}
                       <Sparkles size={13} strokeWidth={1.8} style={{ flexShrink: 0, marginTop: 2, color: isAutoModelSelection ? "var(--accent)" : "var(--text-dim)" }} />
                       <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
-                        <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t("chatInput.smartModel", { name: engineName })}</span>
+                        <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t("chatInput.smartModel")}</span>
                         <span style={{ fontSize: 11, color: "var(--text-dim)", fontWeight: 400, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t("chatInput.smartModelHint", { name: engineName })}</span>
                       </span>
                     </button>
@@ -3533,8 +3552,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
             {(onThinkingLevelChange || (fastModeCapable && onFastModeChange)) && (
             <div style={{ display: "inline-flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
-            {/* Reasoning level selector — stays visible while the agent
-                runs (disabled) so the level never looks like it reset. */}
+            {/* Reasoning level selector stays available during an active run:
+                an accepted change applies to the next model request. */}
             {onThinkingLevelChange && (
               <div ref={thinkingDropdownRef} style={{ position: "relative", flexShrink: isMobile ? 0 : undefined }}>
                 <button
@@ -3543,11 +3562,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     setThinkingAnchorTop(rect.top);
                     setThinkingDropdownOpen((v) => !v);
                   }}
-                  disabled={isStreaming}
-                  title={t("chatInput.changeReasoningTitle", { level: thinkingDisplayLabel })}
-                  // The aria-label already carried the level, which is what the
-                  // icon-only phone button now leans on entirely.
-                  aria-label={`${t("chatInput.changeReasoning")}: ${thinkingDisplayLabel}`}
+                   disabled={thinkingLevelPending}
+                   data-testid="thinking-level-toggle"
+                   title={thinkingLevelPending ? t("chatInput.reasoningApplyingHint") : t("chatInput.reasoningChangeHint")}
+                   aria-label={[t("chatInput.changeReasoning"), thinkingDisplayLabel, thinkingLevelPending ? t("chatInput.reasoningApplying") : null].filter(Boolean).join(": ")}
                   style={{
                     display: "flex", alignItems: "center", gap: 5,
                     justifyContent: isMobile ? "center" : undefined,
@@ -3558,16 +3576,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     border: "none",
                     borderRadius: 7,
                     color: "var(--text-muted)",
-                    cursor: isStreaming ? "not-allowed" : "pointer",
-                    opacity: isStreaming ? 0.5 : 1,
+                     cursor: thinkingLevelPending ? "wait" : "pointer",
+                     opacity: thinkingLevelPending ? 0.65 : 1,
                     fontSize: 12,
                     transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
                   }}
-                  onMouseEnter={(e) => {
-                    if (isStreaming) return;
-                    e.currentTarget.style.background = "var(--bg-hover)";
-                    e.currentTarget.style.color = "var(--text)";
-                  }}
+                   onMouseEnter={(e) => {
+                     if (thinkingLevelPending) return;
+                     e.currentTarget.style.background = "var(--bg-hover)";
+                     e.currentTarget.style.color = "var(--text)";
+                   }}
                   onMouseLeave={(e) => {
                     e.currentTarget.style.background = thinkingDropdownOpen ? "var(--bg-hover)" : "none";
                     e.currentTarget.style.color = "var(--text-muted)";
@@ -3578,8 +3596,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     <line x1="7" y1="18" x2="12" y2="18" />
                     <line x1="8" y1="21" x2="11" y2="21" />
                   </svg>
-                  {!isMobile && <span style={{ whiteSpace: "nowrap" }}>{thinkingDisplayLabel}</span>}
-                  {!isMobile && <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7 }} aria-hidden="true" />}
+                   {!isMobile && <span style={{ whiteSpace: "nowrap" }}>{thinkingDisplayLabel}</span>}
+                   {thinkingLevelPending && <Loader2 size={isMobile ? 13 : 11} strokeWidth={2} style={{ flexShrink: 0, animation: "spin 0.8s linear infinite" }} aria-hidden="true" />}
+                   {!isMobile && <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7 }} aria-hidden="true" />}
                 </button>
                 {thinkingDropdownOpen && (
                   <div className="dropdown-surface" style={isMobile && thinkingAnchorTop != null ? {
@@ -3599,31 +3618,30 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       // "auto" means "whatever the engine defaults to", so
                       // its description names the ACTIVE engine.
                       const desc = descKey ? t(descKey, { name: engineName }) : "";
-                      const mappedVal = (lvl !== "auto" && thinkingLevelMap) ? thinkingLevelMap[lvl] : undefined;
-                      const displayLabel = (mappedVal != null && mappedVal !== lvl) ? mappedVal : lvl;
-                      const showOriginal = mappedVal != null && mappedVal !== lvl;
+                       const displayLabel = t(THINKING_LEVEL_LABEL_KEYS[lvl] ?? "chatInput.reasoningLevelAuto");
                       return (
                         <button
                           className="dropdown-item"
                           key={lvl}
-                          onClick={() => { setThinkingDropdownOpen(false); if (!isActive && !isStreaming) onThinkingLevelChange(lvl); }}
+                           disabled={thinkingLevelPending}
+                           onClick={() => { setThinkingDropdownOpen(false); if (!isActive && !thinkingLevelPending) onThinkingLevelChange(lvl); }}
                           style={{
                             display: "flex", alignItems: "center", gap: 8,
                             width: "100%", padding: "7px 12px",
                             background: isActive ? "var(--bg-selected)" : "transparent",
                             border: "none",
                             color: isActive ? "var(--text)" : "var(--text-muted)",
-                            cursor: "pointer", fontSize: 12, textAlign: "left",
-                            fontWeight: isActive ? 600 : 400,
+                             cursor: thinkingLevelPending ? "wait" : "pointer", fontSize: 12, textAlign: "left",
+                             fontWeight: isActive ? 600 : 400, opacity: thinkingLevelPending ? 0.65 : 1,
                             whiteSpace: "nowrap",
                           }}
-                          onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                          onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
+                           onMouseEnter={(e) => { if (!isActive && !thinkingLevelPending) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                           onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
                         >
                           {isActive
                             ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
                             : <span style={{ width: 10, flexShrink: 0 }} />}
-                          <span style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{displayLabel}{showOriginal && <span style={{ color: "var(--text-dim)", fontWeight: 400 }}> ({lvl})</span>}</span>
+                          <span style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{displayLabel}</span>
                           {desc && (
                             <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>
                               {desc}
@@ -3636,36 +3654,85 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 )}
               </div>
             )}
-            {fastModeCapable && onFastModeChange && (
-              <button
-                type="button"
-                onClick={() => {
-                  if (!fastModeSupported) {
-                    toast.info(t("chatInput.fastModeUnavailable"));
-                    return;
-                  }
-                  onFastModeChange(!fastModeEnabled);
-                }}
-                title={fastModeSupported
-                  ? (fastModeActive ? t("chatInput.fastModeActive") : t("chatInput.fastModeHint"))
-                  : t("chatInput.fastModeUnavailable")}
-                aria-label={fastModeSupported
-                  ? (fastModeActive ? t("chatInput.fastModeActive") : t("chatInput.fastLabel"))
-                  : t("chatInput.fastModeUnavailable")}
-                aria-pressed={Boolean(fastModeActive && fastModeSupported)}
-                style={{
-                  display: "inline-flex", alignItems: "center", justifyContent: "center",
-                  width: isMobile ? 38 : 28, height: isMobile ? 38 : 28, padding: 0,
-                  background: fastModeActive && fastModeSupported ? "var(--bg-hover)" : "none",
-                  border: "none", borderRadius: 7,
-                  color: fastModeActive && fastModeSupported ? "var(--accent)" : "var(--text-muted)",
-                  cursor: "pointer", flexShrink: 0,
-                  transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
-                }}
-              >
-                <Zap size={isMobile ? 16 : 14} strokeWidth={2} aria-hidden="true" />
-              </button>
-            )}
+            {fastModeCapable && onFastModeChange && (() => {
+              // The preference and engine state are distinct: a request can be
+              // accepted on the wire without the provider confirming service.
+              const fastState = fastModePending
+                ? "checking"
+                : fastModeActive === true
+                  ? "requested"
+                  : fastModeUnavailable === true
+                    ? "unavailable"
+                    : fastModeEnabled && fastModeActive === false
+                      ? "inactive"
+                      : fastModeSupported === false
+                        ? "unavailable"
+                        : fastModeEnabled
+                          ? "unverified"
+                          : fastModeSupported === true
+                            ? "off"
+                            : "unverified";
+              const fastLabels = {
+                checking: t("chatInput.fastModeChecking"),
+                requested: t("chatInput.fastModeRequested"),
+                inactive: t("chatInput.fastModeInactive"),
+                unavailable: t("chatInput.fastModeUnavailable"),
+                unverified: t("chatInput.fastModeUnverified"),
+                off: t("chatInput.fastModeOff"),
+              };
+              const fastLabel = fastLabels[fastState];
+              const fastTitle = fastState === "requested"
+                ? t("chatInput.fastModeRequestedHint")
+                : fastState === "inactive"
+                  ? t("chatInput.fastModeInactiveHint")
+                  : fastState === "unavailable"
+                    ? t("chatInput.fastModeUnavailableHint")
+                    : fastState === "unverified"
+                      ? t("chatInput.fastModeUnverifiedHint")
+                      : fastState === "checking"
+                        ? t("chatInput.fastModeCheckingHint")
+                        : t("chatInput.fastModeOffHint");
+              const isWarning = fastState === "inactive" || fastState === "unavailable";
+              return (
+                <button
+                  type="button"
+                  data-testid="fast-mode-toggle"
+                  onClick={() => {
+                    if (fastModePending) return;
+                    // Always preserve the ability to turn off an enabled but
+                    // inactive Fast request.
+                    if (fastModeEnabled) {
+                      onFastModeChange(false);
+                      return;
+                    }
+                    if (fastModeUnavailable || fastModeSupported === false) {
+                      toast.info(t("chatInput.fastModeUnavailableHint"));
+                      return;
+                    }
+                    onFastModeChange(true);
+                  }}
+                  disabled={fastModePending}
+                  title={fastTitle}
+                  aria-label={fastLabel}
+                  aria-pressed={Boolean(fastModeEnabled)}
+                  style={{
+                    display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4,
+                    height: isMobile ? 38 : 28, padding: isMobile ? "0 9px" : "0 7px",
+                    background: fastState === "requested" ? "var(--bg-hover)" : "none",
+                    border: "none", borderRadius: 7,
+                    color: fastState === "requested" ? "var(--accent)" : isWarning ? "var(--status-warning)" : "var(--text-muted)",
+                    cursor: fastModePending ? "wait" : "pointer", flexShrink: 0,
+                    opacity: fastModePending ? 0.65 : 1,
+                    transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
+                  }}
+                >
+                  {isWarning
+                    ? <TriangleAlert size={isMobile ? 16 : 14} strokeWidth={2} aria-hidden="true" />
+                    : <Zap size={isMobile ? 16 : 14} strokeWidth={2} aria-hidden="true" />}
+                  <span style={{ whiteSpace: "nowrap", fontSize: 11, fontWeight: fastState === "requested" ? 600 : 500 }}>{fastLabel}</span>
+                </button>
+              );
+            })()}
             </div>
             )}
             {/* Agent-mode selector — the engine's own session modes, offered

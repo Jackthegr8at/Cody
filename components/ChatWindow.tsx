@@ -735,7 +735,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
 
   const {
     loading, error, messages, entryIds, streamState,
-    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelSelectable, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, fastModeEnabled, fastModeActive, promptCapabilities, steeringSupported,
+    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelSelectable, modelsLoading, modelError, modelThinkingLevels, thinkingLevel, thinkingLevelPending, fastModeEnabled, fastModeActive, fastModePending, fastModeUnavailable, promptCapabilities, steeringSupported,
     liveModelMeta, availableModes, currentModeId,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactResult, displayModel: displayModelValue, sessionStats,
@@ -1021,9 +1021,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       : null
   ), [displayModelValue, modelThinkingLevels, liveModelMeta]);
 
-  const currentThinkingLevelMap = displayModelValue
-    ? (modelThinkingLevelMaps[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
-    : null;
 
   // The quota popover used to render this list itself; it now feeds the top
   // bar's session popover, which is where the rest of the session's token
@@ -1130,18 +1127,22 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       isCompacting={isCompacting}
       compactResult={compactResult}
       thinkingLevel={thinkingLevel}
+       thinkingLevelPending={thinkingLevelPending}
       onThinkingLevelChange={chatExtras && (session || isNew) ? handleThinkingLevelChange : undefined}
       availableModes={availableModes}
       currentModeId={currentModeId}
       onModeChange={availableModes.length > 0 ? handleModeChange : undefined}
       fastModeEnabled={fastModeEnabled}
       fastModeActive={fastModeActive}
+       fastModePending={fastModePending}
+       fastModeUnavailable={fastModeUnavailable}
       fastModeCapable={fastModeCapable}
-      fastModeSupported={Boolean(displayModelValue && modelList.some((entry) => entry.provider === displayModelValue.provider && entry.id === displayModelValue.modelId && entry.supportsFastMode))}
+       fastModeSupported={displayModelValue
+         ? modelList.find((entry) => entry.provider === displayModelValue.provider && entry.id === displayModelValue.modelId)?.supportsFastMode
+         : undefined}
       onFastModeChange={fastModeCapable && (session || isNew) ? handleFastModeChange : undefined}
       onAbortRetry={session ? handleAbortRetry : undefined}
       availableThinkingLevels={availableThinkingLevels}
-      thinkingLevelMap={currentThinkingLevelMap}
       modelNameOverride={liveModelMeta?.name ?? null}
       retryInfo={retryInfo}
       activeGoal={activeGoal}
