@@ -4,7 +4,7 @@ import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
-import { SessionSidebar, type DesktopActivity } from "./SessionSidebar";
+import { SessionSidebar, type DesktopActivity, type DesktopCompletion } from "./SessionSidebar";
 import { ToastProvider } from "./ui/toast";
 import { toast } from "./ui/toast";
 import { ChatWindow, type SessionModelUsage } from "./ChatWindow";
@@ -444,6 +444,7 @@ export function AppShell() {
   const [activeSessionCount, setActiveSessionCount] = useState(0);
   const [desktopUnreadSessionIds, setDesktopUnreadSessionIds] = useState<string[]>([]);
   const [desktopActivityReady, setDesktopActivityReady] = useState(false);
+  const [desktopCompletions, setDesktopCompletions] = useState<DesktopCompletion[]>([]);
   const handleDesktopActivityChange = useCallback((activity: DesktopActivity) => {
     setDesktopActivityReady(activity.ready);
     if (!activity.ready) {
@@ -453,6 +454,18 @@ export function AppShell() {
     }
     setActiveSessionCount(activity.activeSessionCount);
     setDesktopUnreadSessionIds(activity.unreadSessionIds);
+    if (activity.completions.length > 0) {
+      setDesktopCompletions((previous) => {
+        const known = new Set(previous.map((completion) => completion.completionId));
+        const next = [...previous];
+        for (const completion of activity.completions) {
+          if (known.has(completion.completionId)) continue;
+          known.add(completion.completionId);
+          next.push(completion);
+        }
+        return next;
+      });
+    }
   }, []);
   const [activeSubagentCount, setActiveSubagentCount] = useState(0);
   const handleActiveSubagentCountChange = useCallback((count: number) => {
@@ -470,13 +483,25 @@ export function AppShell() {
       completionId: null,
       completionKind: null,
     };
+    // Keep ordinary snapshots explicitly non-terminal. Native sound/toast
+    // paths are driven only by the queued terminal events below.
     updateDesktopStatus(status);
+    for (const completion of desktopCompletions) {
+      updateDesktopStatus({
+        ...status,
+        completed: true,
+        completionId: completion.completionId,
+        completionKind: completion.completionKind,
+      });
+    }
+    if (desktopCompletions.length > 0) setDesktopCompletions([]);
   }, [
     isDesktop,
     desktopActivityReady,
     activeSessionCount,
     activeSubagentCount,
     desktopUnreadSessionIds,
+    desktopCompletions,
     updateDesktopStatus,
   ]);
   const [copiedSessionField, setCopiedSessionField] = useState<SessionCopyField | null>(null);

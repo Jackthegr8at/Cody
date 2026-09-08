@@ -27,7 +27,11 @@ test("desktop activity stays wired to the titlebar and native shell", async () =
   assert.match(sidebar, /ready: runningStateReady/);
   assert.match(sidebar, /const completedSessionIds = \[\.\.\.previous\]\.filter\(\(id\) => !runningSessionIds\.has\(id\)\)/);
   assert.match(sidebar, /completedSessionIds\.forEach\(\(id\) => next\.add\(id\)\)/);
+  assert.match(sidebar, /completionId = `session:\$\{sessionId\}`/);
+  assert.match(sidebar, /completions: runningStateReady \? desktopCompletions : \[\]/);
   assert.doesNotMatch(sidebar, /completedInBackground/);
+  assert.match(appShell, /completed: true/);
+  assert.match(appShell, /completionKind: completion\.completionKind/);
   assert.match(desktopShell, /desktop_status_update/);
   assert.match(desktopShell, /updateDesktopStatus/);
 });

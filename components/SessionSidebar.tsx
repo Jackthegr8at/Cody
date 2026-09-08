@@ -37,10 +37,18 @@ declare global {
  */
 const ActiveEngineContext = createContext<ActiveEngineInfo | null>(null);
 
+export interface DesktopCompletion {
+  /** Stable for the lifetime of the engine session; never generated from time. */
+  completionId: string;
+  completionKind: "session" | "subagent";
+}
+
 export interface DesktopActivity {
   activeSessionCount: number;
   unreadSessionIds: string[];
   ready: boolean;
+  /** Terminal transitions observed since the last activity report. */
+  completions: DesktopCompletion[];
 }
 
 interface Props {
@@ -595,6 +603,10 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   // finished during those few milliseconds must keep its badge.
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => new Set());
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
+  // Completion events are queued until the activity report effect publishes
+  // them. This keeps the regular snapshot completed=false while ensuring a
+  // completion that lands before desktop hydration is not lost.
+  const [desktopCompletions, setDesktopCompletions] = useState<DesktopCompletion[]>([]);
   // Relative session times must age while the sidebar stays open; one shared
   // minute clock avoids a timer per session row.
   const [relativeTimeNow, setRelativeTimeNow] = useState(() => Date.now());
@@ -699,8 +711,10 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       activeSessionCount: runningStateReady ? runningSessionIds.size : 0,
       unreadSessionIds: runningStateReady ? [...unreadSessionIds] : [],
       ready: runningStateReady,
+      completions: runningStateReady ? desktopCompletions : [],
     });
-  }, [onDesktopActivityChange, runningSessionIds, unreadSessionIds, runningStateReady]);
+    if (runningStateReady && desktopCompletions.length > 0) setDesktopCompletions([]);
+  }, [onDesktopActivityChange, runningSessionIds, unreadSessionIds, runningStateReady, desktopCompletions]);
 
   useEffect(() => {
     // Live running status and session-list invalidations arrive via SSE; the
@@ -768,6 +782,20 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       });
     }
     if (completedSessionIds.length > 0) {
+      // The engine session id is the only stable identifier this cross-session
+      // stream exposes. Prefixing it with its kind prevents a future subagent
+      // id from colliding while remaining deterministic across reconnects.
+      setDesktopCompletions((previousCompletions) => {
+        const known = new Set(previousCompletions.map((completion) => completion.completionId));
+        const next = [...previousCompletions];
+        for (const sessionId of completedSessionIds) {
+          const completionId = `session:${sessionId}`;
+          if (known.has(completionId)) continue;
+          known.add(completionId);
+          next.push({ completionId, completionKind: "session" });
+        }
+        return next;
+      });
       loadSessions(false);
     }
 
