@@ -3660,7 +3660,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                             <button
                               className="dropdown-item"
                               key={`${group.id}:${opt.provider}:${opt.modelId}`}
-                              onClick={() => { if (!isActive || isAutoModelSelection) pickModel(opt.provider, opt.modelId); else setModelDropdownOpen(false); }}
+                              onClick={() => {
+                                // Re-picking the current model is a no-op unless a live
+                                // switch is still queued: then it is the cancel gesture.
+                                if (!isActive || isAutoModelSelection || modelSwitchPending) pickModel(opt.provider, opt.modelId);
+                                else setModelDropdownOpen(false);
+                              }}
                               style={{
                                 display: "flex", alignItems: "center", gap: 8,
                                 width: "100%", padding: "7px 12px",

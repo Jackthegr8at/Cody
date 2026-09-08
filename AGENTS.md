@@ -632,8 +632,9 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   `engine.shortName` (`chatInput.smartModelHint`,
   `.smartModelUnavailable`, `.thinkingAuto`, `.toolPresetCoreWarning*`,
   `.groupEngineBuiltin`, `agentSession.startingAgent`,
-  `.fallbackAppliedDetail`, `.fallbackSucceededDetail`,
-  `info.section.engine`). The sole intentional exception is the Smart model
+  `info.section.engine`; the fallback toasts no longer name the engine at
+  all, they name the JOB, see the model-switch marker note below). The sole
+  intentional exception is the Smart model
   label: it is exactly `Smart`, with no engine, role, or resolved-model
   suffix. `agentSession.startingAgent` fires on any slow first connect —
   i.e. exactly the Hermes/Codex cold start — which is why it said
