@@ -80,6 +80,12 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Smoke test the image
+        # The job runs in a container on the forge runner and `docker run -p`
+        # publishes on the HOST daemon, so the smoke container is reached via the
+        # host gateway, not 127.0.0.1. 2222 is the forge's own git+ssh port.
+        env:
+          SMOKE_HOST: host.docker.internal
+          SMOKE_SSH_PORT: 2322
         run: |
           set -euo pipefail
           fail() {
@@ -92,7 +98,7 @@ jobs:
           wait_ready() {
             last=000
             for _ in $(seq 1 30); do
-              last=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:30177/login || echo 000)
+              last=$(curl -s -o /dev/null -w '%{http_code}' http://${SMOKE_HOST}:30177/login || echo 000)
               if [ "$last" = "200" ]; then return 0; fi
               sleep 2
             done
@@ -106,36 +112,36 @@ jobs:
           # ------------------------------------------------------------------
           docker run -d --name cody-smoke -p 30177:30177 cody:smoke
           wait_ready
-          root=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:30177/ || echo 000)
+          root=$(curl -s -o /dev/null -w '%{http_code}' http://${SMOKE_HOST}:30177/ || echo 000)
           [ "$root" = "307" ] || fail "fresh install: GET / expected 307 to the setup screen, got $root"
-          location=$(curl -s -o /dev/null -w '%{redirect_url}' http://127.0.0.1:30177/ || echo '')
+          location=$(curl -s -o /dev/null -w '%{redirect_url}' http://${SMOKE_HOST}:30177/ || echo '')
           case "$location" in
             */login) ;;
             *) fail "fresh install: GET / redirected to '$location', expected /login" ;;
           esac
-          anon=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:30177/api/sessions || echo 000)
+          anon=$(curl -s -o /dev/null -w '%{http_code}' http://${SMOKE_HOST}:30177/api/sessions || echo 000)
           [ "$anon" = "401" ] || fail "fresh install: anonymous GET /api/sessions expected 401, got $anon"
-          state=$(curl -s http://127.0.0.1:30177/api/accounts/state || echo '')
+          state=$(curl -s http://${SMOKE_HOST}:30177/api/accounts/state || echo '')
           echo "$state" | grep -q '"firstRun":true' || fail "fresh install: /api/accounts/state did not report firstRun (got: $state)"
           signup=$(curl -s -o /tmp/signup-body -w '%{http_code}' -c /tmp/smoke-cookies \
             -H 'Content-Type: application/json' \
             -d '{"username":"smokeadmin","password":"smoke-test-password"}' \
-            http://127.0.0.1:30177/api/accounts/signup || echo 000)
+            http://${SMOKE_HOST}:30177/api/accounts/signup || echo 000)
           [ "$signup" = "201" ] || fail "fresh install: first-run signup expected 201, got $signup ($(cat /tmp/signup-body))"
           grep -q '"role":"admin"' /tmp/signup-body || fail "fresh install: first account is not an admin ($(cat /tmp/signup-body))"
-          authed=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/smoke-cookies http://127.0.0.1:30177/api/sessions || echo 000)
+          authed=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/smoke-cookies http://${SMOKE_HOST}:30177/api/sessions || echo 000)
           [ "$authed" = "200" ] || fail "fresh install: signed-in GET /api/sessions expected 200, got $authed"
 
           # The image ships no engine: onboarding installs it. This is the
           # critical path of a fresh install, so exercise it for real — the
           # picker's install route must fetch omp into the persistent tools
           # prefix and the binary must actually run there (Bun present, etc.).
-          engines=$(curl -s -b /tmp/smoke-cookies http://127.0.0.1:30177/api/engines || echo '')
+          engines=$(curl -s -b /tmp/smoke-cookies http://${SMOKE_HOST}:30177/api/engines || echo '')
           echo "$engines" | grep -q '"id":"omp"' || fail "fresh install: /api/engines did not list omp (got: $engines)"
           install=$(curl -s -o /tmp/install-body -w '%{http_code}' -b /tmp/smoke-cookies \
             -H 'Content-Type: application/json' -d '{"id":"omp"}' \
             --max-time 320 \
-            http://127.0.0.1:30177/api/engines/install || echo 000)
+            http://${SMOKE_HOST}:30177/api/engines/install || echo 000)
           [ "$install" = "200" ] || fail "fresh install: omp install expected 200, got $install ($(cat /tmp/install-body))"
           grep -q '"installed":true' /tmp/install-body || fail "fresh install: omp install did not report installed ($(cat /tmp/install-body))"
           docker exec cody-smoke /data/agent/tools/bin/omp --version \
@@ -150,7 +156,7 @@ jobs:
           hermes=$(curl -s -o /tmp/hermes-body -w '%{http_code}' -b /tmp/smoke-cookies \
             -H 'Content-Type: application/json' -d '{"id":"hermes"}' \
             --max-time 300 \
-            http://127.0.0.1:30177/api/engines/install || echo 000)
+            http://${SMOKE_HOST}:30177/api/engines/install || echo 000)
           [ "$hermes" = "200" ] || fail "uv install: hermes install expected 200, got $hermes ($(cat /tmp/hermes-body))"
           # Probed through the ACP entry point, never a bare --version: the ACP
           # server ships as an optional extra, and `hermes --version` reports a
@@ -175,7 +181,7 @@ jobs:
             code=$(curl -s -o /tmp/eng-body -w '%{http_code}' -b /tmp/smoke-cookies \
               -H 'Content-Type: application/json' -d "{\"id\":\"$engine\"}" \
               --max-time 420 \
-              http://127.0.0.1:30177/api/engines/install || echo 000)
+              http://${SMOKE_HOST}:30177/api/engines/install || echo 000)
             [ "$code" = "200" ] || fail "engine install: $engine expected 200, got $code ($(cat /tmp/eng-body))"
             grep -q '"installed":true' /tmp/eng-body \
               || fail "engine install: $engine did not report installed ($(cat /tmp/eng-body))"
@@ -209,7 +215,7 @@ jobs:
           hermes_rm=$(curl -s -o /tmp/hermes-rm -w '%{http_code}' -b /tmp/smoke-cookies \
             -X DELETE -H 'Content-Type: application/json' -d '{"id":"hermes"}' \
             --max-time 120 \
-            http://127.0.0.1:30177/api/engines/install || echo 000)
+            http://${SMOKE_HOST}:30177/api/engines/install || echo 000)
           [ "$hermes_rm" = "200" ] || fail "uv uninstall: expected 200, got $hermes_rm ($(cat /tmp/hermes-rm))"
           docker exec cody-smoke test ! -e /data/agent/tools/bin/hermes \
             || fail "uv uninstall: reported success but /data/agent/tools/bin/hermes is still installed"
@@ -232,7 +238,7 @@ jobs:
           shot=$(curl -s -o /tmp/shot-body -w '%{http_code}' -b /tmp/smoke-cookies \
             -H 'Content-Type: application/json' -d '{"url":"http://127.0.0.1:4655"}' \
             --max-time 90 \
-            http://127.0.0.1:30177/api/preview/screenshot || echo 000)
+            http://${SMOKE_HOST}:30177/api/preview/screenshot || echo 000)
           [ "$shot" = "200" ] || fail "screenshot support: capture expected 200, got $shot ($(head -c 300 /tmp/shot-body))"
           grep -q '"data":"iVBOR' /tmp/shot-body \
             || fail "screenshot support: capture returned no PNG payload ($(head -c 300 /tmp/shot-body))"
@@ -246,7 +252,7 @@ jobs:
           # when OMP's schema cannot be read, so a miss here is worth seeing in
           # the log but must not block a release.
           if curl -sf -b /tmp/smoke-cookies \
-               http://127.0.0.1:30177/api/omp-settings/schema \
+               http://${SMOKE_HOST}:30177/api/omp-settings/schema \
                | grep -q '"settings"'; then
             echo "omp settings schema served"
           else
@@ -261,16 +267,16 @@ jobs:
           # on), and CODY_SSH_PASSWORD must bring sshd up on its port with the
           # engine-first login profile installed.
           # ------------------------------------------------------------------
-          docker run -d --name cody-smoke -p 30177:30177 -p 2222:2222 \
+          docker run -d --name cody-smoke -p 30177:30177 -p ${SMOKE_SSH_PORT}:2222 \
             -e CODY_PASSWORD=smoke-test-password \
             -e CODY_SSH_PASSWORD=smoke-ssh-password cody:smoke
           wait_ready
-          basic=$(curl -s -o /dev/null -w '%{http_code}' -u cody:smoke-test-password http://127.0.0.1:30177/api/sessions || echo 000)
+          basic=$(curl -s -o /dev/null -w '%{http_code}' -u cody:smoke-test-password http://${SMOKE_HOST}:30177/api/sessions || echo 000)
           [ "$basic" = "200" ] || fail "password mode: GET /api/sessions with Basic Auth expected 200, got $basic"
-          banner=$(timeout 5 bash -c 'read -r line < /dev/tcp/127.0.0.1/2222; echo "$line"' || echo '')
+          banner=$(timeout 5 bash -c 'read -r line < /dev/tcp/${SMOKE_HOST}/${SMOKE_SSH_PORT}; echo "$line"' || echo '')
           case "$banner" in
             SSH-2.0*) ;;
-            *) fail "sshd did not answer on 2222 (banner: '$banner')" ;;
+            *) fail "sshd did not answer on ${SMOKE_SSH_PORT} (banner: '$banner')" ;;
           esac
           docker exec cody-smoke test -f /etc/profile.d/50-cody-engine.sh \
             || fail "engine-first SSH login profile is missing"
