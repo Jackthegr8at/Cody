@@ -39,6 +39,11 @@
   --safe-right: env(safe-area-inset-right, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
+  /* Grounds the iOS status-bar glyphs are legible on: white glyphs on the
+     dark one, dark glyphs on the light one (see .shell-topbar below). Fixed
+     on purpose — they answer to the SYSTEM appearance, not the theme. */
+  --status-strip-dark: #1E1E2E;
+  --status-strip-light: #EFF1F5;
 }
 
 /* Cody's default palette: Catppuccin Latte. Every pair below is verified for
@@ -1948,6 +1953,26 @@ html.dark .dropdown-surface :is(select, option) {
   padding-top: var(--safe-top);
   padding-left: var(--safe-left);
   padding-right: var(--safe-right);
+  background: var(--bg-panel);
+}
+/* iOS draws the status-bar glyphs in the colour of the SYSTEM appearance, not
+   the page's: `black-translucent` gives white glyphs under system dark mode
+   and dark glyphs under system light mode, and no meta tag changes that per
+   theme. When Cody's theme agrees with the system, the glyphs sit on the bar's
+   own --bg-panel and read fine. When they disagree (a light Cody theme on a
+   phone in dark mode, or the reverse) only the inset strip is repainted in a
+   ground the glyphs can be read on: a hard gradient stop at --safe-top keeps
+   the bar's controls on --bg-panel. The strip exists only in a standalone
+   install — a browser tab never puts glyphs over the page. */
+@media (display-mode: standalone) and (prefers-color-scheme: dark) {
+  html:not(.dark) .shell-topbar {
+    background: linear-gradient(to bottom, var(--status-strip-dark) var(--safe-top), var(--bg-panel) var(--safe-top));
+  }
+}
+@media (display-mode: standalone) and (prefers-color-scheme: light) {
+  html.dark .shell-topbar {
+    background: linear-gradient(to bottom, var(--status-strip-light) var(--safe-top), var(--bg-panel) var(--safe-top));
+  }
 }
 /* Compact icon-led top-toolbar buttons: consistent 28x28px invisible hit
    areas inside the 36px bar (40px on mobile within the 44px bar) — strong

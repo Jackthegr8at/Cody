@@ -1969,6 +1969,18 @@ palette (`components/CommandPalette.tsx`, ⌘K/Ctrl+K) is built on `cmdk`.
   bootstrap, `layout.tsx`'s themeColor pair and the manifest's `theme_color`
   all read it, and `lib/theme-catalog.test.mjs` reads `globals.css` and fails
   on drift. The manifest's `background_color` stays `--bg` (splash, not chrome).
+- **iOS colours the status-bar glyphs by the SYSTEM appearance, not the
+  page**: `black-translucent` means white glyphs under system dark mode and
+  dark glyphs under system light mode, fixed at launch, with no per-theme
+  variant. When Cody's theme mode disagrees with the system (a light theme on a
+  dark-mode phone or the reverse), `.shell-topbar` repaints ONLY the inset
+  strip with `--status-strip-dark`/`--status-strip-light` via a hard gradient
+  stop at `--safe-top` (`@media (display-mode: standalone) and
+  (prefers-color-scheme: …)`, `globals.css`); when they agree the strip is the
+  bar's own `--bg-panel` and seamless. That is why the top bar's background
+  lives in the stylesheet, not inline — an inline `background` would beat the
+  media rule. Headless Chromium cannot emulate `display-mode`, so verify the
+  rule with the clause removed and the gradient stop checked at `--safe-top`.
 
 ### Phone composer: one row, nothing wraps
 - Below 640px the controls row is `flex-wrap: nowrap`. Every fixed control is

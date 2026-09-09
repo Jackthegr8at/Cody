@@ -1299,7 +1299,7 @@ export function AppShell() {
       <main style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
         {/* Top bar: compact icon-led control bar. Touch gets a 44px bar for
             40px targets; fine pointers get a slim 32px bar for 28px buttons. */}
-        <div ref={topBarRef} className="shell-topbar" style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: isMobile || isCoarsePointer ? 44 : 32, background: "var(--bg-panel)" }}>
+        <div ref={topBarRef} className="shell-topbar" style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: isMobile || isCoarsePointer ? 44 : 32 }}>
         {/* Utility group: sidebar, theme, language */}
         <div style={{ display: "flex", alignItems: "center", gap: 4, height: "100%", paddingLeft: isMobile ? 4 : 8 }}>
           <button
