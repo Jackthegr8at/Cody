@@ -2,7 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Noto_Sans_Mono, Noto_Serif_SC, Source_Serif_4 } from "next/font/google";
 import { cookies } from "next/headers";
 import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/auth/session";
-import { getTheme, isThemeId } from "@/lib/theme-catalog";
+import { DEFAULT_DARK_THEME_ID, DEFAULT_THEME_ID, getTheme, isThemeId } from "@/lib/theme-catalog";
 import { themeBootstrapScript } from "@/lib/theme-bootstrap";
 import { LEGACY_STORAGE_KEYS, STORAGE_KEYS } from "@/lib/storage-keys";
 import "./globals.css";
@@ -57,10 +57,15 @@ export const metadata: Metadata = {
   description: "A self-hosted web workspace for coding agents.",
   manifest: "/manifest.webmanifest",
   // PWA-like behavior on iOS: standalone chrome, no telephone autodetect.
+  // "black-translucent" is what makes an installed Cody use the WHOLE screen:
+  // the web view extends under the status bar instead of being letterboxed by
+  // an opaque strip the app cannot colour. Every viewport-anchored top edge
+  // pays for it by padding `var(--safe-top)` (app/globals.css) — the top bar
+  // then paints --bg-panel behind the clock and puts its controls below it.
   appleWebApp: {
     capable: true,
     title: "Cody",
-    statusBarStyle: "default",
+    statusBarStyle: "black-translucent",
   },
   formatDetection: {
     telephone: false,
@@ -68,8 +73,10 @@ export const metadata: Metadata = {
 };
 
 // theme-color adapts to light/dark so the browser chrome / iOS status bar
-// matches the active theme. `viewportFit: cover` lets us honor safe-area-inset
-// (used by DirectoryPicker footer) on notched devices.
+// matches the active theme. It is the theme's --bg-panel, not its --bg: the
+// chrome sits against the TOP BAR, and a --bg-coloured status bar read as a
+// band above it. `viewportFit: cover` exposes the real insets to the
+// `--safe-*` variables every edge pads with.
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
@@ -77,8 +84,8 @@ export const viewport: Viewport = {
   // Light/dark pair so first paint matches before the theme bootstrap script
   // rewrites the meta tag; an installed window reads the manifest instead.
   themeColor: [
-    { media: "(prefers-color-scheme: dark)", color: "#1E1E2E" },
-    { media: "(prefers-color-scheme: light)", color: "#EFF1F5" },
+    { media: "(prefers-color-scheme: dark)", color: getTheme(DEFAULT_DARK_THEME_ID).preview.surface },
+    { media: "(prefers-color-scheme: light)", color: getTheme(DEFAULT_THEME_ID).preview.surface },
   ],
 };
 

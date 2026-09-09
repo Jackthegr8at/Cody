@@ -1412,7 +1412,16 @@ export function AppShell() {
             if (contextUsage?.contextWindow) {
               const pct = contextUsage.percent;
               if (pct !== null) ctxColor = usageToneColor(pct);
-              ctxStr = pct !== null ? `${formatPercent(pct)} / ${formatCompactNumber(contextUsage.contextWindow)}` : `? / ${formatCompactNumber(contextUsage.contextWindow)}`;
+              // A phone's top bar has room for a percentage, not a percentage
+              // AND a window size: `31.2% / 1.0M` ran into the workspace toggle
+              // and ellipsised mid-number, so what was left read as neither.
+              // The window, the cost and the precise figure are one tap away in
+              // the session popover (and in this button's own tooltip).
+              ctxStr = pct === null
+                ? (isMobile ? "?" : `? / ${formatCompactNumber(contextUsage.contextWindow)}`)
+                : isMobile
+                  ? `${Math.round(pct)}%`
+                  : `${formatPercent(pct)} / ${formatCompactNumber(contextUsage.contextWindow)}`;
             }
 
             const tooltipParts: string[] = [];
@@ -1456,6 +1465,12 @@ export function AppShell() {
                   // cover the session-stats button entirely.
                   paddingRight: isMobile ? (rightPanelOpen ? 0 : 44) : rightPanelOpen ? 12 : 48,
                   height: "100%",
+                  // Shrink, never spill: without this the readout is sized by
+                  // its text and the bar simply runs off the right edge. Every
+                  // child truncates on its own, so the last figure to survive
+                  // ellipsises instead of being cut mid-glyph. The mobile floor
+                  // is the tap target, well below any width the text needs.
+                  flex: "0 1 auto",
                   minWidth: isMobile ? 44 : 0,
                   overflow: "hidden",
                   background: activeTopPanel === "session" ? "var(--bg-selected)" : "none",
@@ -1479,8 +1494,11 @@ export function AppShell() {
                     <circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" />
                   </svg>
                 )}
+                {/* Token counts are already compact ("34k"); they hold their
+                    width so a narrow bar spends its shrink on the two figures
+                    below, which know how to ellipsise. */}
                 {!isMobile && tok && tok.input > 0 && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  <span style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
                     <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
                       <line x1="5" y1="8.5" x2="5" y2="1.5" /><polyline points="2 4 5 1.5 8 4" />
                     </svg>
@@ -1488,7 +1506,7 @@ export function AppShell() {
                   </span>
                 )}
                 {!isMobile && tok && tok.output > 0 && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  <span style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
                     <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
                       <line x1="5" y1="1.5" x2="5" y2="8.5" /><polyline points="2 6 5 8.5 8 6" />
                     </svg>
@@ -1496,24 +1514,28 @@ export function AppShell() {
                   </span>
                 )}
                 {!isMobile && tok && tok.cacheRead > 0 && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  <span style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
                     <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M8.5 5a3.5 3.5 0 1 1-1-2.45" /><polyline points="6.5 1.5 8.5 2.5 7.5 4.5" />
                     </svg>
                     {formatCompactNumber(tok.cacheRead)}
                   </span>
                 )}
+                {/* The last two figures are the ones that meet the right edge,
+                    so each carries its own ellipsis. `text-overflow` needs a
+                    text block to act on: on the flex row itself the label is an
+                    anonymous item and gets hard-clipped mid-glyph instead. */}
                 {!isMobile && costStr && (
-                  <span style={{ display: "flex", alignItems: "center", color: costPartial || costUnpriced ? "var(--text-muted)" : "var(--text)", fontWeight: 500 }}>
-                    {costStr}
+                  <span style={{ display: "flex", alignItems: "center", minWidth: 0, overflow: "hidden", color: costPartial || costUnpriced ? "var(--text-muted)" : "var(--text)", fontWeight: 500 }}>
+                    <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{costStr}</span>
                   </span>
                 )}
                 {ctxStr && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4, color: ctxColor, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
+                  <span style={{ display: "flex", alignItems: "center", gap: 4, color: ctxColor, minWidth: 0, overflow: "hidden", whiteSpace: "nowrap" }}>
+                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
                       <path d="M1 9 L1 5 Q1 1 5 1 Q9 1 9 5 L9 9" /><line x1="1" y1="9" x2="9" y2="9" />
                     </svg>
-                    {ctxStr}
+                    <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{ctxStr}</span>
                   </span>
                 )}
               </button>
@@ -1529,7 +1551,11 @@ export function AppShell() {
               top: topPanelPos.top,
               left: topPanelPos.left,
               width: topPanelPos.width,
-              maxHeight: `calc(100dvh - ${topPanelPos.top}px)`,
+              // `top` already follows the top bar down past the status-bar
+              // inset (the bar is measured, not assumed); the bottom inset has
+              // to come off the height so the last row is not under the home
+              // indicator on a standalone install.
+              maxHeight: `calc(100dvh - ${topPanelPos.top}px - var(--safe-bottom))`,
               // Scroll (not clip) when the window is too narrow for the stat
               // columns — usage/cost must never be cut off.
               overflow: "auto",
@@ -2213,7 +2239,7 @@ export function AppShell() {
         // Safe-area insets keep the toggle tappable on notched/rounded
         // tablets in landscape (viewportFit: cover exposes those corners).
         // In the desktop shell the viewport starts under the 36px titlebar.
-        position: "fixed", top: isDesktop ? "calc(env(safe-area-inset-top, 0px) + 36px)" : "env(safe-area-inset-top, 0px)", right: "env(safe-area-inset-right, 0px)", zIndex: 300,
+        position: "fixed", top: isDesktop ? "calc(var(--safe-top) + 36px)" : "var(--safe-top)", right: "var(--safe-right)", zIndex: 300,
         display: "flex", alignItems: "center", justifyContent: "center",
         // Closed, with a minimap below (non-mobile): match the minimap's 36px
         // width so this button's left border continues the minimap's own

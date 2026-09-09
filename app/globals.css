@@ -26,6 +26,21 @@
   --font-serif-display: var(--font-serif);
 }
 
+/* Safe-area insets, named once and consumed everywhere. Cody draws under the
+   iOS status bar and home indicator in a standalone install
+   (`appleWebApp.statusBarStyle: "black-translucent"` + `viewportFit: cover`),
+   so every viewport-anchored edge has to pad itself back out. Going through
+   variables rather than repeating `env()` gives one definition to change, and
+   one thing to override when verifying the padding in a browser that reports
+   no insets at all. A padded parent owns the inset for its subtree: a child
+   inside it must never add the same inset again. */
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+}
+
 /* Cody's default palette: Catppuccin Latte. Every pair below is verified for
    WCAG AA body text (--text on --bg >= 4.5:1); muted and dim tiers clear 3:1
    against the surfaces they sit on. */
@@ -1921,6 +1936,19 @@ html.dark .dropdown-surface :is(select, option) {
   background: var(--bg-panel);
   color: var(--text-muted);
 }
+/* The top bar is the app's top viewport edge, so in a standalone install it is
+   what sits under the iOS status bar — it paints --bg-panel up there and pads
+   its controls back down below the clock. content-box keeps the inline 44/32px
+   CONTROL height meaning exactly that, so children sized `height: 100%` still
+   measure the row rather than the row plus the notch, and every fixed panel
+   anchored to this bar's measured bottom (the top-panel dropdown, the branch
+   panel) follows it down for free. */
+.shell-topbar {
+  box-sizing: content-box;
+  padding-top: var(--safe-top);
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
+}
 /* Compact icon-led top-toolbar buttons: consistent 28x28px invisible hit
    areas inside the 36px bar (40px on mobile within the 44px bar) — strong
    default contrast, restrained hover, visible pressed/disabled states. */
@@ -2169,6 +2197,9 @@ html.dark .dropdown-surface :is(select, option) {
   .chat-stats-center {
     display: none !important;
   }
+  /* A full-height fixed overlay: it owns every edge it touches, so it carries
+     the insets itself and its content (which has no fixed chrome of its own)
+     stays clear of the status bar and the home indicator. */
   .sidebar-container {
     position: fixed !important;
     top: 0;
@@ -2176,6 +2207,9 @@ html.dark .dropdown-surface :is(select, option) {
     bottom: 0;
     width: 280px;
     max-width: 85vw;
+    padding-top: var(--safe-top);
+    padding-bottom: var(--safe-bottom);
+    padding-left: var(--safe-left);
     transition: transform var(--dur-slow) var(--ease-out-warm), box-shadow var(--dur-slow) var(--ease-out-warm);
   }
   .sidebar-container.sidebar-open {
@@ -2212,7 +2246,7 @@ html.dark .dropdown-surface :is(select, option) {
   }
   .directory-picker-footer {
     flex-wrap: wrap;
-    padding-bottom: max(10px, env(safe-area-inset-bottom)) !important;
+    padding-bottom: max(10px, var(--safe-bottom)) !important;
   }
 }
 
@@ -2240,7 +2274,7 @@ html.dark .dropdown-surface :is(select, option) {
   align-items: center;
   min-height: 25px;
   border-top: 1px solid var(--border);
-  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-bottom: var(--safe-bottom);
   background: var(--bg-panel);
 }
 .terminal-tabs {
@@ -2388,7 +2422,7 @@ html.dark .dropdown-surface :is(select, option) {
   display: flex;
   flex-shrink: 0;
   gap: 4px;
-  padding: 5px max(6px, env(safe-area-inset-right)) 5px max(6px, env(safe-area-inset-left));
+  padding: 5px max(6px, var(--safe-right)) 5px max(6px, var(--safe-left));
   overflow-x: auto;
   border-top: 1px solid var(--border);
   background: var(--bg-panel);
@@ -2475,6 +2509,22 @@ html.dark .dropdown-surface :is(select, option) {
 .settings-mobile-stack,
 .settings-mobile-level {
   overscroll-behavior: contain;
+}
+/* Every phone Settings level (the stack's own headers and a pushed Drawer's)
+   wears the same 48px bar. It is the sheet's top viewport edge, so it carries
+   the status-bar inset; content-box keeps 48px meaning the CONTROL row. Only
+   one level's header is ever on screen, so the inset is applied once. */
+.settings-level-header {
+  box-sizing: content-box;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 48px;
+  min-height: 48px;
+  padding: var(--safe-top) max(2px, var(--safe-right)) 0 max(2px, var(--safe-left));
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  flex-shrink: 0;
 }
 /* The phone sheet slides up from the bottom edge (the desktop dialog keeps
    dialog-pop-in). Keyframes carry the final transform because an animation
@@ -2580,7 +2630,11 @@ html.dark .dropdown-surface :is(select, option) {
   min-height: 100dvh;
   display: grid;
   place-items: center;
-  padding: 24px 16px;
+  /* Own page, own viewport edges: the card must clear the status bar and the
+     home indicator on a standalone install just like the app shell does. */
+  padding:
+    calc(24px + var(--safe-top)) calc(16px + var(--safe-right))
+    calc(24px + var(--safe-bottom)) calc(16px + var(--safe-left));
   background:
     radial-gradient(1100px 520px at 50% -12%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 70%),
     var(--bg);

@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, Clock, ListChecks, Loader2, Paperclip, Pin, Search, ShieldCheck, SlidersHorizontal, Sparkles, Target, TriangleAlert, Zap } from "lucide-react";
+import { ChevronDown, Clock, ListChecks, Loader2, Paperclip, Pin, Search, ShieldCheck, SlidersHorizontal, Sparkles, Target, TriangleAlert, Zap, ZapOff } from "lucide-react";
 import type { SessionModeOption } from "@/hooks/useAgentSession";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import { ALL_CAPABILITIES, OMP_ENGINE_ID, type ActiveEngineInfo, type EngineCapabilities } from "./SettingsTabs";
@@ -2795,7 +2795,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       style={{
         flexShrink: 0,
         background: "transparent",
-         padding: "0 16px calc(8px + env(safe-area-inset-bottom))",
+        // The composer is the app's bottom viewport edge wherever it renders,
+        // so it is the one element that adds the home-indicator inset. Its
+        // 16px sides ARE the chat column's gutter — callers must not wrap it in
+        // a second one (see ChatWindow's docks).
+        padding: "0 16px calc(8px + var(--safe-bottom))",
         paddingRight: isMobile ? 16 : 52, // desktop: 16px base + 36px for ChatMinimap alignment
       }}
     >
@@ -3422,11 +3426,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           />
 
           {/* Toolbar: attachment · model · settings · reasoning · fast · context ring · send/stop */}
-          {/* On a phone this row used to wrap into three ~28px lines that ate
-              a quarter of the screen and still left every button smaller than
-              a thumb reliably hits. It stays one row of 38px targets instead:
-              the controls an icon can speak for drop their labels, and the
-              model — the one label worth reading — absorbs what that frees. */}
+          {/* On a phone this row used to wrap: Stop and the context ring fell
+              to a second line and spilled out of the card. It is now a single
+              nowrap row of 38px targets — every fixed control keeps its size,
+              and the model selector is the ONLY thing that shrinks, ellipsising
+              its name. Widths at 390px CSS: 332px of content box, minus attach
+              38 + reasoning 38 + Fast 38 + ring 38 + Send 38 and five 4px gaps,
+              leaves ~116px for the model name; an ACP mode button and an
+              auto-switch marker can take that lower, and it still cannot spill.
+              A wide toolbar keeps wrapping — it never needed to. */}
           <div style={{
             display: "flex",
             alignItems: "center",
@@ -3434,7 +3442,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             marginTop: 8,
             paddingTop: 8,
             borderTop: "1px solid color-mix(in srgb, var(--border) 62%, transparent)",
-            flexWrap: "wrap",
+            flexWrap: isMobile ? "nowrap" : "wrap",
             rowGap: 4,
           }}>
             {/* Attachment */}
@@ -3488,6 +3496,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     // rather than the fixed cap a wide toolbar can afford.
                     width: isMobile ? "100%" : undefined,
                     maxWidth: isMobile ? "100%" : 190,
+                    // Without this the button's own icons (provider mark,
+                    // Smart sparkle, chevron) set a min-content floor that a
+                    // crowded phone row cannot honour, and the row overflows
+                    // by exactly that much. It clips itself instead.
+                    minWidth: 0,
                     padding: "0 8px",
                     overflow: "hidden",
                     background: modelDropdownOpen ? "var(--bg-hover)" : "none",
@@ -3566,9 +3579,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 {modelDropdownOpen && modelDropdownRect && (() => {
                   const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
                   const bottom = viewportHeight - modelDropdownRect.top + 6;
-                  const maxH = Math.max(120, Math.min(modelDropdownRect.top - 8, viewportHeight * 0.6));
+                  // These panels grow UPWARD from the composer, so the status
+                  // bar is the edge they run into on a standalone install.
+                  const maxH = `max(120px, calc(${Math.min(modelDropdownRect.top - 8, viewportHeight * 0.6)}px - var(--safe-top)))`;
                   const panelPos: React.CSSProperties = isMobile
-                    ? { left: 8, right: 8, maxWidth: "calc(100vw - 16px)" }
+                    ? { left: "max(8px, var(--safe-left))", right: "max(8px, var(--safe-right))" }
                     : { left: modelDropdownRect.left, width: "max-content", minWidth: modelDropdownRect.width, maxWidth: "calc(100vw - 16px)" };
                   return (
                     <div ref={modelDropdownPanelRef} className="dropdown-surface" style={{
@@ -3798,9 +3813,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     // Same reason as the tool-preset panel above.
                     position: "fixed",
                     bottom: (window.visualViewport?.height ?? window.innerHeight) - thinkingAnchorTop + 6,
-                    left: 8, right: 8,
+                    left: "max(8px, var(--safe-left))", right: "max(8px, var(--safe-right))",
                     zIndex: 500,
-                    maxHeight: Math.max(120, thinkingAnchorTop - 8), overflowY: "auto",
+                    // Grows upward: the status-bar inset is its ceiling.
+                    maxHeight: `max(120px, calc(${thinkingAnchorTop - 8}px - var(--safe-top)))`, overflowY: "auto",
                   } : {
                     position: "absolute", bottom: "calc(100% + 6px)", left: 0,
                     zIndex: 100, minWidth: 250, maxWidth: "calc(100vw - 32px)",
@@ -3886,6 +3902,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         ? t("chatInput.fastModeCheckingHint")
                         : t("chatInput.fastModeOffHint");
               const isWarning = fastState === "inactive" || fastState === "unavailable";
+              // On a phone the label is the difference between one row and two,
+              // so it goes and the glyph carries the state the words carried:
+              // accent-on-hover-fill for a live request, a warning triangle for
+              // inactive/unavailable, a struck bolt for a Fast that is simply
+              // off, a plain bolt for support nobody has confirmed, and a
+              // spinner while that is being checked. The full sentence stays in
+              // `title` and `aria-label`.
+              const FastIcon = isWarning ? TriangleAlert : fastState === "off" ? ZapOff : Zap;
               return (
                 <button
                   type="button"
@@ -3910,7 +3934,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   aria-pressed={Boolean(fastModeEnabled)}
                   style={{
                     display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4,
-                    height: isMobile ? 38 : 28, padding: isMobile ? "0 9px" : "0 7px",
+                    height: isMobile ? 38 : 28,
+                    width: isMobile ? 38 : undefined,
+                    padding: isMobile ? 0 : "0 7px",
                     background: fastState === "requested" ? "var(--bg-hover)" : "none",
                     border: "none", borderRadius: 7,
                     color: fastState === "requested" ? "var(--accent)" : isWarning ? "var(--status-warning)" : "var(--text-muted)",
@@ -3919,10 +3945,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
                   }}
                 >
-                  {isWarning
-                    ? <TriangleAlert size={isMobile ? 16 : 14} strokeWidth={2} aria-hidden="true" />
-                    : <Zap size={isMobile ? 16 : 14} strokeWidth={2} aria-hidden="true" />}
-                  <span style={{ whiteSpace: "nowrap", fontSize: 11, fontWeight: fastState === "requested" ? 600 : 500 }}>{fastLabel}</span>
+                  {fastState === "checking"
+                    ? <Loader2 size={isMobile ? 16 : 14} strokeWidth={2} aria-hidden="true" style={{ animation: "spin 0.8s linear infinite" }} />
+                    : <FastIcon size={isMobile ? 16 : 14} strokeWidth={2} aria-hidden="true" />}
+                  {!isMobile && <span style={{ whiteSpace: "nowrap", fontSize: 11, fontWeight: fastState === "requested" ? 600 : 500 }}>{fastLabel}</span>}
                 </button>
               );
             })()}
@@ -3977,9 +4003,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     // Same reason as the tool-preset panel above.
                     position: "fixed",
                     bottom: (window.visualViewport?.height ?? window.innerHeight) - modeAnchorTop + 6,
-                    left: 8, right: 8,
+                    left: "max(8px, var(--safe-left))", right: "max(8px, var(--safe-right))",
                     zIndex: 500,
-                    maxHeight: Math.max(120, modeAnchorTop - 8), overflowY: "auto",
+                    // Grows upward: the status-bar inset is its ceiling.
+                    maxHeight: `max(120px, calc(${modeAnchorTop - 8}px - var(--safe-top)))`, overflowY: "auto",
                   } : {
                     position: "absolute", bottom: "calc(100% + 6px)", left: 0,
                     zIndex: 100, minWidth: 250, maxWidth: "calc(100vw - 32px)",
@@ -4039,8 +4066,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 ref={contextPopoverRef}
                 // marginRight doubles the visual space between the gauge and
                 // the Send/Stop button (owner request); the toolbar's own gap
-                // supplies the other half.
-                style={{ position: "relative", width: 28, height: 28, flexShrink: 0, marginRight: 4 }}
+                // supplies the other half. The 26px arc keeps its size on a
+                // phone; only the box around it grows to the row's 38px target,
+                // so the gauge is as tappable as the buttons beside it.
+                style={{ position: "relative", width: isMobile ? 38 : 28, height: isMobile ? 38 : 28, flexShrink: 0, marginRight: 4 }}
               >
                 <button
                   type="button"
@@ -4055,8 +4084,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   }}
                   style={{
                     position: "relative",
-                    width: 28,
-                    height: 28,
+                    width: isMobile ? 38 : 28,
+                    height: isMobile ? 38 : 28,
                     padding: 0,
                     display: "inline-flex",
                     alignItems: "center",

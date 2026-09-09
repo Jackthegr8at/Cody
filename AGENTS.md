@@ -1934,6 +1934,7 @@ type:   --font-serif (display headings, class .display-serif)  --font-mono
 shape:  --radius-control (8) --radius-card (12) --radius-modal (16)
 depth:  --shadow-card --shadow-pop --shadow-modal
 motion: --dur-fast (150ms) --dur-med (220ms) --dur-slow (320ms) --ease-out-warm
+edges:  --safe-top --safe-right --safe-bottom --safe-left
 ```
 
 `components/ui/` holds the shared primitives (built on `@base-ui/react`):
@@ -1941,6 +1942,45 @@ motion: --dur-fast (150ms) --dur-med (220ms) --dur-slow (320ms) --ease-out-warm
 ConfirmDialog), `toast.tsx` (`toast.success/error/info`, mounted in AppShell).
 Icons come from `lucide-react` — do not add new inline SVGs. The command
 palette (`components/CommandPalette.tsx`, ⌘K/Ctrl+K) is built on `cmdk`.
+
+### Standalone immersion and the safe-area variables
+- An installed Cody uses the WHOLE screen: `appleWebApp.statusBarStyle` is
+  `"black-translucent"` and the viewport is `viewportFit: cover`, so the web
+  view extends under the iOS status bar and home indicator.
+- The price is that **every viewport-anchored edge pads itself back out**, and
+  it does so through the `--safe-*` variables defined once on `:root`
+  (`env(safe-area-inset-*, 0px)`) — never by writing `env()` at the call site.
+  One definition means one thing to override when verifying the plumbing in a
+  browser that reports no insets (`:root{--safe-top:47px}` in a test
+  stylesheet reproduces a notch exactly).
+- Consumers: `.shell-topbar` (content-box, so its inline 44/32px stays the
+  CONTROL height), the mobile `.sidebar-container`, `.settings-level-header`
+  (shared by MobileStack's levels and a pushed Drawer), `.login-page`, the
+  toast viewport, the workspace-panel toggle, ChatInput's fixed dropdowns and
+  its bottom padding, the terminal toolbar and soft keys.
+- **A padded parent owns the inset for its subtree.** Panels anchored to a
+  measured rect (the top-panel dropdown, BranchNavigator) inherit the offset
+  for free and must not add it again; the composer is the only element that
+  adds the bottom inset, so ChatWindow's docks contribute plain `8px`.
+- **theme-color is the theme's `--bg-panel`, not its `--bg`** — the browser and
+  OS chrome touch the TOP BAR, and a `--bg`-coloured status bar read as a band
+  above it. `preview.surface` in `lib/theme-catalog.ts` IS each theme's
+  `--bg-panel` (and `preview.background` its `--bg`); `useTheme`, the pre-paint
+  bootstrap, `layout.tsx`'s themeColor pair and the manifest's `theme_color`
+  all read it, and `lib/theme-catalog.test.mjs` reads `globals.css` and fails
+  on drift. The manifest's `background_color` stays `--bg` (splash, not chrome).
+
+### Phone composer: one row, nothing wraps
+- Below 640px the controls row is `flex-wrap: nowrap`. Every fixed control is
+  38px and `flex-shrink: 0` (attach, reasoning, Fast, agent mode, the quota
+  ring's box, Send/Stop); the model selector is the ONLY item that shrinks and
+  it ellipsises. At 390px that leaves ~114px for the model name.
+- Controls an icon can speak for drop their labels there — Fast included: its
+  glyph carries the state the words did (accent + filled bg = requested,
+  `TriangleAlert` = inactive/unavailable, `ZapOff` = off, `Zap` = unverified,
+  spinner = checking), and the full sentence stays in `title`/`aria-label`.
+- ChatInput's own 16px sides ARE the chat column's gutter. Neither dock may
+  wrap it in a second one.
 
 <!-- BEGIN:nextjs-agent-rules -->
 
