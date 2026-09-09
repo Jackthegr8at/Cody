@@ -347,7 +347,7 @@ jobs:
               notes=$(jq -r '.message // empty' <<<"$tag_json")
             else
               commit_json=$(curl -fsS "${auth[@]}" "$FORGE_API/repos/$REPOSITORY/git/commits/$sha")
-              notes=$(jq -r '.message // empty' <<<"$commit_json" | sed '1,2d')
+              notes=$(jq -r '.message // .commit.message // empty' <<<"$commit_json" | sed '1,2d')
             fi
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
