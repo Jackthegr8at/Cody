@@ -363,11 +363,34 @@ jobs:
             echo SHIPLOG_EOF
           } >> "$GITHUB_OUTPUT"
 
+      # Gitea answers softprops/action-gh-release@v2's create call with HTTP
+      # 405 (it speaks GitHub's release endpoint), which failed every release
+      # job while the image itself published fine. Cut the release against the
+      # Forge's own API instead: POST creates the tag from target_commitish
+      # when the tag does not exist yet, and a re-run PATCHes the existing
+      # release rather than erroring.
       - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          token: ${{ secrets.FORGE_REGISTRY_TOKEN }}
-          tag_name: ${{ steps.rel.outputs.tag }}
-          name: Cody ${{ steps.rel.outputs.tag }}
-          body: ${{ steps.rel.outputs.body }}
-          generate_release_notes: true
+        env:
+          FORGE_API: https://git.nateshome.net/api/v1
+          FORGE_TOKEN: ${{ secrets.FORGE_REGISTRY_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ steps.rel.outputs.tag }}
+          BODY: ${{ steps.rel.outputs.body }}
+        run: |
+          set -euo pipefail
+          auth=(-H "Authorization: token $FORGE_TOKEN" -H 'Content-Type: application/json' -H 'Accept: application/json')
+          payload=$(jq -n \
+            --arg tag "$TAG" \
+            --arg target "$GITHUB_SHA" \
+            --arg name "Cody $TAG" \
+            --arg body "$BODY" \
+            '{tag_name:$tag, target_commitish:$target, name:$name, body:$body, draft:false, prerelease:false}')
+          existing=$(curl -sS "${auth[@]}" "$FORGE_API/repos/$REPOSITORY/releases/tags/$TAG" || echo '{}')
+          id=$(jq -r '.id // empty' <<<"$existing")
+          if [ -n "$id" ]; then
+            curl -fsS -X PATCH "${auth[@]}" -d "$payload" "$FORGE_API/repos/$REPOSITORY/releases/$id" >/dev/null
+            echo "updated release $TAG"
+          else
+            curl -fsS -X POST "${auth[@]}" -d "$payload" "$FORGE_API/repos/$REPOSITORY/releases" >/dev/null
+            echo "created release $TAG"
+          fi
