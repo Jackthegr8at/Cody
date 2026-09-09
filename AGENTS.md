@@ -137,7 +137,8 @@ app/api/
                                    it dispatches on HarnessAdapter.settings and
                                    refuses `unsupported` when an engine has none —
                                    never on an engine id (omp/Hermes/pi today)
-  mcp/route.ts                    GET/POST/PUT/DELETE project MCP servers
+  mcp/route.ts                    GET/POST/PUT/DELETE MCP servers in either
+                                   scope (`scope: "project"` default, `"user"`)
   memory/route.ts                 GET the active engine's persistent memory, read-only
                                    (400 `unsupported` unless capabilities.memory)
   provider-keys/route.ts          GET the provider-key catalogue for the active
@@ -344,7 +345,8 @@ components/
                       custom endpoint — the old tree-and-detail dialog that used
                       to live here is gone, its registry/roles/composer-picker
                       views having moved to the Models and Providers hubs
-  McpConfig.tsx       project MCP server editor (Settings › Extensions › MCP)
+  McpConfig.tsx       MCP server editor (Settings › Extensions › MCP), scoped
+                      to this project's mcp.json or the user-level one
   MemoryPanel.tsx     Settings › Memory: the engine's own memory documents,
                       read-only, each with its path (capability-gated)
   PluginsConfig.tsx   embedded under Settings › Extensions › Plugins; opens
@@ -1736,14 +1738,39 @@ handled or safely ignored.
   non-git dirs). Server definitions support `stdio`, `http`, and `sse`;
   exactly one of `command`/`url` is required and validated before any write.
 - Writes are atomic (temp file + rename), preserve unrelated top-level keys
-  (`disabledServers`, `$schema`, ...), and support rename via `previousName`.
-- The MCP settings live under Settings › Extensions › MCP (workspace-gated).
-  Server list rows
+  (`disabledServers`, `enabledServers`, `$schema`, ...), and support rename via
+  `previousName`.
+- **Both writable scopes go through one target.** `writeMcpServer(target, …)`
+  and `deleteMcpServer(target, …)` take `{scope: "user" | "project", cwd?}`:
+  `"project"` resolves `cwd` as above and REQUIRES it, `"user"` is
+  `getUserMcpPath()` (`<agent dir>/mcp.json`) and ignores it. Same cross-process
+  lockfile mutex, same atomic rename for both. `/api/mcp` POST/DELETE default to
+  `scope: "project"`, so a caller written before user scope existed is unchanged.
+- **A user-level secret never reaches the browser** (`lib/mcp-secrets.ts`, a
+  pure module because `components/` may not import `lib/omp/*`). GET serves the
+  user config with every `headers`/`env` value replaced by
+  `MCP_SECRET_SENTINEL`; `writeMcpServer` merges each sentinel back from the
+  same locked snapshot it writes, and REFUSES the write when nothing is stored
+  for that key — a save can never blank a credential the form did not show. The
+  editor renders the sentinel as `••••••••` and swaps it back on submit. Project
+  configs are served raw: that file lives in the repo the user can already read.
+- **Enable/disable is the user file's `disabledServers`**, not the server's own
+  `enabled` flag: omp reads that denylist from the USER path only and it always
+  wins (`src/mcp/config.ts`). `setUserServerDisabled(name, disabled)` owns it —
+  the key is dropped when the list empties, a rename carries the entry, and a
+  delete removes it (otherwise the name keeps a ghost row and silently
+  suppresses a future server). Reached over PUT `{action, scope:"user", name}`;
+  PUT without `action` is still the validate-only check.
+- The MCP settings live under Settings › Extensions › MCP. A `SegmentedControl`
+  picks the scope ("This project" / "All sessions"); only the project scope is
+  workspace-gated, because a user-level server is exactly what is configurable
+  without a project. Server list rows
   show a config-derived status dot
   (valid+enabled / disabled / invalid) — no live-connectivity probe exists in
   the RPC protocol, so failures surface as toasts (`toast.error`) from the
   editor actions, not inline text.
-- The endpoint is guarded by the same allowed-root rules as `/api/files`.
+- The endpoint is guarded by the same allowed-root rules as `/api/files` — for
+  the project scope. A user-scope call carries no cwd and is not root-checked.
 
 ### Plugins and skills
 - `/api/plugins` shells out to the user's `omp plugin` CLI (`list/install/uninstall/enable/disable/upgrade`, `--json` where available) — never the Bun-only SDK. `lib/omp/plugin-cli.ts` holds the shared `execFile`/loose-JSON-parse helpers (`runOmpCli`, `parseJsonLoose`), used by both `/api/plugins` and `/api/plugins/marketplace`.

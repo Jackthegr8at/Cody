@@ -3,6 +3,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, 
 import { homedir } from "os";
 import { basename, dirname, join, relative, resolve, sep } from "path";
 import { stripAnsi } from "../ansi";
+import { mergeMcpSecrets } from "../mcp-secrets";
 import { getAgentDir } from "./paths";
 import { isRecord } from "../type-guards";
 
@@ -13,6 +14,11 @@ const MCP_FILENAMES = [join(".omp", "mcp.json"), join(".omp", ".mcp.json"), "mcp
 
 export type McpServer = Record<string, unknown>;
 export type McpFile = Record<string, unknown> & { mcpServers?: Record<string, McpServer> };
+/** Which of omp's two writable configs an edit targets: `<agent dir>/mcp.json`
+ * (every session) or the workspace's own `mcp.json` (this project only). */
+export type McpScope = "user" | "project";
+/** `scope: "project"` requires `cwd`; `scope: "user"` ignores it. */
+export type McpTarget = { scope: McpScope; cwd?: string };
 export type McpUserConfig = {
   path: string;
   servers: Array<{ name: string; config: McpServer }>;
@@ -48,10 +54,17 @@ function readMcpUserConfig(path: string): McpUserConfig {
   }
 }
 
+/** omp's user-level MCP config — the one every session loads, wherever the
+ * agent dir happens to be (a containerised install relocates it, so
+ * `~/.omp/mcp.json` is read by nothing). */
+export function getUserMcpPath(): string {
+  return join(getAgentDir(), "mcp.json");
+}
+
 /** OMP's active user-level server configuration. This is deliberately separate
  * from compatibility providers such as Claude Code, which do not describe the
  * MCP connections owned by OMP. */
-export function readUserMcpConfig(path = join(getAgentDir(), "mcp.json")): McpUserConfig {
+export function readUserMcpConfig(path = getUserMcpPath()): McpUserConfig {
   return readMcpUserConfig(path);
 }
 
@@ -187,19 +200,32 @@ export function resolveMcpConfig(cwd: string): { root: string; path: string } {
   return { root, path: existing ?? join(root, MCP_FILENAMES[0]) };
 }
 
-export function readMcpConfig(cwd: string): { root: string; path: string; config: McpFile; exists: boolean } {
-  const resolved = resolveMcpConfig(cwd);
-  if (!existsSync(resolved.path)) return { ...resolved, config: { mcpServers: {} }, exists: false };
-  if (statSync(resolved.path).size > MAX_MCP_CONFIG_BYTES) throw new Error("MCP configuration is too large to edit in Cody");
+/** The editable view of one MCP config file, in either scope. */
+function readMcpFileAt(path: string): { path: string; config: McpFile; exists: boolean } {
+  if (!existsSync(path)) return { path, config: { mcpServers: {} }, exists: false };
+  if (statSync(path).size > MAX_MCP_CONFIG_BYTES) throw new Error("MCP configuration is too large to edit in Cody");
   let config: unknown;
   try {
-    config = JSON.parse(readFileSync(resolved.path, "utf8"));
+    config = JSON.parse(readFileSync(path, "utf8"));
   } catch {
-    throw new Error(`${resolved.path} is not valid JSON`);
+    throw new Error(`${path} is not valid JSON`);
   }
-  if (!isRecord(config)) throw new Error(`${resolved.path} must contain a JSON object`);
+  if (!isRecord(config)) throw new Error(`${path} must contain a JSON object`);
   if (config.mcpServers !== undefined && !isRecord(config.mcpServers)) throw new Error("mcpServers must be an object");
-  return { ...resolved, config: config as McpFile, exists: true };
+  return { path, config: config as McpFile, exists: true };
+}
+
+export function readMcpConfig(cwd: string): { root: string; path: string; config: McpFile; exists: boolean } {
+  const resolved = resolveMcpConfig(cwd);
+  return { ...resolved, ...readMcpFileAt(resolved.path) };
+}
+
+/** Resolve a write target to its file. A project write without a workspace is
+ * refused here rather than silently landing in the user-level file. */
+function readMcpTarget(target: McpTarget): { path: string; config: McpFile; exists: boolean } {
+  if (target.scope === "user") return readMcpFileAt(getUserMcpPath());
+  if (typeof target.cwd !== "string" || !target.cwd.trim()) throw new Error("A project-level MCP change requires a workspace");
+  return readMcpConfig(target.cwd);
 }
 
 export function validateMcpServer(name: unknown, server: unknown): asserts server is McpServer {
@@ -291,37 +317,94 @@ function withMcpConfigLock<T>(configPath: string, fn: () => T): T {
   }
 }
 
-export function writeMcpServer(cwd: string, name: string, server: McpServer, previousName?: string): { path: string } {
+/** Atomic replace: a reader never sees a half-written config. */
+function writeMcpFile(path: string, config: McpFile): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(temp, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  renameSync(temp, path);
+}
+
+/** The user file's denylist, as omp reads it (`src/mcp/config.ts`): a plain
+ * list of names, absent rather than empty. */
+function readDisabledNames(config: McpFile): string[] {
+  return Array.isArray(config.disabledServers)
+    ? config.disabledServers.filter((name): name is string => typeof name === "string")
+    : [];
+}
+
+function applyDisabledNames(config: McpFile, names: string[]): McpFile {
+  const next: McpFile = { ...config };
+  if (names.length > 0) next.disabledServers = names;
+  else delete next.disabledServers;
+  return next;
+}
+
+export function writeMcpServer(target: McpTarget, name: string, server: McpServer, previousName?: string): { path: string; scope: McpScope } {
   validateMcpServer(name, server);
   if (previousName !== undefined && !SERVER_NAME.test(previousName)) throw new Error("Invalid previous server name");
-  const current = readMcpConfig(cwd);
+  const current = readMcpTarget(target);
   return withMcpConfigLock(current.path, () => {
     // Re-read INSIDE the lock so a concurrent writer's mutation is not lost.
-    const locked = readMcpConfig(cwd);
+    const locked = readMcpTarget(target);
     const servers = { ...(locked.config.mcpServers ?? {}) };
-    if (previousName && previousName !== name) delete servers[previousName];
-    servers[name] = server;
-    const config: McpFile = { ...locked.config, mcpServers: servers };
-    mkdirSync(dirname(locked.path), { recursive: true });
-    const temp = `${locked.path}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(temp, `${JSON.stringify(config, null, 2)}\n`, "utf8");
-    renameSync(temp, locked.path);
-    return { path: locked.path };
+    const edited = previousName ?? name;
+    // A user-level form is fed masked credentials, so a sentinel here means
+    // "keep what is on disk" — resolved against the same snapshot being
+    // written. Project configs are served raw and are never masked.
+    const merged = target.scope === "user" ? mergeMcpSecrets(server, servers[edited], edited) : server;
+    let config: McpFile = { ...locked.config };
+    if (previousName && previousName !== name) {
+      delete servers[previousName];
+      // A rename must carry the denylist entry with it, or the server comes
+      // back enabled under its new name and the old one haunts the list.
+      if (target.scope === "user") {
+        const disabled = readDisabledNames(locked.config);
+        if (disabled.includes(previousName)) config = applyDisabledNames(config, [...disabled.filter((entry) => entry !== previousName && entry !== name), name]);
+      }
+    }
+    servers[name] = merged;
+    config.mcpServers = servers;
+    writeMcpFile(locked.path, config);
+    return { path: locked.path, scope: target.scope };
   });
 }
 
-export function deleteMcpServer(cwd: string, name: string): { path: string } {
+export function deleteMcpServer(target: McpTarget, name: string): { path: string; scope: McpScope } {
   if (!SERVER_NAME.test(name)) throw new Error("Invalid server name");
-  const current = readMcpConfig(cwd);
+  const current = readMcpTarget(target);
   return withMcpConfigLock(current.path, () => {
-    const locked = readMcpConfig(cwd);
+    const locked = readMcpTarget(target);
     const servers = { ...(locked.config.mcpServers ?? {}) };
     if (!(name in servers)) throw new Error("MCP server was not found");
     delete servers[name];
-    const config: McpFile = { ...locked.config, mcpServers: servers };
-    const temp = `${locked.path}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(temp, `${JSON.stringify(config, null, 2)}\n`, "utf8");
-    renameSync(temp, locked.path);
-    return { path: locked.path };
+    let config: McpFile = { ...locked.config };
+    // Dropping the server drops its denylist entry too: otherwise the removed
+    // name keeps its own "disabled" row in the list forever, and a server
+    // added later under that name would be silently suppressed.
+    if (target.scope === "user") {
+      const disabled = readDisabledNames(locked.config);
+      if (disabled.includes(name)) config = applyDisabledNames(config, disabled.filter((entry) => entry !== name));
+    }
+    config.mcpServers = servers;
+    writeMcpFile(locked.path, config);
+    return { path: locked.path, scope: target.scope };
+  });
+}
+
+/** Enable/disable a user-level server without deleting it. omp reads
+ * `disabledServers` from the USER file only, and that denylist always wins
+ * over any `enabled` flag, so this is the toggle it honours. */
+export function setUserServerDisabled(name: string, disabled: boolean): { path: string; disabledServers: string[] } {
+  if (!SERVER_NAME.test(name)) throw new Error("Invalid server name");
+  const path = getUserMcpPath();
+  return withMcpConfigLock(path, () => {
+    const locked = readMcpFileAt(path);
+    const current = readDisabledNames(locked.config);
+    const names = disabled
+      ? (current.includes(name) ? current : [...current, name])
+      : current.filter((entry) => entry !== name);
+    writeMcpFile(path, applyDisabledNames(locked.config, names));
+    return { path, disabledServers: names };
   });
 }
