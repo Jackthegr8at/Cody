@@ -1,0 +1,367 @@
+name: Publish container image
+
+# Unraid's update check compares the local image digest against the registry,
+# so the image has to LIVE in a registry for "check for updates" to ever fire.
+# Every push to main republishes :latest; tags publish their version too.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    # Desktop-only pushes skip this; tag pushes and workflow_dispatch never evaluate path filters at all (see docs/windows.md).
+    paths-ignore:
+      - "desktop/**"
+      - "docs/windows.md"
+      - ".github/workflows/desktop.yml"
+  # Dispatching with a version cuts a RELEASE: image tagged X.Y.Z + latest,
+  # a v-tag created on the dispatched ref, and a Gitea Release whose body is
+  # `notes` — the changelog the ShipLog plugin shows in Unraid's Docker tab.
+  # Dispatch without a version = plain rebuild, no release. Pushing a v-tag
+  # works identically with either tag shape: an annotated tag's message
+  # becomes the notes, a lightweight tag falls back to its commit's message
+  # body. This is the ONLY release pipeline — npm is not a channel
+  # (docs/release.md).
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (X.Y.Z, no leading v). Empty = rebuild only."
+        required: false
+        type: string
+      # From the CLI, pass file CONTENT with an `@`: `-F notes=@notes.md`; without it the literal path becomes the release body.
+      notes:
+        description: "Release notes / changelog (markdown), shown by ShipLog"
+        required: false
+        type: string
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # A dispatched release version wins over package.json so the image
+      # label, the forge registry tag and the Gitea Release always agree on one number.
+      - name: Read version
+        id: meta
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          v="${DISPATCH_VERSION:-}"
+          [ -n "$v" ] || v=$(node -p "require('./package.json').version")
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: git.nateshome.net
+          username: nphil
+          password: ${{ secrets.FORGE_REGISTRY_TOKEN }}
+
+      # Build once into the local daemon and prove the image actually runs
+      # before anything reaches the registry. A published :latest is pulled
+      # automatically by downstream hosts, so a broken one is a broken server,
+      # not a red check. The push step below re-uses this build from cache.
+      - name: Build for smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: cody:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the image
+        run: |
+          set -euo pipefail
+          fail() {
+            echo "::error::$1" >&2
+            docker logs cody-smoke >&2 || true
+            docker rm -f cody-smoke >/dev/null || true
+            exit 1
+          }
+
+          wait_ready() {
+            last=000
+            for _ in $(seq 1 30); do
+              last=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:30177/login || echo 000)
+              if [ "$last" = "200" ]; then return 0; fi
+              sleep 2
+            done
+            fail "server never became ready (last GET /login -> $last)"
+          }
+
+          # ------------------------------------------------------------------
+          # The default install: NO password. The container must come up locked
+          # (accounts required from the first request), walk the opener through
+          # first-run setup, and grant the created account access.
+          # ------------------------------------------------------------------
+          docker run -d --name cody-smoke -p 30177:30177 cody:smoke
+          wait_ready
+          root=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:30177/ || echo 000)
+          [ "$root" = "307" ] || fail "fresh install: GET / expected 307 to the setup screen, got $root"
+          location=$(curl -s -o /dev/null -w '%{redirect_url}' http://127.0.0.1:30177/ || echo '')
+          case "$location" in
+            */login) ;;
+            *) fail "fresh install: GET / redirected to '$location', expected /login" ;;
+          esac
+          anon=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:30177/api/sessions || echo 000)
+          [ "$anon" = "401" ] || fail "fresh install: anonymous GET /api/sessions expected 401, got $anon"
+          state=$(curl -s http://127.0.0.1:30177/api/accounts/state || echo '')
+          echo "$state" | grep -q '"firstRun":true' || fail "fresh install: /api/accounts/state did not report firstRun (got: $state)"
+          signup=$(curl -s -o /tmp/signup-body -w '%{http_code}' -c /tmp/smoke-cookies \
+            -H 'Content-Type: application/json' \
+            -d '{"username":"smokeadmin","password":"smoke-test-password"}' \
+            http://127.0.0.1:30177/api/accounts/signup || echo 000)
+          [ "$signup" = "201" ] || fail "fresh install: first-run signup expected 201, got $signup ($(cat /tmp/signup-body))"
+          grep -q '"role":"admin"' /tmp/signup-body || fail "fresh install: first account is not an admin ($(cat /tmp/signup-body))"
+          authed=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/smoke-cookies http://127.0.0.1:30177/api/sessions || echo 000)
+          [ "$authed" = "200" ] || fail "fresh install: signed-in GET /api/sessions expected 200, got $authed"
+
+          # The image ships no engine: onboarding installs it. This is the
+          # critical path of a fresh install, so exercise it for real — the
+          # picker's install route must fetch omp into the persistent tools
+          # prefix and the binary must actually run there (Bun present, etc.).
+          engines=$(curl -s -b /tmp/smoke-cookies http://127.0.0.1:30177/api/engines || echo '')
+          echo "$engines" | grep -q '"id":"omp"' || fail "fresh install: /api/engines did not list omp (got: $engines)"
+          install=$(curl -s -o /tmp/install-body -w '%{http_code}' -b /tmp/smoke-cookies \
+            -H 'Content-Type: application/json' -d '{"id":"omp"}' \
+            --max-time 320 \
+            http://127.0.0.1:30177/api/engines/install || echo 000)
+          [ "$install" = "200" ] || fail "fresh install: omp install expected 200, got $install ($(cat /tmp/install-body))"
+          grep -q '"installed":true' /tmp/install-body || fail "fresh install: omp install did not report installed ($(cat /tmp/install-body))"
+          docker exec cody-smoke /data/agent/tools/bin/omp --version \
+            || fail "fresh install: installed omp does not run from the tools prefix"
+
+          # The OTHER install mechanism. Everything above exercises the npm
+          # branch; Hermes is a PyPI package installed with `uv tool install`,
+          # and until this ran here the whole uv path — its directory
+          # overrides, its subcommand version probe, the venv its settings
+          # panel reads, and its uninstall — had never executed inside the
+          # image at all.
+          hermes=$(curl -s -o /tmp/hermes-body -w '%{http_code}' -b /tmp/smoke-cookies \
+            -H 'Content-Type: application/json' -d '{"id":"hermes"}' \
+            --max-time 300 \
+            http://127.0.0.1:30177/api/engines/install || echo 000)
+          [ "$hermes" = "200" ] || fail "uv install: hermes install expected 200, got $hermes ($(cat /tmp/hermes-body))"
+          # Probed through the ACP entry point, never a bare --version: the ACP
+          # server ships as an optional extra, and `hermes --version` reports a
+          # healthy version with or without it — an engine that installs clean
+          # and then dies on every chat turn.
+          docker exec cody-smoke /data/agent/tools/bin/hermes acp --version \
+            || fail "uv install: hermes acp does not run — the [acp] extra is missing from the install"
+          # The Hermes settings panel derives its schema by running the venv
+          # interpreter uv places beside the shim's target. No python there, no
+          # settings tab — and nothing else would notice.
+          docker exec cody-smoke sh -c 'test -x "$(dirname "$(readlink -f /data/agent/tools/bin/hermes)")/python"' \
+            || fail "uv install: no venv python beside the hermes shim — the settings panel derives its schema from there"
+
+          # The remaining three. Cody ships five engines and the owner uses
+          # more than one, so a gate that only ever proved two was proving the
+          # wrong thing. pi rides the same rpc dialect as omp with a different
+          # --mode; claude and codex each install TWO packages — the ACP
+          # adapter plus the real engine CLI, joined by an env override — and
+          # that two-package path exists ONLY on this route, so nothing else
+          # would catch it breaking.
+          for engine in pi claude codex; do
+            code=$(curl -s -o /tmp/eng-body -w '%{http_code}' -b /tmp/smoke-cookies \
+              -H 'Content-Type: application/json' -d "{\"id\":\"$engine\"}" \
+              --max-time 420 \
+              http://127.0.0.1:30177/api/engines/install || echo 000)
+            [ "$code" = "200" ] || fail "engine install: $engine expected 200, got $code ($(cat /tmp/eng-body))"
+            grep -q '"installed":true' /tmp/eng-body \
+              || fail "engine install: $engine did not report installed ($(cat /tmp/eng-body))"
+          done
+          # The companion CLIs, not just the adapters. `--os=none --cpu=none`
+          # suppresses the adapter's own bundled binary on purpose, so if
+          # installAlso ever stops running these are simply absent and every
+          # turn dies at runtime with the adapter reporting a healthy version.
+          docker exec cody-smoke test -x /data/agent/tools/bin/claude \
+            || fail "engine install: claude-agent-acp installed without the Claude CLI beside it"
+          docker exec cody-smoke test -x /data/agent/tools/bin/codex \
+            || fail "engine install: codex-acp installed without the Codex CLI beside it"
+
+          # Does each engine actually START on the transport Cody says it
+          # uses? Everything above proves the INSTALL; this proves the engine
+          # comes up — an ACP engine through initialize + session/new, an
+          # rpc-dialect engine through --mode rpc-ui + get_state. That is the
+          # layer where a bad adapter argv, a missing optional dependency, a
+          # protocol bump, or an engine silently left on the wrong transport
+          # shows itself, and none of it needs credentials.
+          #
+          # Runs here, with ALL FIVE installed and before the uninstall below
+          # removes one. --require names them because they were just installed:
+          # "not installed" would mean the install lied.
+          docker exec cody-smoke sh -c 'cd /app && node scripts/engine-bringup.mjs --require omp,pi,claude,codex,hermes' \
+            || fail "engine bring-up: an installed engine does not start on its declared transport"
+
+          # Uninstall must use the manager that installed it. npm against a
+          # uv-installed engine finds nothing to remove and exits 0, which read
+          # as a successful uninstall while the engine sat untouched on disk.
+          hermes_rm=$(curl -s -o /tmp/hermes-rm -w '%{http_code}' -b /tmp/smoke-cookies \
+            -X DELETE -H 'Content-Type: application/json' -d '{"id":"hermes"}' \
+            --max-time 120 \
+            http://127.0.0.1:30177/api/engines/install || echo 000)
+          [ "$hermes_rm" = "200" ] || fail "uv uninstall: expected 200, got $hermes_rm ($(cat /tmp/hermes-rm))"
+          docker exec cody-smoke test ! -e /data/agent/tools/bin/hermes \
+            || fail "uv uninstall: reported success but /data/agent/tools/bin/hermes is still installed"
+
+          # Screenshot capability contract: the preview_screenshot host tool
+          # and the Preview capture button need the bundled headless Chromium.
+          # --version alone would not catch a renderer that cannot start in
+          # the slim image, so capture a REAL page served inside the container
+          # end to end through the API.
+          docker exec cody-smoke /usr/bin/chromium --version \
+            || fail "screenshot support: bundled chromium missing or broken"
+          # Cody ships ja/zh-CN UIs; screenshots of them need CJK + emoji
+          # coverage or they render as tofu boxes.
+          docker exec cody-smoke sh -c 'ls /usr/share/fonts/opentype/noto/ | grep -qi cjk' \
+            || fail "screenshot support: CJK fonts missing from the image"
+          docker exec cody-smoke sh -c 'ls /usr/share/fonts/truetype/noto/ | grep -qi emoji' \
+            || fail "screenshot support: emoji font missing from the image"
+          docker exec -d cody-smoke python3 -m http.server 4655 --bind 127.0.0.1
+          sleep 1
+          shot=$(curl -s -o /tmp/shot-body -w '%{http_code}' -b /tmp/smoke-cookies \
+            -H 'Content-Type: application/json' -d '{"url":"http://127.0.0.1:4655"}' \
+            --max-time 90 \
+            http://127.0.0.1:30177/api/preview/screenshot || echo 000)
+          [ "$shot" = "200" ] || fail "screenshot support: capture expected 200, got $shot ($(head -c 300 /tmp/shot-body))"
+          grep -q '"data":"iVBOR' /tmp/shot-body \
+            || fail "screenshot support: capture returned no PNG payload ($(head -c 300 /tmp/shot-body))"
+          # Captures walk a format ladder to stay inside the engine's 1 MiB
+          # frame budget, but an ordinary page must still come back as crisp
+          # PNG on the first rung — WebP here would mean the ladder mis-fired.
+          grep -q '"mimeType":"image/png"' /tmp/shot-body \
+            || fail "screenshot support: an ordinary page must capture as PNG ($(head -c 300 /tmp/shot-body))"
+
+          # Informational: the settings panel degrades to Cody's own controls
+          # when OMP's schema cannot be read, so a miss here is worth seeing in
+          # the log but must not block a release.
+          if curl -sf -b /tmp/smoke-cookies \
+               http://127.0.0.1:30177/api/omp-settings/schema \
+               | grep -q '"settings"'; then
+            echo "omp settings schema served"
+          else
+            echo "::warning::omp settings schema did not load in the image"
+          fi
+          docker rm -f cody-smoke >/dev/null
+          echo "fresh-install verified (locked, setup mints an admin, omp installs via npm and hermes via uv, both run, uv uninstall removes, screenshots capture)"
+
+          # ------------------------------------------------------------------
+          # Password mode + SSH: CODY_PASSWORD still enables the env-managed
+          # account over HTTP Basic (the contract scripts and bookmarks depend
+          # on), and CODY_SSH_PASSWORD must bring sshd up on its port with the
+          # engine-first login profile installed.
+          # ------------------------------------------------------------------
+          docker run -d --name cody-smoke -p 30177:30177 -p 2222:2222 \
+            -e CODY_PASSWORD=smoke-test-password \
+            -e CODY_SSH_PASSWORD=smoke-ssh-password cody:smoke
+          wait_ready
+          basic=$(curl -s -o /dev/null -w '%{http_code}' -u cody:smoke-test-password http://127.0.0.1:30177/api/sessions || echo 000)
+          [ "$basic" = "200" ] || fail "password mode: GET /api/sessions with Basic Auth expected 200, got $basic"
+          banner=$(timeout 5 bash -c 'read -r line < /dev/tcp/127.0.0.1/2222; echo "$line"' || echo '')
+          case "$banner" in
+            SSH-2.0*) ;;
+            *) fail "sshd did not answer on 2222 (banner: '$banner')" ;;
+          esac
+          docker exec cody-smoke test -f /etc/profile.d/50-cody-engine.sh \
+            || fail "engine-first SSH login profile is missing"
+          docker exec cody-smoke sh -c 'grep -q "root:.*:/data/home:" /etc/passwd' \
+            || fail "root home was not moved to the persistent /data/home"
+          docker rm -f cody-smoke >/dev/null
+          echo "password-mode Basic Auth + SSH verified"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          # Unraid is x86; a second arch would double build time for no gain.
+          platforms: linux/amd64
+          push: true
+          # :latest tracks main only — tagging an older commit must never move
+          # it backwards. The version tag is immutable-by-convention: it is
+          # published only from tag builds and versioned dispatches, where the
+          # version is pinned — an ordinary main push must not re-point the
+          # released X.Y.Z at newer content just because package.json still
+          # carries that version.
+          tags: |
+            ${{ github.ref == 'refs/heads/main' && format('git.nateshome.net/{0}/cody:latest', github.repository_owner) || '' }}
+            ${{ (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')) && format('git.nateshome.net/{0}/cody:{1}', github.repository_owner, steps.meta.outputs.version) || '' }}
+            git.nateshome.net/${{ github.repository_owner }}/cody:sha-${{ github.sha }}
+          # Update-tracking tools (and Unraid itself) read the version label.
+          labels: |
+            org.opencontainers.image.title=Cody
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.source=https://git.nateshome.net/nphil/Cody
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Publishes the Gitea Release that is the image's changelog: the ShipLog
+  # plugin on Unraid resolves git.nateshome.net/nphil/cody to this repo via
+  # the org.opencontainers.image.source label and shows the repo's Releases in
+  # the Docker tab. Only runs for real releases (v-tag or versioned
+  # dispatch); plain pushes to main keep republishing :latest without one.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # NO checkout: actions/checkout dies on lightweight tags ("Cannot fetch
+      # both <sha> and refs/tags/<tag>"), which killed release jobs and
+      # stranded releases. The Forge API needs no git state and handles every
+      # tag shape: an annotated tag's message is the changelog; a lightweight
+      # tag falls back to its commit's message body (the "Release X.Y.Z"
+      # narrative). Dispatches carry notes explicitly.
+      - name: Resolve tag + notes
+        id: rel
+        env:
+          FORGE_API: https://git.nateshome.net/api/v1
+          FORGE_TOKEN: ${{ secrets.FORGE_REGISTRY_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          NOTES_INPUT: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          auth=(-H "Authorization: token $FORGE_TOKEN" -H 'Accept: application/json')
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="v${{ inputs.version }}"
+            notes="$NOTES_INPUT"
+          else
+            tag="$GITHUB_REF_NAME"
+            ref_json=$(curl -fsS "${auth[@]}" "$FORGE_API/repos/$REPOSITORY/git/refs/tags/$tag")
+            type=$(jq -r '.object.type' <<<"$ref_json")
+            sha=$(jq -r '.object.sha' <<<"$ref_json")
+            if [ "$type" = "tag" ]; then
+              tag_json=$(curl -fsS "${auth[@]}" "$FORGE_API/repos/$REPOSITORY/git/tags/$sha")
+              notes=$(jq -r '.message // empty' <<<"$tag_json")
+            else
+              commit_json=$(curl -fsS "${auth[@]}" "$FORGE_API/repos/$REPOSITORY/git/commits/$sha")
+              notes=$(jq -r '.message // empty' <<<"$commit_json" | sed '1,2d')
+            fi
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          {
+            echo 'body<<SHIPLOG_EOF'
+            printf '%s\n' "$notes"
+            echo SHIPLOG_EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.FORGE_REGISTRY_TOKEN }}
+          tag_name: ${{ steps.rel.outputs.tag }}
+          name: Cody ${{ steps.rel.outputs.tag }}
+          body: ${{ steps.rel.outputs.body }}
+          generate_release_notes: true

@@ -3,6 +3,8 @@ import { homedir } from "os";
 import { renameSessionOwner } from "./auth/session-owners";
 import { aliasDisplaySession, publishDisplayRequest } from "./display/bus";
 import { isLoopbackHost } from "./display/ladder";
+import { ForgeError } from "./forge/client";
+import { FORGE_HOST_TOOL, runForgeTool } from "./forge/tool";
 import { getHarness } from "./harness";
 import type { EngineSession, EngineSessionOptions, HarnessAdapter, RpcUiSpawn } from "./harness/types";
 import { validateAgentImages } from "./image-attachments";
@@ -59,7 +61,10 @@ const READY_TIMEOUT_MS = 120_000;
  * back the previewed app's own console and failed requests (lib/logs), so a
  * dev server throwing in the browser is something the model can read instead
  * of something only the user ever sees. cody_todo reads and updates the project-owned
- * manual list, deliberately separate from an engine execution plan.
+ * manual list, deliberately separate from an engine execution plan. forge
+ * (lib/forge/tool.ts) is the agent's access to the code host — GitHub or a
+ * self-hosted Gitea — settled here because the tokens live in this process and
+ * must never reach an engine child's environment.
  */
 const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
   name: "preview_screenshot",
@@ -111,7 +116,7 @@ const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
     },
     required: ["action"],
   },
-}];
+}, FORGE_HOST_TOOL];
 const SERVER_HOST_TOOL_NAMES = new Set(SERVER_HOST_TOOLS.map((tool) => tool.name));
 const MCP_LIST_TIMEOUT_MS = 15_000;
 
@@ -766,6 +771,20 @@ export class AgentSessionWrapper {
    * reject paths, never routed to a browser.
    */
   private async handleServerHostTool(id: string, toolName: string, event: AgentEvent): Promise<void> {
+    if (toolName === "forge") {
+      try {
+        const text = await runForgeTool(event.arguments, { cwd: this.cwd });
+        this.sendHostToolResult({ type: "host_tool_result", id, result: { content: [{ type: "text", text }] } });
+      } catch (error) {
+        // A ForgeError already reads as an instruction ("pass repo as
+        // owner/name", "HTTP 404"); anything else is a bug and says so.
+        const message = error instanceof ForgeError
+          ? error.message
+          : `Code host request failed: ${error instanceof Error ? error.message : String(error)}`;
+        this.sendHostToolResult({ type: "host_tool_result", id, isError: true, result: { content: [{ type: "text", text: message }] } });
+      }
+      return;
+    }
     if (toolName === "cody_todo") {
       try {
         const action = parseTodoAgentAction(event.arguments);

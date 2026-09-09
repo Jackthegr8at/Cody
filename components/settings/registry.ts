@@ -10,11 +10,11 @@
  */
 import dynamic from "next/dynamic";
 import { createElement, type ComponentType, type CSSProperties } from "react";
-import { Brain, Cable, Cpu, KeyRound, RefreshCw, Settings2, SlidersHorizontal, UserRound } from "lucide-react";
+import { Brain, Cable, Cpu, GitBranch, KeyRound, RefreshCw, Settings2, SlidersHorizontal, UserRound } from "lucide-react";
 import { isSubscriptionLogin } from "@/lib/provider-directory";
 import type { ActiveEngineInfo, EngineCapabilities, SettingsTab } from "../SettingsTabs";
 
-export type SettingsSectionId = "accounts" | "general" | "providers" | "models" | "engine" | "extensions" | "memory" | "system";
+export type SettingsSectionId = "accounts" | "general" | "forge" | "providers" | "models" | "engine" | "extensions" | "memory" | "system";
 
 /** Eyebrow the row sits under: "You" (the human's own things), the active
  * engine's short name (its providers, models, behavior, extensions, memory)
@@ -75,6 +75,7 @@ export interface SettingsSection {
 const PanelLoading = () => createElement("div", { role: "status", style: { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 12, padding: 20 } }, "Loading settings…");
 
 const AccountPanel = dynamic(() => import("./panels/AccountPanel").then((m) => m.AccountPanel), { loading: PanelLoading });
+const ForgePanel = dynamic(() => import("./panels/ForgePanel").then((m) => m.ForgePanel), { loading: PanelLoading });
 const PreferencesPanel = dynamic(() => import("./panels/PreferencesPanel").then((m) => m.PreferencesPanel), { loading: PanelLoading });
 const ProvidersPanel = dynamic(() => import("./panels/ProvidersPanel").then((m) => m.ProvidersPanel), { loading: PanelLoading });
 const ModelsPanel = dynamic(() => import("./panels/ModelsPanel").then((m) => m.ModelsPanel), { loading: PanelLoading });
@@ -118,6 +119,28 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     phoneOrder: 1,
     statusLine: ({ local }) => ({ text: `${local.localeLabel} · ${local.themeName} · sound ${local.soundEnabled ? "on" : "off"}` }),
     panel: PreferencesPanel,
+  },
+  {
+    id: "forge",
+    label: "Code hosts",
+    group: "you",
+    Icon: GitBranch,
+    phoneOrder: 9,
+    // A local read of Cody's own forge config — no code host is contacted to
+    // paint the row (a "test connection" is always something the user asked
+    // for), so the rail can never hang on an unreachable server.
+    statusRoutes: ["/api/forge"],
+    statusLine: ({ routes }) => {
+      const body = asRecord(routes["/api/forge"]);
+      const hosts = Array.isArray(body?.hosts) ? body.hosts.map(asRecord) : null;
+      if (!hosts) return null;
+      const active = hosts.find((host) => host?.isDefault === true) ?? hosts[0];
+      const label = typeof active?.label === "string" ? active.label : null;
+      const parts = [`${hosts.length} host${hosts.length === 1 ? "" : "s"}`];
+      if (label) parts.push(`default ${label}`);
+      return { text: parts.join(" · ") };
+    },
+    panel: ForgePanel,
   },
   {
     id: "providers",

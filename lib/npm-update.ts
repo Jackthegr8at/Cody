@@ -3,13 +3,28 @@ import { existsSync } from "fs";
 import { homedir } from "os";
 import { join, normalize, sep } from "path";
 import { readEnv } from "./env";
+import { createForgeClient, parseRepoRef } from "./forge/client";
+import { resolveCodyUpdateSource, type ForgeHost } from "./forge/config";
 
 const NPM_PACKAGE = "@nphil/cody";
-const CONTAINER_IMAGE = "ghcr.io/nphil/cody:latest";
-const GITHUB_RELEASES_URL = "https://api.github.com/repos/nphil/Cody/releases/latest";
 /** Docker writes this marker into every container it builds. */
 const CONTAINER_MARKER = "/.dockerenv";
 const CHECK_TTL_MS = 60 * 60 * 1000;
+
+/** Where a container deployment's next version comes from. Defaults to the
+ * GitHub repo Cody has always shipped from; a self-hosted forge replaces it
+ * wholesale (Settings › Code hosts), which is what makes an install that never
+ * talks to github.com possible. */
+export interface AppUpdateSource {
+  hostId: string;
+  hostLabel: string;
+  kind: "github" | "gitea";
+  /** `owner/name` on that host. */
+  repo: string;
+  image: string;
+  /** False once the user has pointed Cody somewhere else. */
+  isDefault: boolean;
+}
 
 export interface NpmUpdateStatus {
   currentVersion: string;
@@ -19,6 +34,11 @@ export interface NpmUpdateStatus {
   /** Which channel actually ships to this deployment, so the card can name
    * the one update path that works here instead of assuming a CLI install. */
   managedBy: "docker" | "npm" | "bun";
+  /** The release feed the container channel compared against; null outside a
+   * container, where npm is the only channel and no code host is involved. */
+  source: AppUpdateSource | null;
+  /** The newest release's own page, for "what changed". */
+  releaseUrl: string | null;
 }
 
 let cached: { checkedAt: number; status: NpmUpdateStatus } | null = null;
@@ -42,30 +62,35 @@ export function isNewerVersion(availableVersion: string, currentVersion: string)
   return !available.prerelease && current.prerelease;
 }
 
-/** The npm registry publishes the CLI install; the GitHub releases feed
+/** The npm registry publishes the CLI install; a code host's releases feed
  * publishes the container image. Each deployment has to be compared against
  * the channel that ships to it, or the card reports a version nobody here
- * can install (the image build is not on npm at all). */
-async function fetchLatestVersion(managedBy: NpmUpdateStatus["managedBy"]): Promise<string | null> {
-  const signal = AbortSignal.timeout(5_000);
-  if (managedBy === "docker") {
-    const response = await fetch(GITHUB_RELEASES_URL, {
-      cache: "no-store",
-      headers: { Accept: "application/vnd.github+json" },
-      signal,
-    });
-    const data = response.ok ? await response.json() as { tag_name?: unknown } : null;
-    // Release tags are shaped `v0.9.0`; the bare semver is what compares.
-    const tag = typeof data?.tag_name === "string" ? data.tag_name.replace(/^v/, "") : "";
-    return tag || null;
-  }
+ * can install (the image build is not on npm at all).
+ *
+ * The container channel goes through the forge client, so a Cody whose update
+ * source points at a self-hosted Gitea never touches github.com: both hosts
+ * answer `/repos/{owner}/{name}/releases/latest` with the same `tag_name`,
+ * `body` and `html_url`. */
+async function fetchLatestRelease(host: ForgeHost, repo: string): Promise<{ version: string | null; releaseUrl: string | null }> {
+  const release = await createForgeClient(host, { timeoutMs: 5_000 }).releaseLatest(parseRepoRef(repo, host.owner));
+  if (!release) return { version: null, releaseUrl: null };
+  // Release tags are shaped `v0.9.0`; the bare semver is what compares.
+  return { version: release.tagName.replace(/^v/, "") || null, releaseUrl: release.htmlUrl || null };
+}
 
+async function fetchLatestNpmVersion(): Promise<string | null> {
   const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(NPM_PACKAGE)}/latest`, {
     cache: "no-store",
-    signal,
+    signal: AbortSignal.timeout(5_000),
   });
   const data = response.ok ? await response.json() as { version?: unknown } : null;
   return typeof data?.version === "string" ? data.version : null;
+}
+
+/** Drop the hourly cache, so a code host or update source saved a moment ago
+ * is the one the next read compares against. */
+export function invalidateAppUpdateCache(): void {
+  cached = null;
 }
 
 /** `markerPath` is a test seam: production callers omit it and get the real
@@ -77,25 +102,42 @@ export async function checkNpmUpdate(force = false, markerPath?: string): Promis
   const managedBy: NpmUpdateStatus["managedBy"] = detectContainerDeployment(markerPath)
     ? "docker"
     : detectInstallMethod(readEnv("PACKAGE_DIR") ?? process.cwd());
+
+  const configured = resolveCodyUpdateSource();
+  const source: AppUpdateSource | null = managedBy === "docker"
+    ? {
+      hostId: configured.host.id,
+      hostLabel: configured.host.label,
+      kind: configured.host.kind,
+      repo: configured.source.repo,
+      image: configured.source.image,
+      isDefault: configured.isDefault,
+    }
+    : null;
+
   const updateCommand = managedBy === "docker"
-    ? `docker pull ${CONTAINER_IMAGE}`
+    ? `docker pull ${configured.source.image}`
     : managedBy === "bun"
       ? `bun add -g ${NPM_PACKAGE}`
       : `npm install -g ${NPM_PACKAGE}`;
 
   try {
-    const availableVersion = await fetchLatestVersion(managedBy);
+    const { version, releaseUrl } = managedBy === "docker"
+      ? await fetchLatestRelease(configured.host, configured.source.repo)
+      : { version: await fetchLatestNpmVersion(), releaseUrl: null };
     const status: NpmUpdateStatus = {
       currentVersion,
-      availableVersion,
-      updateAvailable: Boolean(availableVersion && isNewerVersion(availableVersion, currentVersion)),
+      availableVersion: version,
+      updateAvailable: Boolean(version && isNewerVersion(version, currentVersion)),
       updateCommand,
       managedBy,
+      source,
+      releaseUrl,
     };
     cached = { checkedAt: Date.now(), status };
     return status;
   } catch {
-    return { currentVersion, availableVersion: null, updateAvailable: false, updateCommand, managedBy };
+    return { currentVersion, availableVersion: null, updateAvailable: false, updateCommand, managedBy, source, releaseUrl: null };
   }
 }
 

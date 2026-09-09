@@ -8,6 +8,13 @@ published there, nothing may reintroduce an npm publish step, and outside
 Docker the app runs from a checkout (the Settings update check degrades to
 "Update check unavailable" by design.)
 
+That is the DEFAULT, not a hard-coded fact: Settings › Code hosts › Cody
+update source repoints the check (and the `docker pull` command the card
+shows) at any configured code host, so an instance whose image is published
+by a self-hosted Gitea compares against that host's
+`/repos/{owner}/{name}/releases/latest` and never reaches github.com. The
+release procedure below is unchanged for this repository.
+
 Everything is driven by `.github/workflows/docker.yml`:
 
 - **Every push to `main`** rebuilds the image, runs the smoke gate (locked

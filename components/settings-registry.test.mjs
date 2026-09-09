@@ -12,7 +12,7 @@ const jiti = createJiti(import.meta.url, {
 /**
  * The Settings registry is the ONE table the desktop rail, the phone stack,
  * the dialog search and every deep link read. These tests pin what the
- * redesign promised: eight hubs in a fixed order under three eyebrows, each
+ * redesign promised: nine hubs in a fixed order under three eyebrows, each
  * hidden only by its own capability gate, and the `settings-tab-<id>` /
  * `settings-panel-<id>` DOM contract the audit scripts drive.
  */
@@ -27,18 +27,18 @@ const { ALL_CAPABILITIES } = await jiti.import("./SettingsTabs.tsx");
 const { SettingsSidebar } = await jiti.import("./settings/SettingsSidebar.tsx");
 const { getHarnessById } = await jiti.import("../lib/harness/index.ts");
 
-test("the eight hubs sit in the spec's order under You / engine / Server", () => {
+test("the nine hubs sit in the spec's order under You / engine / Server", () => {
   assert.deepEqual(
     SETTINGS_SECTIONS.map((section) => section.id),
-    ["accounts", "general", "providers", "models", "engine", "extensions", "memory", "system"],
+    ["accounts", "general", "forge", "providers", "models", "engine", "extensions", "memory", "system"],
   );
   assert.deepEqual(
     SETTINGS_SECTIONS.map((section) => section.label),
-    ["Account", "Preferences", "Providers", "Models", "Behavior", "Extensions", "Memory", "System"],
+    ["Account", "Preferences", "Code hosts", "Providers", "Models", "Behavior", "Extensions", "Memory", "System"],
   );
   assert.deepEqual(
     SETTINGS_SECTIONS.map((section) => section.group),
-    ["you", "you", "engine", "engine", "engine", "engine", "engine", "server"],
+    ["you", "you", "you", "engine", "engine", "engine", "engine", "engine", "server"],
   );
   assert.equal(new Set(SETTINGS_SECTIONS.map((section) => section.id)).size, SETTINGS_SECTIONS.length, "ids are unique");
   assert.equal(new Set(SETTINGS_SECTIONS.map((section) => section.phoneOrder)).size, SETTINGS_SECTIONS.length, "phone order is a total order");
@@ -53,16 +53,18 @@ test("rows per engine follow each adapter's real capability set", () => {
   // Read the flags off the adapters themselves so this test moves with them
   // rather than with a copy of them.
   const rows = (engineId) => getVisibleSections(getHarnessById(engineId).capabilities).map((section) => section.id);
-  assert.deepEqual(rows("omp"), ["accounts", "general", "providers", "models", "engine", "extensions", "system"], "omp: 7 rows (no memory read-back)");
-  assert.deepEqual(rows("pi"), ["accounts", "general", "providers", "models", "engine", "extensions", "system"], "pi: 7 rows (schema settings + skills)");
-  assert.deepEqual(rows("hermes"), ["accounts", "general", "providers", "models", "engine", "extensions", "memory", "system"], "hermes: 8 rows (+ memory)");
-  assert.deepEqual(rows("claude"), ["accounts", "general", "providers", "models", "system"], "claude: 5 rows");
-  assert.deepEqual(rows("codex"), ["accounts", "general", "providers", "models", "system"], "codex: 5 rows");
+  // Code hosts has no capability gate: every engine's sessions reach the same
+  // GitHub/Gitea configuration, and Cody's own update check reads it too.
+  assert.deepEqual(rows("omp"), ["accounts", "general", "forge", "providers", "models", "engine", "extensions", "system"], "omp: 8 rows (no memory read-back)");
+  assert.deepEqual(rows("pi"), ["accounts", "general", "forge", "providers", "models", "engine", "extensions", "system"], "pi: 8 rows (schema settings + skills)");
+  assert.deepEqual(rows("hermes"), ["accounts", "general", "forge", "providers", "models", "engine", "extensions", "memory", "system"], "hermes: 9 rows (+ memory)");
+  assert.deepEqual(rows("claude"), ["accounts", "general", "forge", "providers", "models", "system"], "claude: 6 rows");
+  assert.deepEqual(rows("codex"), ["accounts", "general", "forge", "providers", "models", "system"], "codex: 6 rows");
   // The spec's shorthand for pi, pinned as well so a flag flip is noticed.
   const piShorthand = { ...Object.fromEntries(Object.keys(ALL_CAPABILITIES).map((key) => [key, false])), liveSessions: true, skills: true, nativeSettings: true, chatExtras: true, providerLogin: true };
-  assert.equal(getVisibleSections(piShorthand).length, 7);
+  assert.equal(getVisibleSections(piShorthand).length, 8);
   const acpShorthand = { ...Object.fromEntries(Object.keys(ALL_CAPABILITIES).map((key) => [key, false])), liveSessions: true, providerLogin: true };
-  assert.equal(getVisibleSections(acpShorthand).length, 5);
+  assert.equal(getVisibleSections(acpShorthand).length, 6);
 });
 
 test("gates use ANY semantics and sub-views gate individually", () => {
@@ -81,15 +83,15 @@ test("gates use ANY semantics and sub-views gate individually", () => {
   assert.ok(getVisibleSections({ ...ALL_CAPABILITIES, memory: true }).some((section) => section.id === "memory"));
 });
 
-test("the phone list groups by eyebrow with Preferences first and Account last", () => {
+test("the phone list groups by eyebrow with Preferences first and Code hosts last", () => {
   const groups = groupSections(getVisibleSections({ ...ALL_CAPABILITIES, memory: true }), "phone");
   assert.deepEqual(groups.map((group) => group.group), ["you", "engine", "server"]);
-  assert.deepEqual(groups[0].sections.map((section) => section.id), ["general", "accounts"]);
+  assert.deepEqual(groups[0].sections.map((section) => section.id), ["general", "accounts", "forge"]);
   assert.deepEqual(groups[1].sections.map((section) => section.id), ["providers", "models", "engine", "extensions", "memory"]);
   assert.deepEqual(groups[2].sections.map((section) => section.id), ["system"]);
   // Desktop keeps registry order.
   const desktop = groupSections(getVisibleSections(ALL_CAPABILITIES), "desktop");
-  assert.deepEqual(desktop[0].sections.map((section) => section.id), ["accounts", "general"]);
+  assert.deepEqual(desktop[0].sections.map((section) => section.id), ["accounts", "general", "forge"]);
 });
 
 test("the desktop rail keeps the settings-tab-<id> tablist contract and names its eyebrows", () => {
@@ -136,6 +138,15 @@ test("status lines read cached bodies only and never throw on odd shapes", () =>
     { text: "@nitin · Admin · 2 tokens" },
   );
   assert.deepEqual(getSection("memory").statusLine(data({ "/api/memory": { documents: [1, 2, 3] } })), { text: "3 documents" });
+  assert.equal(getSection("forge").statusLine(data({})), null);
+  assert.deepEqual(
+    getSection("forge").statusLine(data({ "/api/forge": { hosts: [{ id: "github", label: "GitHub" }, { id: "home", label: "Home forge", isDefault: true }] } })),
+    { text: "2 hosts · default Home forge" },
+  );
+  assert.deepEqual(
+    getSection("forge").statusLine(data({ "/api/forge": { hosts: [{ id: "github", label: "GitHub" }] } })),
+    { text: "1 host · default GitHub" },
+  );
   assert.deepEqual(
     getSection("system").statusLine(data({ "/api/app-update": { currentVersion: "0.12.3", updateAvailable: true } })),
     { text: "Cody 0.12.3 · update available", tone: "accent" },

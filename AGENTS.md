@@ -165,6 +165,12 @@ app/api/
                                   installer (npx skills add / hermes skills install)
   skills/store/route.ts           GET browse/search/detail | POST card descriptions (skills.sh registry)
   worktrees/route.ts              GET/POST/DELETE git worktrees
+  forge/route.ts                  GET the configured code hosts, tokens redacted to
+                                  hasToken + a last-four preview; PUT (admin) upsert
+                                  a host / set the default / point Cody's own update
+                                  check at a host; DELETE (admin) one host
+  forge/[id]/test/route.ts        POST "test connection": GET {api}/user on that host,
+                                  answering the login and (Gitea) the server version
 
 lib/
   omp/                 shared omp foundations (paths, CLI probe, RpcProcess,
@@ -189,6 +195,18 @@ lib/
     access.ts          authorizeDisplaySession(): request auth for display routes
     csp.ts             buildContentSecurityPolicy(): loopback + this host's
                        private LAN/CGNAT frame-src/connect-src for proxy.ts
+  forge/               code hosts — GitHub and self-hosted Gitea:
+    config.ts          cody-forge.json in the instance data dir (0600, atomic): the
+                       host roster, tokens, the default host and Cody's own update
+                       source; resolveApiUrl/authHeader/matchForgeHostUrl
+    client.ts          one fetch-based interface over both hosts (no octokit):
+                       repos, files, issues, pulls + diffs, releases + assets,
+                       Actions runs/jobs/logs, packages, git trees
+    tool.ts            the `forge` host tool omp sessions call (lib/rpc-manager.ts
+                       registers it). ACP engines do not get it: their bridge
+                       (bin/cody-display-mcp.js) is a separate process holding no
+                       Cody state, and giving it the forge would mean a new
+                       authenticated HTTP surface proxying arbitrary host calls
   engine-guard.ts      requireEngine()/requireCapability(): the SERVER half of the
                        capability rule. An omp-only route (models.yml, model roles,
                        config.yml, `omp usage`, agent.db credentials, session
