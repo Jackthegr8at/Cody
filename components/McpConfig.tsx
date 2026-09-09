@@ -48,6 +48,9 @@ type McpLiveServer = { name: string; source: string; status: McpLiveStatus; type
 export interface McpRouteBody {
   servers?: McpServer[];
   user?: McpUserConfig;
+  /** False for a signed-in member: user-level servers are instance state, so
+   * only an administrator may read their configs or edit them. */
+  canManageUser?: boolean;
   inventory?: McpLiveServer[];
   liveServers?: McpLiveServer[];
   liveError?: string;
@@ -389,7 +392,9 @@ export function McpConfig({ cwd, sessionId, initial }: {
   const editable = scope === "project" ? servers.map((server) => serverSummary(server.config)) : userServers.map((server) => ({ enabled: server.enabled, valid: server.valid }));
   const enabledCount = editable.filter((server) => server.enabled && server.valid).length;
   const invalidCount = editable.filter((server) => !server.valid).length;
-  const canAdd = scope === "user" || cwd !== null;
+  // The route refuses a member's user-level write; don't offer the button.
+  const canManageUser = body?.canManageUser !== false;
+  const canAdd = scope === "user" ? canManageUser : cwd !== null;
 
   const editedUser = form?.previousName && form.scope === "user" ? userServers.find((server) => server.name === form.previousName) ?? null : null;
   const dirty = form !== null && (form.name !== (form.previousName ?? "") || form.source !== form.initialSource);
@@ -438,6 +443,9 @@ export function McpConfig({ cwd, sessionId, initial }: {
             </div>
             <div id="mcp-scope-panel-user" role="tabpanel" aria-labelledby="mcp-scope-user" hidden={scope !== "user"}>
               <Directory sections={[{ id: "user", rows: userRows, empty: loading ? t("mcpConfig.loading") : userConfig?.error ? userConfig.error : t("mcpConfig.userEmpty") }]} ariaLabel={t("mcpConfig.scopeUser")} />
+              {!canManageUser && (
+                <p style={{ margin: "8px 0 0", fontSize: 11, color: "var(--text-dim)", lineHeight: 1.45 }}>{t("mcpConfig.userAdminOnly")}</p>
+              )}
             </div>
             {/* Said once, for both scopes: an omp child reads mcp.json when it
                 spawns, so a change lands in the next session, not this one. */}

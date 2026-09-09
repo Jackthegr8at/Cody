@@ -1611,6 +1611,7 @@
   "mcpConfig.noUserServers": "ユーザーレベルのサーバーはありません",
   "mcpConfig.projectEmpty": "このプロジェクトのサーバーはまだありません。追加するとワークスペースの mcp.json に書き込まれます。",
   "mcpConfig.userEmpty": "すべてのセッション向けのサーバーはまだありません。追加するとどのプロジェクトでも使えます。",
+  "mcpConfig.userAdminOnly": "すべてのセッション向けのサーバーは管理者が管理します。設定済みのサーバーは確認できますが、その設定内容は表示されません。",
   "mcpConfig.projectNeedsWorkspace": "プロジェクトのワークスペースを選択するか、「すべてのセッション」に切り替えてください。",
   "mcpConfig.countEnabled": "{total} 個中 {enabled} 個が有効",
   "mcpConfig.countInvalid": " · 不正 {invalid} 件",

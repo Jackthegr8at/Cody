@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { jsonError, requireCredential } from "@/lib/auth/http";
 import { requireCapability } from "@/lib/engine-guard";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { maskMcpSecrets } from "@/lib/mcp-secrets";
@@ -33,6 +34,25 @@ function requestedScope(scope: unknown): McpScope {
   throw new Error('scope must be "user" or "project"');
 }
 
+/** User-level servers belong to the INSTANCE: every session loads them, and a
+ * stdio entry there is a command that runs in everyone's sessions — so
+ * managing them is an administrator's job, not any signed-in member's. Their
+ * `url` is not maskable either (an ha-mcp webhook URL IS the credential), so
+ * the full config is served only to an admin; everyone else keeps the
+ * name/status view this route has always shown. Project scope stays open: that
+ * file lives in a workspace its user can already read and write.
+ *
+ * "No accounts exist yet" (`requireCredential` → 409) is the open-instance
+ * case, not a missing permission — the same exception `/api/models/seen`
+ * makes, since the viewer there IS the administrator.
+ */
+function userScopeDenied(request: Request): NextResponse | null {
+  const resolved = requireCredential(request);
+  if ("response" in resolved) return resolved.response.status === 409 ? null : resolved.response;
+  if (resolved.credential.user.role !== "admin") return jsonError("Administrator access required", 403, "admin_required");
+  return null;
+}
+
 export async function GET(request: Request) {
   try {
     // omp's mcp.json conventions (project + user level). The MCP editor is
@@ -62,6 +82,11 @@ export async function GET(request: Request) {
     // travels with every `headers`/`env` value replaced by a sentinel, which a
     // save merges back from disk (lib/mcp-secrets.ts). The project file is
     // sent raw — it lives in the repository the user can already read.
+    //
+    // The rest of a user-level entry is admin-only (`userScopeDenied`): a
+    // `url` cannot be masked and can itself be the credential, and only an
+    // admin may edit these anyway, so a member gets the name/status view.
+    const canManageUser = userScopeDenied(request) === null;
     const safeUser = {
       path: user.path,
       disabledServers: user.disabledServers,
@@ -82,7 +107,7 @@ export async function GET(request: Request) {
           enabled: !disabled && config.enabled !== false,
           disabled,
           valid,
-          config: maskMcpSecrets(config),
+          ...(canManageUser ? { config: maskMcpSecrets(config) } : {}),
         };
       }),
     };
@@ -108,7 +133,7 @@ export async function GET(request: Request) {
         liveError = error instanceof Error ? error.message : String(error);
       }
     }
-    return NextResponse.json({ root: file?.root ?? null, path: file?.path ?? null, exists: file?.exists ?? false, servers: Object.entries(file?.config.mcpServers ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([name, config]) => ({ name, config })), user: safeUser, inventory, liveServers, liveError });
+    return NextResponse.json({ root: file?.root ?? null, path: file?.path ?? null, exists: file?.exists ?? false, servers: Object.entries(file?.config.mcpServers ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([name, config]) => ({ name, config })), user: safeUser, canManageUser, inventory, liveServers, liveError });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 });
   }
@@ -124,6 +149,10 @@ export async function POST(request: Request) {
     if ("response" in gate) return gate.response;
     const body = await request.json() as { cwd?: unknown; scope?: unknown; name?: unknown; previousName?: unknown; server?: unknown };
     const scope = requestedScope(body.scope);
+    if (scope === "user") {
+      const denied = userScopeDenied(request);
+      if (denied) return denied;
+    }
     // A user-level server belongs to no project, so it is written with no
     // workspace at all; only a project write is checked against the roots.
     const cwd = scope === "project" ? await allowedCwd(body.cwd) : undefined;
@@ -149,6 +178,8 @@ export async function PUT(request: Request) {
     if (body.action !== undefined) {
       if (body.action !== "enable" && body.action !== "disable") throw new Error('action must be "enable" or "disable"');
       if (requestedScope(body.scope) !== "user") throw new Error("Enabling and disabling applies to user-level servers");
+      const denied = userScopeDenied(request);
+      if (denied) return denied;
       if (typeof body.name !== "string") throw new Error("name is required");
       return NextResponse.json({ success: true, ...setUserServerDisabled(body.name, body.action === "disable") });
     }
@@ -169,6 +200,10 @@ export async function DELETE(request: Request) {
     if ("response" in gate) return gate.response;
     const body = await request.json() as { cwd?: unknown; scope?: unknown; name?: unknown };
     const scope = requestedScope(body.scope);
+    if (scope === "user") {
+      const denied = userScopeDenied(request);
+      if (denied) return denied;
+    }
     const cwd = scope === "project" ? await allowedCwd(body.cwd) : undefined;
     if (typeof body.name !== "string") throw new Error("name is required");
     return NextResponse.json({ success: true, ...deleteMcpServer({ scope, cwd }, body.name) });

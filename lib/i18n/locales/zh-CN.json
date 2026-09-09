@@ -1611,6 +1611,7 @@
   "mcpConfig.noUserServers": "没有用户级服务器",
   "mcpConfig.projectEmpty": "本项目还没有服务器。添加后会写入该工作区的 mcp.json。",
   "mcpConfig.userEmpty": "还没有面向所有会话的服务器。添加后可在任何项目中使用。",
+  "mcpConfig.userAdminOnly": "面向所有会话的服务器由管理员管理。你可以看到已配置了哪些服务器，但看不到它们的设置。",
   "mcpConfig.projectNeedsWorkspace": "请选择一个项目工作区，或切换到“所有会话”。",
   "mcpConfig.countEnabled": "{total} 个中 {enabled} 个已启用",
   "mcpConfig.countInvalid": " · {invalid} 个无效",

@@ -1611,6 +1611,7 @@
   "mcpConfig.noUserServers": "No user-level servers",
   "mcpConfig.projectEmpty": "No project servers yet. Add one to write this workspace's mcp.json.",
   "mcpConfig.userEmpty": "No servers for all sessions yet. Add one to use it in every project.",
+  "mcpConfig.userAdminOnly": "Servers for all sessions are managed by an administrator. You can see which are configured, but not their settings.",
   "mcpConfig.projectNeedsWorkspace": "Select a project workspace to manage its MCP servers, or switch to All sessions.",
   "mcpConfig.countEnabled": "{enabled}/{total} enabled",
   "mcpConfig.countInvalid": " · {invalid} invalid",

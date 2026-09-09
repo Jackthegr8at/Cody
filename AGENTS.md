@@ -1754,6 +1754,15 @@ handled or safely ignored.
   for that key — a save can never blank a credential the form did not show. The
   editor renders the sentinel as `••••••••` and swaps it back on submit. Project
   configs are served raw: that file lives in the repo the user can already read.
+- **User scope is admin-only** (`userScopeDenied` in the route): every session
+  loads those servers, and a stdio entry there is a command that runs in
+  everyone's sessions; the `url` cannot be masked and can itself be the
+  credential (an ha-mcp webhook). So the full user config rides GET only for an
+  admin, user-scope POST/PUT/DELETE answer 403 `admin_required` otherwise, and
+  a member gets the name/status rows plus `canManageUser: false`, which hides
+  the Add button. The no-accounts open instance is exempt, as `/api/models/seen`
+  already is: the viewer there IS the administrator. Project scope stays open —
+  that file lives in a workspace the member can already edit from a session.
 - **Enable/disable is the user file's `disabledServers`**, not the server's own
   `enabled` flag: omp reads that denylist from the USER path only and it always
   wins (`src/mcp/config.ts`). `setUserServerDisabled(name, disabled)` owns it —
