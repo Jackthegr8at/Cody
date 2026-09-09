@@ -134,7 +134,9 @@ export function SearchResultsList({ results, query, filter, onFilterChange, entr
   return (
     <div
       className="settings-search-column settings-scroll-column"
-      style={{ width, flexShrink: width === undefined ? 1 : 0, flex: width === undefined ? 1 : undefined, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 10, padding: 12, background: "var(--bg-panel)", borderRight: width === undefined ? undefined : "1px solid var(--border)", overflowY: "auto" }}
+      // On a phone (no fixed width) this column IS the sheet's bottom edge, so
+      // it clears the home indicator; the desktop rail sits inside a dialog.
+      style={{ width, flexShrink: width === undefined ? 1 : 0, flex: width === undefined ? 1 : undefined, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 10, padding: 12, paddingBottom: width === undefined ? "max(12px, var(--safe-bottom))" : 12, background: "var(--bg-panel)", borderRight: width === undefined ? undefined : "1px solid var(--border)", overflowY: "auto" }}
     >
       <SearchFilterChips value={filter} onChange={onFilterChange} entries={entries} />
       <div aria-live="polite" style={{ fontSize: 12, color: "var(--text-muted)", padding: "0 2px" }}>{heading}</div>

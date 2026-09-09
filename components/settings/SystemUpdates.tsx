@@ -26,6 +26,15 @@ import { SettingsHighlightContext } from "./primitives";
 
 export const APP_UPDATE_ROUTE = "/api/app-update";
 
+interface AppUpdateSource {
+  hostId: string;
+  hostLabel: string;
+  kind: "github" | "gitea";
+  repo: string;
+  image: string;
+  isDefault: boolean;
+}
+
 interface AppUpdateStatus {
   currentVersion: string;
   availableVersion: string | null;
@@ -34,6 +43,24 @@ interface AppUpdateStatus {
   /** Which channel ships to this deployment; a container is updated by
    * pulling its image, so it must never be handed an npm command. */
   managedBy: "docker" | "npm" | "bun";
+  /** The code host the release feed was read from — null outside a container,
+   * where npm is the only channel. */
+  source: AppUpdateSource | null;
+  releaseUrl: string | null;
+}
+
+function normalizeSource(data: unknown): AppUpdateSource | null {
+  if (!data || typeof data !== "object") return null;
+  const value = data as Partial<AppUpdateSource>;
+  if (typeof value.repo !== "string" || typeof value.hostLabel !== "string") return null;
+  return {
+    hostId: typeof value.hostId === "string" ? value.hostId : "",
+    hostLabel: value.hostLabel,
+    kind: value.kind === "gitea" ? "gitea" : "github",
+    repo: value.repo,
+    image: typeof value.image === "string" ? value.image : "",
+    isDefault: value.isDefault === true,
+  };
 }
 
 function normalizeApp(data: Partial<AppUpdateStatus> | null): AppUpdateStatus | null {
@@ -44,6 +71,8 @@ function normalizeApp(data: Partial<AppUpdateStatus> | null): AppUpdateStatus | 
     updateAvailable: data.updateAvailable === true,
     updateCommand: typeof data.updateCommand === "string" ? data.updateCommand : "",
     managedBy: data.managedBy === "docker" || data.managedBy === "bun" ? data.managedBy : "npm",
+    source: normalizeSource(data.source),
+    releaseUrl: typeof data.releaseUrl === "string" ? data.releaseUrl : null,
   };
 }
 
@@ -170,6 +199,20 @@ export function SystemUpdates({ capabilities, onOmpUpdateAvailabilityChange }: {
               {appStatus.managedBy === "docker" && <div style={dimLineStyle}>{t("updates.cody.dockerPullHint")}</div>}
             </>
           )
+        )}
+        {/* Which code host answered. Silent on the default GitHub channel —
+            that is what every install has always compared against — and
+            explicit the moment it is something else, because "up to date"
+            means nothing without knowing which feed said so. */}
+        {appStatus?.source && !appStatus.source.isDefault && (
+          <div style={dimLineStyle}>
+            {t("updates.cody.source", { host: appStatus.source.hostLabel, repo: appStatus.source.repo })}
+          </div>
+        )}
+        {appStatus?.releaseUrl && (
+          <a href={appStatus.releaseUrl} target="_blank" rel="noreferrer" style={{ ...dimLineStyle, color: "var(--accent)" }}>
+            {t("updates.cody.releaseNotes")}
+          </a>
         )}
       </section>
 

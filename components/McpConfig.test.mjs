@@ -11,40 +11,42 @@ const jiti = createJiti(import.meta.url, {
 const { McpConfig, mcpRoute, mcpInventoryOf, serverSummary } = await jiti.import("./McpConfig.tsx");
 const { resetSettingsRouteCache } = await jiti.import("../hooks/useSettingsData.ts");
 
-// The panel writes servers to the PROJECT file, but the engine also loads a
-// user-level file (`<agent dir>/mcp.json`) that applies to every project. That
-// path is not guessable: a containerised install relocates the agent dir, so
-// the obvious `~/.omp/mcp.json` is read by nothing. Disclosing it in the header
-// is the only thing that tells someone where a hand-written, all-projects
-// server belongs.
+// The panel writes to two files: the PROJECT one and the user-level
+// `<agent dir>/mcp.json` that applies to every project. That path is not
+// guessable — a containerised install relocates the agent dir, so the obvious
+// `~/.omp/mcp.json` is read by nothing — and disclosing it is the only thing
+// that tells someone where an all-projects server actually lives.
 test("header discloses the user-level MCP config path", () => {
   resetSettingsRouteCache();
   const html = renderToStaticMarkup(React.createElement(McpConfig, { cwd: null }));
 
   assert.match(html, /Configured MCP Servers/);
-  // The header is the SINGLE place the path is disclosed. The fallback section
-  // below it is a bare "User level" group label, matching the inventory's
-  // source labels, so the path is never printed twice on one screen.
+  // With no workspace the editor opens on the user scope, so the disclosure
+  // rides on the header of the file it is about to write — and it is the
+  // SINGLE place the path appears. The inventory group below is a bare "User
+  // level" label, so the path is never printed twice on one screen.
   assert.match(html, /User level:/);
   assert.equal(html.split("User level:").length - 1, 1);
   assert.doesNotMatch(html, /User level \(/);
 });
 
-test("renders with no workspace selected", () => {
+test("the user scope is usable with no workspace selected", () => {
   resetSettingsRouteCache();
   const html = renderToStaticMarkup(React.createElement(McpConfig, { cwd: null }));
 
-  // The project editor is workspace-gated, so without a cwd only the summary
-  // section exists. The user-level disclosure must survive that gating, since a
-  // user-level server is exactly what is configurable without a project.
-  assert.doesNotMatch(html, /Project MCP Servers/);
+  // A user-level server is not project state, so the editor renders without a
+  // cwd — with "All sessions" selected and its Add button live.
+  assert.match(html, /Manage MCP Servers/);
+  assert.match(html, /id="mcp-scope-user"[^>]*aria-selected="true"/);
+  assert.match(html, /id="mcp-scope-project"[^>]*aria-selected="false"/);
+  assert.match(html, /Add server/);
   assert.match(html, /User level:/);
 });
 
 // Static markup reads the route cache's SERVER snapshot (always empty), so
 // the fixture arrives through `initial`, the same seam a caller holding a
 // prefetch uses.
-test("lists the inventory on Directory rows and the project file behind openable rows, with no dialog mounted", () => {
+test("lists the inventory on Directory rows and the editable file behind openable rows, with no dialog mounted", () => {
   resetSettingsRouteCache();
   const cwd = "/work/app";
   const html = renderToStaticMarkup(React.createElement(McpConfig, { cwd, initial: {
@@ -53,7 +55,7 @@ test("lists the inventory on Directory rows and the project file behind openable
       { name: "filesystem", config: { type: "stdio", command: "npx", args: ["-y", "fs-server"] } },
       { name: "broken", config: { type: "http" } },
     ],
-    user: { path: "/data/agent/mcp.json", servers: [{ name: "github", status: "configured", type: "http", enabled: true, valid: true }], disabledServers: [] },
+    user: { path: "/data/agent/mcp.json", servers: [{ name: "github", status: "configured", type: "http", enabled: true, disabled: false, valid: true, config: { type: "http", url: "https://api.github.test/mcp", headers: { Authorization: "__cody_secret__" } } }], disabledServers: [] },
     inventory: [
       { name: "github", source: "User level", status: "configured", type: "http" },
       { name: "filesystem", source: "Project level", status: "configured", type: "stdio" },
@@ -61,15 +63,21 @@ test("lists the inventory on Directory rows and the project file behind openable
   } }));
 
   assert.match(html, /Configured MCP Servers/);
-  assert.match(html, /Project MCP Servers/);
+  assert.match(html, /Manage MCP Servers/);
+  // With a workspace the editor opens on the project scope.
+  assert.match(html, /id="mcp-scope-project"[^>]*aria-selected="true"/);
   assert.match(html, /role="list"/, "servers render on the Directory primitive");
   assert.match(html, /data-search-id="mcp-github"/, "every server is a search target");
   assert.match(html, /data-search-id="mcp-filesystem"/);
-  assert.match(html, /1\/2 enabled · 1 invalid/, "the project header counts valid and invalid servers");
-  // A project server row is a real <button> inside its `role="listitem"`
-  // wrapper (Directory.tsx), not a clickable div wearing tabindex="0".
-  assert.match(html, /<button[^>]*type="button"[^>]*class="settings-directory-row ui-focus-ring"/, "a project server row opens its form");
+  assert.match(html, /1\/2 enabled · 1 invalid/, "the header counts valid and invalid servers in the selected scope");
+  // A server row is a real <button> inside its `role="listitem"` wrapper
+  // (Directory.tsx), not a clickable div wearing tabindex="0".
+  assert.match(html, /<button[^>]*type="button"[^>]*class="settings-directory-row ui-focus-ring"/, "a server row opens its form");
   assert.match(html, /Add server/);
+  // A change lands in the NEXT session: an omp child reads mcp.json at spawn.
+  assert.match(html, /Changes apply to sessions started afterwards/);
+  // The masked sentinel is a wire value, never rendered as copy.
+  assert.doesNotMatch(html, /__cody_secret__/);
   // The form and the remove confirmation are closed: no second dialog, no
   // drawer, until a row is opened.
   assert.doesNotMatch(html, /role="dialog"/);

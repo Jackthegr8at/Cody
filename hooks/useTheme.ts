@@ -58,8 +58,11 @@ function applyTheme(themeId: ThemeId): void {
   const root = document.documentElement;
   root.dataset.theme = theme.id;
   root.classList.toggle("dark", theme.mode === "dark");
+  // The browser/OS chrome should blend with what it TOUCHES, and what the iOS
+  // status bar touches is the top bar — which paints --bg-panel. Using --bg
+  // here put a differently-coloured band above the bar on every phone.
   document.querySelectorAll('meta[name="theme-color"]').forEach((element) => {
-    element.setAttribute("content", theme.preview.background);
+    element.setAttribute("content", theme.preview.surface);
   });
   try {
     localStorage.setItem(THEME_STORAGE_KEY, theme.id);

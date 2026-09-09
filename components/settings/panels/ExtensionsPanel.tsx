@@ -11,7 +11,8 @@
  *     same table the Behavior hub's schema list chips as "Also under
  *     Extensions › MCP"): label, description and control come from the
  *     engine's schema row, writes go through the schema index. Below them
- *     `McpConfig`, whose user-level list renders without a workspace.
+ *     `McpConfig`, whose scope control edits either this workspace's
+ *     mcp.json or the user-level one, so it renders without a workspace.
  *   - Skills / Plugins: `SkillsConfig` / `PluginsConfig` embedded, each with
  *     its store or marketplace in a Drawer. Both are workspace-scoped: with
  *     no workspace the segment says so instead of rendering a dead list.
@@ -48,7 +49,7 @@ const ENGINE_TRAIL = ["{engine}", "Extensions"] as const;
 
 export const SEARCH_ENTRIES: readonly SearchEntry[] = [
   { id: "configured-mcp-servers", tab: "extensions", sub: "mcp", label: "Configured MCP servers", description: "Every MCP server the engine loads: user level, project level and discovered, with live status when a session is open.", keywords: ["mcp", "server", "user level"], breadcrumb: [...ENGINE_TRAIL, "MCP"], needsCapability: "mcp", action: "jump" },
-  { id: "project-mcp-servers", tab: "extensions", sub: "mcp", label: "Project MCP servers", description: "The servers in this workspace's mcp.json: add, check, save or remove.", keywords: ["mcp.json", "add server"], breadcrumb: [...ENGINE_TRAIL, "MCP"], scope: "Workspace", needsCapability: "mcp", action: "jump" },
+  { id: "mcp-servers", tab: "extensions", sub: "mcp", label: "Manage MCP servers", description: "Add, check, save, enable, disable or remove MCP servers, either for this workspace's mcp.json or for every session.", keywords: ["mcp.json", "add server", "user level", "all sessions"], breadcrumb: [...ENGINE_TRAIL, "MCP"], needsCapability: "mcp", action: "jump" },
   { id: "skills", tab: "extensions", sub: "skills", label: "Skills", description: "The workspace's installed skills: enable, disable, check for updates.", keywords: ["skill", "update"], breadcrumb: [...ENGINE_TRAIL, "Skills"], scope: "Workspace", needsCapability: "skills", action: "jump" },
   { id: "skill-store", tab: "extensions", sub: "skills", label: "Skill store", description: "Browse and install skills from skills.sh.", keywords: ["store", "install", "skills.sh"], breadcrumb: [...ENGINE_TRAIL, "Skills"], scope: "Workspace", needsCapability: "skills", action: "jump" },
   { id: "plugins", tab: "extensions", sub: "plugins", label: "Plugins", description: "The engine's plugin packages: install, update, enable, disable, remove.", keywords: ["plugin", "package", "extension"], breadcrumb: [...ENGINE_TRAIL, "Plugins"], scope: "Workspace", needsCapability: "plugins", action: "jump" },
@@ -176,9 +177,6 @@ export function ExtensionsPanel() {
             </div>
           )}
           <McpConfig cwd={cwd} sessionId={sessionId} />
-          {!cwd && (
-            <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>Select a project workspace to view and edit its project MCP configuration.</p>
-          )}
         </div>
       )}
 

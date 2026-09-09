@@ -7,6 +7,20 @@ import type {
   SkillInstallInfo,
   SkillUpdateResult,
 } from "@/lib/api-types";
+import { createForgeClient, ForgeError, parseRepoRef } from "./forge/client";
+import { resolveForgeHost, type ForgeHost } from "./forge/config";
+
+/**
+ * "Is this installed skill still the newest?"
+ *
+ * A global skill is a folder in a repository, so the answer is that folder's
+ * git tree hash. GitHub and Gitea both serve it at
+ * `/repos/{owner}/{name}/git/trees/{ref}?recursive`, with the same entry
+ * shape, so one code path covers a skill on github.com and a skill on a
+ * self-hosted forge — the difference is only which host and which token, and
+ * lib/forge answers both. A project skill is a skills.sh snapshot instead and
+ * has nothing to do with a code host.
+ */
 
 const CHECK_TIMEOUT_MS = 15_000;
 const GIT_CHECK_TIMEOUT_MS = 30_000;
@@ -14,24 +28,16 @@ const DEFAULT_SKILLS_API_BASE = process.env.SKILLS_API_URL || "https://skills.sh
 const execFileAsync = promisify(execFile);
 
 type Fetcher = (input: string, init?: RequestInit) => Promise<Response>;
-type GitTreeResolver = (install: SkillInstallInfo) => Promise<string>;
+type GitTreeResolver = (install: SkillInstallInfo, host: ForgeHost | null) => Promise<string>;
 
 interface CheckOptions {
   fetcher?: Fetcher;
   skillsApiBase?: string;
-  githubToken?: string;
+  /** The code host a skill's source lives on, token included. Defaults to
+   * Cody's forge config; the route passes its own so the resolution happens
+   * once per request. */
+  resolveHost?: (install: SkillInstallInfo) => ForgeHost | null;
   resolveGitTreeHash?: GitTreeResolver;
-}
-
-interface GitHubTreeEntry {
-  path?: unknown;
-  type?: unknown;
-  sha?: unknown;
-}
-
-interface GitHubTreeResponse {
-  sha?: unknown;
-  tree?: unknown;
 }
 
 interface SnapshotResponse {
@@ -117,8 +123,14 @@ async function fetchJson(
   return response.json();
 }
 
-async function resolveGitTreeHash(install: SkillInstallInfo): Promise<string> {
-  const repository = `https://github.com/${install.source}.git`;
+/** The git fallback when the host's API refuses (rate limit, unauthenticated
+ * private read): a bare clone answers the same question. Cloned from the
+ * host's own origin, so a self-hosted forge is reached rather than
+ * github.com, and unauthenticated — a token on a `git` command line would be
+ * visible in the process list to everything on the box. */
+async function resolveGitTreeHash(install: SkillInstallInfo, host: ForgeHost | null): Promise<string> {
+  const origin = host ? host.baseUrl : "https://github.com";
+  const repository = `${origin}/${install.source}.git`;
   const ref = install.ref || "HEAD";
   const folder = skillFolder(install.skillPath!);
   const gitDir = await mkdtemp(join(tmpdir(), "cody-skill-check-"));
@@ -154,31 +166,29 @@ async function checkGlobalSkill(
   install: SkillInstallInfo,
   options: Required<Pick<CheckOptions, "fetcher" | "resolveGitTreeHash">> & CheckOptions,
 ): Promise<SkillUpdateResult> {
+  const resolveHost = options.resolveHost ?? ((entry: SkillInstallInfo) => resolveForgeHost(entry.forgeHostId));
+  const host = resolveHost(install);
+  if (!host) {
+    return result(install, "error", undefined, `No code host is configured for ${install.source}.`);
+  }
   const ref = install.ref || "HEAD";
-  const url = `https://api.github.com/repos/${install.source}/git/trees/${encodeURIComponent(ref)}?recursive=1`;
-  const headers: Record<string, string> = {
-    Accept: "application/vnd.github.v3+json",
-    "User-Agent": "cody",
-  };
-  if (options.githubToken) headers.Authorization = `Bearer ${options.githubToken}`;
   const folder = skillFolder(install.skillPath!);
+  const client = createForgeClient(host, { fetcher: options.fetcher, timeoutMs: CHECK_TIMEOUT_MS });
   let latestVersion: string | undefined;
 
   try {
-    const raw = (await fetchJson(url, options.fetcher, headers)) as GitHubTreeResponse;
-    latestVersion = typeof raw.sha === "string" && !folder ? raw.sha : undefined;
-
-    if (folder && Array.isArray(raw.tree)) {
-      const entry = (raw.tree as GitHubTreeEntry[]).find(
-        (item) => item.type === "tree" && item.path === folder,
-      );
-      if (entry && typeof entry.sha === "string") latestVersion = entry.sha;
+    const tree = await client.gitTree(parseRepoRef(install.source, host.owner), ref, true);
+    latestVersion = folder ? undefined : tree.sha || undefined;
+    if (folder) {
+      const entry = tree.entries.find((item) => item.type === "tree" && item.path === folder);
+      if (entry?.sha) latestVersion = entry.sha;
     }
   } catch (error) {
-    if (!(error instanceof HttpError) || ![401, 403, 429].includes(error.status)) {
-      throw error;
-    }
-    latestVersion = await options.resolveGitTreeHash(install);
+    // Rate limited or refused: the git protocol answers the same question and
+    // is not rate limited the same way.
+    const status = error instanceof ForgeError ? error.status : null;
+    if (status === null || ![401, 403, 429].includes(status)) throw error;
+    latestVersion = await options.resolveGitTreeHash(install, host);
   }
 
   if (!latestVersion) {

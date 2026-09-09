@@ -138,15 +138,18 @@ function Toaster() {
   const { toasts } = Toast.useToastManager<ToastData>();
   const isMobile = useIsMobile();
   // Clear the app chrome (topbar + workspace tab strip) with a safe gap so
-  // toasts never cover the header, tabs, or chat content.
+  // toasts never cover the header, tabs, or chat content — plus the status-bar
+  // inset, because the chrome it is clearing has moved down by that much on a
+  // standalone install.
   const topOffset = isMobile ? 88 : 76;
+  const top = `calc(${topOffset}px + var(--safe-top))`;
   return (
     <Toast.Portal>
       <Toast.Viewport
         style={{
           position: "fixed",
-          top: topOffset,
-          right: "max(16px, env(safe-area-inset-right, 0px))",
+          top,
+          right: "max(16px, var(--safe-right))",
           zIndex: 2100,
           display: "flex",
           flexDirection: "column",
@@ -154,7 +157,7 @@ function Toaster() {
           width: "min(92vw, 360px)",
           // Toasts must never be clipped: when they outgrow the viewport they
           // scroll instead of running off screen.
-          maxHeight: `calc(100dvh - ${topOffset}px - 16px)`,
+          maxHeight: `calc(100dvh - ${top} - 16px - var(--safe-bottom))`,
           overflowY: "auto",
           pointerEvents: "none",
         }}

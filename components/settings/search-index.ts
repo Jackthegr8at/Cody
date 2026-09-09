@@ -70,6 +70,7 @@ export function matchesSearchFilter(entry: SearchEntry, filter: SearchFilter | n
 export const HUB_LABELS: Record<SettingsSectionId, string> = {
   accounts: "Account",
   general: "Preferences",
+  forge: "Code hosts",
   providers: "Providers",
   models: "Models",
   engine: "Behavior",
@@ -107,6 +108,7 @@ export function readSearchEntriesExport(module: unknown): readonly SearchEntry[]
 const STATIC_SOURCES: ReadonlyArray<{ tab: SettingsSectionId; load: () => Promise<unknown> }> = [
   { tab: "accounts", load: () => import("./panels/AccountPanel") },
   { tab: "general", load: () => import("./panels/PreferencesPanel") },
+  { tab: "forge", load: () => import("./panels/ForgePanel") },
   { tab: "providers", load: () => import("./panels/ProvidersPanel") },
   { tab: "models", load: () => import("./panels/ModelsPanel") },
   { tab: "engine", load: () => import("./panels/EnginePanel") },

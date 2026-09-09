@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { SkillInstallScope } from "@/lib/api-types";
 import { checkSkillUpdates } from "@/lib/skill-updates";
+import { resolveForgeHost } from "@/lib/forge/config";
 import { loadSkillsWithInstallInfo } from "@/lib/skills-service";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 
@@ -39,7 +40,11 @@ export async function POST(req: Request) {
     }
 
     const updates = await checkSkillUpdates(installs, {
-      githubToken: process.env.GITHUB_TOKEN || process.env.GH_TOKEN,
+      // Each skill is checked against the code host its source actually lives
+      // on, with that host's saved token — not whatever GITHUB_TOKEN the
+      // container happens to carry, which said nothing about a self-hosted
+      // forge and nothing about which repo the token was minted for.
+      resolveHost: (install) => resolveForgeHost(install.forgeHostId),
     });
     return NextResponse.json({ updates });
   } catch (error) {

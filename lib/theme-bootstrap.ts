@@ -22,7 +22,9 @@ import { DEFAULT_DARK_THEME_ID, DEFAULT_THEME_ID, THEMES } from "./theme-catalog
  * which keeps the client-side theme store agreeing with the server.
  */
 export function themeBootstrapScript(accountTheme: string | null): string {
-  const themes = JSON.stringify(Object.fromEntries(THEMES.map(({ id, mode, preview }) => [id, { mode, background: preview.background }])));
+  // `chrome` is the theme's --bg-panel (preview.surface): the top bar paints
+  // it, and the iOS status bar sits directly on the top bar. See useTheme.ts.
+  const themes = JSON.stringify(Object.fromEntries(THEMES.map(({ id, mode, preview }) => [id, { mode, chrome: preview.surface }])));
   const key = JSON.stringify(STORAGE_KEYS.theme);
   const account = JSON.stringify(accountTheme);
   return [
@@ -34,7 +36,7 @@ export function themeBootstrapScript(accountTheme: string | null): string {
     "try{",
     "d.documentElement.dataset.theme=t;",
     'd.documentElement.classList.toggle("dark",m[t].mode==="dark");',
-    `d.querySelectorAll('meta[name="theme-color"]').forEach(function(e){e.setAttribute("content",m[t].background)});`,
+    `d.querySelectorAll('meta[name="theme-color"]').forEach(function(e){e.setAttribute("content",m[t].chrome)});`,
     "}catch(e){}",
     `if(s&&m[s]){try{localStorage.setItem(${key},s)}catch(e){}}`,
     "})();",

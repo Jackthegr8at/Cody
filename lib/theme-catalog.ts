@@ -4,14 +4,32 @@ export const THEME_STORAGE_KEY = STORAGE_KEYS.theme;
 
 export type ThemeMode = "light" | "dark";
 
+/**
+ * A theme's three swatch colors, and the only place outside `globals.css`
+ * where a palette's values are written down. Each mirrors a token from that
+ * theme's block, exactly:
+ *
+ *   background -> --bg         the page ground
+ *   surface    -> --bg-panel   panels, and the TOP BAR
+ *   accent     -> --accent
+ *
+ * The mirroring is load-bearing, not decorative: `surface` is what the browser
+ * and OS chrome is told to paint (`<meta name="theme-color">`, the manifest's
+ * `theme_color`), because on a phone that chrome touches the top bar — an iOS
+ * status bar coloured with `--bg` sat as a visible band above a `--bg-panel`
+ * bar. `lib/theme-catalog.test.mjs` reads globals.css and fails on any drift.
+ */
 export interface ThemeDefinition {
   id: string;
   family: string;
   name: string;
   mode: ThemeMode;
   preview: {
+    /** = the theme's `--bg`. */
     background: string;
+    /** = the theme's `--bg-panel`. */
     surface: string;
+    /** = the theme's `--accent`. */
     accent: string;
   };
 }

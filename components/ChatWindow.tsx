@@ -1314,16 +1314,22 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
                 {emptyChatBrand}
               </div>
             </div>
-            <div className="relative" style={{ flexShrink: 0, paddingBottom: "max(8px, env(safe-area-inset-bottom))" }}>
+            {/* The composer owns the bottom inset (ChatInput's own wrapper adds
+                it once); this dock only supplies the 8px gap it always had. */}
+            <div className="relative" style={{ flexShrink: 0, paddingBottom: 8 }}>
               <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
                 <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
                   {/* Notices ride with the composer, as they do once messages
                       exist — a model error belongs next to the Send it blocks,
                       not centred half a screen above it. */}
                   <NoticeShelf notices={notices} onDismiss={dismissNotice} align="right" />
-                  {chatInputElement}
                 </div>
               </div>
+              {/* Outside that gutter, exactly as in the populated dock below:
+                  ChatInput carries the column's 16px sides itself, and nesting
+                  it inside a second one cost the phone card 32px of a 390px
+                  screen and left it inset from the messages above it. */}
+              {chatInputElement}
             </div>
           </div>
         ) : (
@@ -1531,10 +1537,11 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
         className="relative"
         style={{
           flexShrink: 0,
-          // Keeps the composer clear of the home indicator on an iPhone
-          // home-screen (standalone) install, where env(safe-area-inset-bottom)
-          // is nonzero; the max() floor keeps normal-browser spacing unchanged.
-          paddingBottom: isMobile ? "max(8px, env(safe-area-inset-bottom))" : undefined,
+          // Just the seam gap. Clearing the home indicator is ChatInput's job
+          // (`calc(8px + var(--safe-bottom))` on its own wrapper) — doing it
+          // here as well stacked two insets and floated the composer on a
+          // standalone install.
+          paddingBottom: isMobile ? 8 : undefined,
         }}
       >
         <div

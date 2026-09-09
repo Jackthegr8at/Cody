@@ -137,7 +137,8 @@ app/api/
                                    it dispatches on HarnessAdapter.settings and
                                    refuses `unsupported` when an engine has none —
                                    never on an engine id (omp/Hermes/pi today)
-  mcp/route.ts                    GET/POST/PUT/DELETE project MCP servers
+  mcp/route.ts                    GET/POST/PUT/DELETE MCP servers in either
+                                   scope (`scope: "project"` default, `"user"`)
   memory/route.ts                 GET the active engine's persistent memory, read-only
                                    (400 `unsupported` unless capabilities.memory)
   provider-keys/route.ts          GET the provider-key catalogue for the active
@@ -164,6 +165,12 @@ app/api/
                                   installer (npx skills add / hermes skills install)
   skills/store/route.ts           GET browse/search/detail | POST card descriptions (skills.sh registry)
   worktrees/route.ts              GET/POST/DELETE git worktrees
+  forge/route.ts                  GET the configured code hosts, tokens redacted to
+                                  hasToken + a last-four preview; PUT (admin) upsert
+                                  a host / set the default / point Cody's own update
+                                  check at a host; DELETE (admin) one host
+  forge/[id]/test/route.ts        POST "test connection": GET {api}/user on that host,
+                                  answering the login and (Gitea) the server version
 
 lib/
   omp/                 shared omp foundations (paths, CLI probe, RpcProcess,
@@ -188,6 +195,18 @@ lib/
     access.ts          authorizeDisplaySession(): request auth for display routes
     csp.ts             buildContentSecurityPolicy(): loopback + this host's
                        private LAN/CGNAT frame-src/connect-src for proxy.ts
+  forge/               code hosts — GitHub and self-hosted Gitea:
+    config.ts          cody-forge.json in the instance data dir (0600, atomic): the
+                       host roster, tokens, the default host and Cody's own update
+                       source; resolveApiUrl/authHeader/matchForgeHostUrl
+    client.ts          one fetch-based interface over both hosts (no octokit):
+                       repos, files, issues, pulls + diffs, releases + assets,
+                       Actions runs/jobs/logs, packages, git trees
+    tool.ts            the `forge` host tool omp sessions call (lib/rpc-manager.ts
+                       registers it). ACP engines do not get it: their bridge
+                       (bin/cody-display-mcp.js) is a separate process holding no
+                       Cody state, and giving it the forge would mean a new
+                       authenticated HTTP surface proxying arbitrary host calls
   engine-guard.ts      requireEngine()/requireCapability(): the SERVER half of the
                        capability rule. An omp-only route (models.yml, model roles,
                        config.yml, `omp usage`, agent.db credentials, session
@@ -344,7 +363,8 @@ components/
                       custom endpoint — the old tree-and-detail dialog that used
                       to live here is gone, its registry/roles/composer-picker
                       views having moved to the Models and Providers hubs
-  McpConfig.tsx       project MCP server editor (Settings › Extensions › MCP)
+  McpConfig.tsx       MCP server editor (Settings › Extensions › MCP), scoped
+                      to this project's mcp.json or the user-level one
   MemoryPanel.tsx     Settings › Memory: the engine's own memory documents,
                       read-only, each with its path (capability-gated)
   PluginsConfig.tsx   embedded under Settings › Extensions › Plugins; opens
@@ -637,8 +657,9 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   `engine.shortName` (`chatInput.smartModelHint`,
   `.smartModelUnavailable`, `.thinkingAuto`, `.toolPresetCoreWarning*`,
   `.groupEngineBuiltin`, `agentSession.startingAgent`,
-  `.fallbackAppliedDetail`, `.fallbackSucceededDetail`,
-  `info.section.engine`). The sole intentional exception is the Smart model
+  `info.section.engine`; the fallback toasts no longer name the engine at
+  all, they name the JOB, see the model-switch marker note below). The sole
+  intentional exception is the Smart model
   label: it is exactly `Smart`, with no engine, role, or resolved-model
   suffix. `agentSession.startingAgent` fires on any slow first connect —
   i.e. exactly the Hermes/Codex cold start — which is why it said
@@ -1740,14 +1761,48 @@ handled or safely ignored.
   non-git dirs). Server definitions support `stdio`, `http`, and `sse`;
   exactly one of `command`/`url` is required and validated before any write.
 - Writes are atomic (temp file + rename), preserve unrelated top-level keys
-  (`disabledServers`, `$schema`, ...), and support rename via `previousName`.
-- The MCP settings live under Settings › Extensions › MCP (workspace-gated).
-  Server list rows
+  (`disabledServers`, `enabledServers`, `$schema`, ...), and support rename via
+  `previousName`.
+- **Both writable scopes go through one target.** `writeMcpServer(target, …)`
+  and `deleteMcpServer(target, …)` take `{scope: "user" | "project", cwd?}`:
+  `"project"` resolves `cwd` as above and REQUIRES it, `"user"` is
+  `getUserMcpPath()` (`<agent dir>/mcp.json`) and ignores it. Same cross-process
+  lockfile mutex, same atomic rename for both. `/api/mcp` POST/DELETE default to
+  `scope: "project"`, so a caller written before user scope existed is unchanged.
+- **A user-level secret never reaches the browser** (`lib/mcp-secrets.ts`, a
+  pure module because `components/` may not import `lib/omp/*`). GET serves the
+  user config with every `headers`/`env` value replaced by
+  `MCP_SECRET_SENTINEL`; `writeMcpServer` merges each sentinel back from the
+  same locked snapshot it writes, and REFUSES the write when nothing is stored
+  for that key — a save can never blank a credential the form did not show. The
+  editor renders the sentinel as `••••••••` and swaps it back on submit. Project
+  configs are served raw: that file lives in the repo the user can already read.
+- **User scope is admin-only** (`userScopeDenied` in the route): every session
+  loads those servers, and a stdio entry there is a command that runs in
+  everyone's sessions; the `url` cannot be masked and can itself be the
+  credential (an ha-mcp webhook). So the full user config rides GET only for an
+  admin, user-scope POST/PUT/DELETE answer 403 `admin_required` otherwise, and
+  a member gets the name/status rows plus `canManageUser: false`, which hides
+  the Add button. The no-accounts open instance is exempt, as `/api/models/seen`
+  already is: the viewer there IS the administrator. Project scope stays open —
+  that file lives in a workspace the member can already edit from a session.
+- **Enable/disable is the user file's `disabledServers`**, not the server's own
+  `enabled` flag: omp reads that denylist from the USER path only and it always
+  wins (`src/mcp/config.ts`). `setUserServerDisabled(name, disabled)` owns it —
+  the key is dropped when the list empties, a rename carries the entry, and a
+  delete removes it (otherwise the name keeps a ghost row and silently
+  suppresses a future server). Reached over PUT `{action, scope:"user", name}`;
+  PUT without `action` is still the validate-only check.
+- The MCP settings live under Settings › Extensions › MCP. A `SegmentedControl`
+  picks the scope ("This project" / "All sessions"); only the project scope is
+  workspace-gated, because a user-level server is exactly what is configurable
+  without a project. Server list rows
   show a config-derived status dot
   (valid+enabled / disabled / invalid) — no live-connectivity probe exists in
   the RPC protocol, so failures surface as toasts (`toast.error`) from the
   editor actions, not inline text.
-- The endpoint is guarded by the same allowed-root rules as `/api/files`.
+- The endpoint is guarded by the same allowed-root rules as `/api/files` — for
+  the project scope. A user-scope call carries no cwd and is not root-checked.
 
 ### Plugins and skills
 - `/api/plugins` shells out to the user's `omp plugin` CLI (`list/install/uninstall/enable/disable/upgrade`, `--json` where available) — never the Bun-only SDK. `lib/omp/plugin-cli.ts` holds the shared `execFile`/loose-JSON-parse helpers (`runOmpCli`, `parseJsonLoose`), used by both `/api/plugins` and `/api/plugins/marketplace`.
@@ -1902,6 +1957,7 @@ type:   --font-serif (display headings, class .display-serif)  --font-mono
 shape:  --radius-control (8) --radius-card (12) --radius-modal (16)
 depth:  --shadow-card --shadow-pop --shadow-modal
 motion: --dur-fast (150ms) --dur-med (220ms) --dur-slow (320ms) --ease-out-warm
+edges:  --safe-top --safe-right --safe-bottom --safe-left
 ```
 
 `components/ui/` holds the shared primitives (built on `@base-ui/react`):
@@ -1909,6 +1965,57 @@ motion: --dur-fast (150ms) --dur-med (220ms) --dur-slow (320ms) --ease-out-warm
 ConfirmDialog), `toast.tsx` (`toast.success/error/info`, mounted in AppShell).
 Icons come from `lucide-react` — do not add new inline SVGs. The command
 palette (`components/CommandPalette.tsx`, ⌘K/Ctrl+K) is built on `cmdk`.
+
+### Standalone immersion and the safe-area variables
+- An installed Cody uses the WHOLE screen: `appleWebApp.statusBarStyle` is
+  `"black-translucent"` and the viewport is `viewportFit: cover`, so the web
+  view extends under the iOS status bar and home indicator.
+- The price is that **every viewport-anchored edge pads itself back out**, and
+  it does so through the `--safe-*` variables defined once on `:root`
+  (`env(safe-area-inset-*, 0px)`) — never by writing `env()` at the call site.
+  One definition means one thing to override when verifying the plumbing in a
+  browser that reports no insets (`:root{--safe-top:47px}` in a test
+  stylesheet reproduces a notch exactly).
+- Consumers: `.shell-topbar` (content-box, so its inline 44/32px stays the
+  CONTROL height), the mobile `.sidebar-container`, `.settings-level-header`
+  (shared by MobileStack's levels and a pushed Drawer), `.login-page`, the
+  toast viewport, the workspace-panel toggle, ChatInput's fixed dropdowns and
+  its bottom padding, the terminal toolbar and soft keys.
+- **A padded parent owns the inset for its subtree.** Panels anchored to a
+  measured rect (the top-panel dropdown, BranchNavigator) inherit the offset
+  for free and must not add it again; the composer is the only element that
+  adds the bottom inset, so ChatWindow's docks contribute plain `8px`.
+- **theme-color is the theme's `--bg-panel`, not its `--bg`** — the browser and
+  OS chrome touch the TOP BAR, and a `--bg`-coloured status bar read as a band
+  above it. `preview.surface` in `lib/theme-catalog.ts` IS each theme's
+  `--bg-panel` (and `preview.background` its `--bg`); `useTheme`, the pre-paint
+  bootstrap, `layout.tsx`'s themeColor pair and the manifest's `theme_color`
+  all read it, and `lib/theme-catalog.test.mjs` reads `globals.css` and fails
+  on drift. The manifest's `background_color` stays `--bg` (splash, not chrome).
+- **iOS colours the status-bar glyphs by the SYSTEM appearance, not the
+  page**: `black-translucent` means white glyphs under system dark mode and
+  dark glyphs under system light mode, fixed at launch, with no per-theme
+  variant. When Cody's theme mode disagrees with the system (a light theme on a
+  dark-mode phone or the reverse), `.shell-topbar` repaints ONLY the inset
+  strip with `--status-strip-dark`/`--status-strip-light` via a hard gradient
+  stop at `--safe-top` (`@media (display-mode: standalone) and
+  (prefers-color-scheme: …)`, `globals.css`); when they agree the strip is the
+  bar's own `--bg-panel` and seamless. That is why the top bar's background
+  lives in the stylesheet, not inline — an inline `background` would beat the
+  media rule. Headless Chromium cannot emulate `display-mode`, so verify the
+  rule with the clause removed and the gradient stop checked at `--safe-top`.
+
+### Phone composer: one row, nothing wraps
+- Below 640px the controls row is `flex-wrap: nowrap`. Every fixed control is
+  38px and `flex-shrink: 0` (attach, reasoning, Fast, agent mode, the quota
+  ring's box, Send/Stop); the model selector is the ONLY item that shrinks and
+  it ellipsises. At 390px that leaves ~114px for the model name.
+- Controls an icon can speak for drop their labels there — Fast included: its
+  glyph carries the state the words did (accent + filled bg = requested,
+  `TriangleAlert` = inactive/unavailable, `ZapOff` = off, `Zap` = unverified,
+  spinner = checking), and the full sentence stays in `title`/`aria-label`.
+- ChatInput's own 16px sides ARE the chat column's gutter. Neither dock may
+  wrap it in a second one.
 
 <!-- BEGIN:nextjs-agent-rules -->
 

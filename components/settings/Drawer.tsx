@@ -222,7 +222,7 @@ export function Drawer({ open, title, presentation = "side", onClose, dirty = fa
             className="settings-mobile-level"
             style={{ position: "absolute", inset: 0, zIndex: 30, background: "var(--bg)", display: "flex", flexDirection: "column", outline: "none" }}
           >
-            <header style={{ display: "flex", alignItems: "center", gap: 2, height: 48, minHeight: 48, padding: "0 2px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)", flexShrink: 0 }}>
+            <header className="settings-level-header">
               <button type="button" onClick={requestClose} aria-label="Back" className="ui-focus-ring" style={headerButton}>
                 <ArrowLeft size={18} aria-hidden="true" />
               </button>
@@ -235,8 +235,8 @@ export function Drawer({ open, title, presentation = "side", onClose, dirty = fa
                 <X size={18} aria-hidden="true" />
               </button>
             </header>
-            <div className="settings-scroll-column" style={{ flex: 1, minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", padding: 16, paddingBottom: "max(16px, env(safe-area-inset-bottom))", display: "flex", flexDirection: "column", gap: 14 }}>{children}</div>
-            {footer && <div style={{ padding: "10px 16px", paddingBottom: "max(10px, env(safe-area-inset-bottom))", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "flex-end", gap: 8, flexShrink: 0, background: "var(--bg-panel)" }}>{footer}</div>}
+            <div className="settings-scroll-column" style={{ flex: 1, minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", padding: 16, paddingBottom: "max(16px, var(--safe-bottom))", display: "flex", flexDirection: "column", gap: 14 }}>{children}</div>
+            {footer && <div style={{ padding: "10px 16px", paddingBottom: "max(10px, var(--safe-bottom))", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "flex-end", gap: 8, flexShrink: 0, background: "var(--bg-panel)" }}>{footer}</div>}
           </div>,
           host,
         )}

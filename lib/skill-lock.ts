@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "fs";
 import { homedir } from "os";
 import { isAbsolute, join, relative, resolve, sep } from "path";
+import { BUILTIN_GITHUB_HOST_ID, matchForgeHostUrl } from "./forge/config";
 import type { SkillInfo, SkillInstallInfo, SkillInstallScope } from "@/lib/api-types";
 
 interface SkillLockEntry {
@@ -92,16 +93,28 @@ function getInstallInfo(
   if (!entry || typeof entry.source !== "string" || !entry.source.trim()) return undefined;
 
   const sourceType = typeof entry.sourceType === "string" ? entry.sourceType : undefined;
-  const source = normalizeSource(entry.source.trim(), sourceType);
+  const raw = entry.source.trim();
+  // A source that is a URL on a code host Cody knows (a self-hosted Gitea, or
+  // github.com written out in full) collapses to the same owner/repo an
+  // `owner/repo` source already is, and remembers which host it came from —
+  // that is what makes a skill hosted off github.com checkable at all.
+  const matched = matchForgeHostUrl(raw);
+  const source = matched ? matched.repo : normalizeSource(raw, sourceType);
   if (!source) return undefined;
+  const forgeHostId = matched
+    ? matched.host.id
+    : sourceType === "github"
+      ? BUILTIN_GITHUB_HOST_ID
+      : undefined;
   const skillPath = typeof entry.skillPath === "string" ? entry.skillPath : undefined;
   const ref = typeof entry.ref === "string" ? entry.ref : undefined;
   const rawVersionHash = scope === "global" ? entry.skillFolderHash : entry.computedHash;
   const versionHash = typeof rawVersionHash === "string" && rawVersionHash
     ? rawVersionHash
     : undefined;
-  const isGitHubSource =
-    sourceType === "github" && /^[\w.-]+\/[\w.-]+$/.test(source);
+  // A repository on a known host, named owner/repo: the shape both GitHub's
+  // and Gitea's git-tree API can be asked about.
+  const isRepositorySource = Boolean(forgeHostId) && /^[\w.-]+\/[\w.-]+$/.test(source);
   const hasComparableVersion = scope === "global" || !ref;
 
   return {
@@ -113,8 +126,9 @@ function getInstallInfo(
     ...(skillPath && { skillPath }),
     ...(ref && { ref }),
     ...(versionHash && { versionHash }),
+    ...(forgeHostId && { forgeHostId }),
     canCheckForUpdates: Boolean(
-      isGitHubSource && skillPath && versionHash && hasComparableVersion,
+      isRepositorySource && skillPath && versionHash && hasComparableVersion,
     ),
   };
 }

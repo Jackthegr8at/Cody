@@ -9,6 +9,10 @@ export interface SkillInstallInfo {
   skillPath?: string;
   ref?: string;
   versionHash?: string;
+  /** The configured code host (lib/forge/config) the source lives on, so the
+   * update check queries the right server with the right token. Absent for a
+   * source Cody cannot place on a known host. */
+  forgeHostId?: string;
   canCheckForUpdates: boolean;
 }
 

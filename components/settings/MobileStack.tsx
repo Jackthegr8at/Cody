@@ -59,7 +59,7 @@ const TONE_COLOR: Record<NonNullable<StatusLine["tone"]>, string> = {
 
 export function MobileLevelHeader({ title, onBack, backLabel, backText, onClose }: { title: ReactNode; onBack?: () => void; backLabel?: string; backText?: string; onClose: () => void }) {
   return (
-    <header style={{ display: "flex", alignItems: "center", gap: 2, height: 48, minHeight: 48, padding: "0 2px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)", flexShrink: 0 }}>
+    <header className="settings-level-header">
       {onBack ? (
         <button type="button" onClick={onBack} aria-label={backLabel ?? "Back"} className="ui-focus-ring settings-mobile-back" style={{ ...headerButton, width: "auto", padding: "0 10px 0 6px", gap: 2, fontSize: 13, color: "var(--accent)" }}>
           <ArrowLeft size={18} aria-hidden="true" />
@@ -113,7 +113,7 @@ function LevelPanel({ level, isTop, backText, onCloseLevel, onClose }: {
       style={{ position: "absolute", inset: 0, zIndex: 20, background: "var(--bg)", display: "flex", flexDirection: "column" }}
     >
       <MobileLevelHeader title={<span id={titleId}>{level.title}</span>} onBack={onBack} backLabel="Back" backText={backText} onClose={onClose} />
-      <div className="settings-scroll-column" style={{ flex: 1, minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", padding: 16, paddingBottom: "max(16px, env(safe-area-inset-bottom))", display: "flex", flexDirection: "column", gap: 14 }}>
+      <div className="settings-scroll-column" style={{ flex: 1, minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", padding: 16, paddingBottom: "max(16px, var(--safe-bottom))", display: "flex", flexDirection: "column", gap: 14 }}>
         <SettingsHighlightContext.Provider value={shell?.highlight ?? null}>{level.node}</SettingsHighlightContext.Provider>
       </div>
     </div>
@@ -202,7 +202,7 @@ export function MobileStack({ sections, active, view, onSelect, onBack, onClose,
             onDismiss={onSearchDismiss}
           />
         ) : (
-          <div className="settings-scroll-column" style={{ flex: 1, minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", padding: "8px 12px", paddingBottom: "max(16px, env(safe-area-inset-bottom))", display: "flex", flexDirection: "column", gap: 14 }}>
+          <div className="settings-scroll-column" style={{ flex: 1, minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", padding: "8px 12px", paddingBottom: "max(16px, var(--safe-bottom))", display: "flex", flexDirection: "column", gap: 14 }}>
             {groups.map((group) => (
               <div key={group.group} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 <div style={{ padding: "6px 6px 0", fontSize: 11, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--text-dim)" }}>{groupLabel(group.group, harnessLabel)}</div>
@@ -252,7 +252,7 @@ export function MobileStack({ sections, active, view, onSelect, onBack, onClose,
       {/* Level 2: one hub. */}
       <div inert={covered} style={{ display: view === "panel" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0 }}>
         <MobileLevelHeader title={activeSection?.label ?? "Settings"} onBack={onBack} backLabel="Back to Settings" onClose={onClose} />
-        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", paddingBottom: "env(safe-area-inset-bottom)" }}>
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", paddingBottom: "var(--safe-bottom)" }}>
           {children}
         </div>
       </div>
