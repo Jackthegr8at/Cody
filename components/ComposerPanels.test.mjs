@@ -75,6 +75,136 @@ test("panels start collapsed with live summary in their headers", () => {
   assert.doesNotMatch(html, /Map the surface/);
 });
 
+test("plan-keeper subtasks nest under their parent with an n/m count, ready to ellipsize", () => {
+  const html = renderToStaticMarkup(React.createElement(ComposerPanels, {
+    todoPhases: [{
+      name: "Implementation",
+      tasks: [
+        { content: "Map the surface", status: "completed" },
+        { content: "Wire panels", status: "in_progress" },
+      ],
+    }],
+    planOverlay: {
+      subtasks: {
+        "Wire panels": [
+          { content: "Add subtask type", status: "completed" },
+          { content: "Render nested rows", status: "pending" },
+          { content: "Style the connector", status: "pending" },
+        ],
+      },
+      autoCompleted: [],
+      updatedAt: 1,
+    },
+    subagents: [],
+    onSelectSubagent: noop,
+    defaultExpanded: true,
+  }));
+  assert.match(html, /1\/3/, "parent shows the n/m subtask count");
+  const subtaskRows = [...html.matchAll(/data-testid="todo-subtask"/g)];
+  assert.equal(subtaskRows.length, 3, "all three subtasks render as their own rows");
+  assert.match(html, /Add subtask type/);
+  assert.match(html, /Render nested rows/);
+  assert.match(html, /Style the connector/);
+  // Nested, not appended as more top-level rows: the subtask block sits
+  // between the parent's own row and the connector, indented under it.
+  assert.match(html, /border-l border-border/, "a thin connector marks the nesting");
+  // The completed task ("Map the surface") has no subtasks of its own and
+  // must not carry a stray n/m count.
+  const mapIdx = html.indexOf("Map the surface");
+  const wireIdx = html.indexOf("Wire panels");
+  assert.ok(!html.slice(mapIdx, wireIdx).includes("1/3"));
+  // Ellipsis-ready at any width, including a 390px composer: the text span
+  // itself carries both the truncation classes and min-w-0, so a long
+  // subtask string clips instead of stretching the card.
+  const addIdx = html.indexOf(">Add subtask type<");
+  const spanStart = html.lastIndexOf("<span", addIdx);
+  const spanTag = html.slice(spanStart, html.indexOf(">", spanStart) + 1);
+  assert.match(spanTag, /min-w-0/);
+  assert.match(spanTag, /truncate/);
+  assert.doesNotMatch(html, /planKeeper\./, "no raw translation keys leak into markup");
+});
+
+test("plan-keeper auto-mark shows only for autoCompleted task contents", () => {
+  const html = renderToStaticMarkup(React.createElement(ComposerPanels, {
+    todoPhases: [{
+      name: "Implementation",
+      tasks: [
+        { content: "Map the surface", status: "completed" },
+        { content: "Wire panels", status: "in_progress" },
+      ],
+    }],
+    planOverlay: { subtasks: {}, autoCompleted: ["Map the surface"], updatedAt: 1 },
+    subagents: [],
+    onSelectSubagent: noop,
+    defaultExpanded: true,
+  }));
+  const marks = [...html.matchAll(/data-testid="todo-auto-mark"/g)];
+  assert.equal(marks.length, 1, "exactly one auto-mark, not one per task");
+  const mapIdx = html.indexOf("Map the surface");
+  const wireIdx = html.indexOf("Wire panels");
+  const markIdx = html.indexOf('data-testid="todo-auto-mark"');
+  assert.ok(mapIdx < markIdx && markIdx < wireIdx, "the mark sits with the auto-completed task, not the other one");
+  // Quiet marker, never a colored badge: the icon colors from --text-dim
+  // specifically, bounded to the marker's own markup (not the rest of the
+  // page) so this actually fails if a future edit swaps in an accent color.
+  const markStart = html.indexOf('data-testid="todo-auto-mark"');
+  const markMarkup = html.slice(markStart, html.indexOf("</span>", markStart));
+  assert.match(markMarkup, /stroke="var\(--text-dim\)"/, "wand icon colors from --text-dim: " + markMarkup);
+  assert.doesNotMatch(markMarkup, /var\(--(accent|status-[a-z]+)\)/, "never a colored badge: " + markMarkup);
+});
+
+test("plan-keeper overlay adds no click handlers and disappears cleanly when absent", () => {
+  const phases = [{ name: "Implementation", tasks: [{ content: "Wire panels", status: "in_progress" }] }];
+  const withOverlay = renderToStaticMarkup(React.createElement(ComposerPanels, {
+    todoPhases: phases,
+    planOverlay: {
+      subtasks: { "Wire panels": [{ content: "Add subtask type", status: "pending" }] },
+      autoCompleted: ["Wire panels"],
+      updatedAt: 1,
+    },
+    subagents: [],
+    onSelectSubagent: noop,
+    defaultExpanded: true,
+  }));
+  // SSR never serializes React event handlers as attributes; this also
+  // guards against a literal inline handler ever being added to a row.
+  assert.doesNotMatch(withOverlay, /onclick=/i);
+  const withoutOverlay = renderToStaticMarkup(React.createElement(ComposerPanels, {
+    todoPhases: phases,
+    subagents: [],
+    onSelectSubagent: noop,
+    defaultExpanded: true,
+  }));
+  assert.doesNotMatch(withoutOverlay, /data-testid="todo-subtask"/);
+  assert.doesNotMatch(withoutOverlay, /data-testid="todo-auto-mark"/);
+  assert.match(withoutOverlay, /Wire panels/, "the plan itself is unaffected when no keeper overlay exists");
+});
+
+test("plan-keeper overlay with a malformed subtasks map never crashes the render", () => {
+  const phases = [{ name: "Implementation", tasks: [{ content: "Wire panels", status: "in_progress" }] }];
+  // A server bug or a future refactor could hand this component an overlay
+  // whose `subtasks` is missing or explicitly null instead of `{}` — the
+  // component must degrade to "no subtasks" instead of throwing mid-render,
+  // which would take down the whole composer, not just one row.
+  for (const planOverlay of [
+    { autoCompleted: ["Wire panels"], updatedAt: 1 },
+    { subtasks: null, autoCompleted: ["Wire panels"], updatedAt: 1 },
+    { subtasks: undefined, autoCompleted: ["Wire panels"], updatedAt: 1 },
+  ]) {
+    const html = renderToStaticMarkup(React.createElement(ComposerPanels, {
+      todoPhases: phases,
+      planOverlay,
+      subagents: [],
+      onSelectSubagent: noop,
+      defaultExpanded: true,
+    }));
+    assert.match(html, /Wire panels/);
+    assert.doesNotMatch(html, /data-testid="todo-subtask"/);
+    // autoCompleted is independent of subtasks and still renders correctly.
+    assert.match(html, /data-testid="todo-auto-mark"/);
+  }
+});
+
 test("live chips show current tool, telemetry, and async marker", () => {
   const html = renderToStaticMarkup(React.createElement(ComposerPanels, {
     todoPhases: [],

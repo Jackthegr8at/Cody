@@ -18,7 +18,11 @@ import { captureLoopbackScreenshot, ScreenshotError } from "./preview-screenshot
 import { ProjectTodoError, type TodoDocument, formatTodoForAgent, mutateProjectTodo, parseTodoAgentAction, readProjectTodo, todoAgentActionOperation } from "./project-todo";
 import { resolveProject } from "./worktree";
 import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
+import { assistantReplyText, replyAsksUser } from "./reply-question";
+import { PlanKeeper } from "./plan-keeper/keeper";
+import { readPlanOverlay } from "./plan-keeper/overlay";
 import { PRESET_FULL } from "./tool-presets";
+import { isRecord } from "./type-guards";
 import type {
   BashResultInfo,
   HostToolDefinition,
@@ -414,6 +418,9 @@ export class AgentSessionWrapper {
   private promptRunning = false;
   private bashRunning = false;
   private streaming = false;
+  /** Text of the newest assistant reply in the current run: what omp's todo
+   * reminder would auto-continue past. Cleared at run boundaries. */
+  private lastReplyText: string | null = null;
   private compacting = false;
   private fastModeEnabled = false;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -432,6 +439,10 @@ export class AgentSessionWrapper {
   private hostUriSchemes: Map<string, { writable?: boolean }> = new Map();
   /** host_uri_request ids awaiting a host_uri_result from the browser. */
   private pendingHostUris: Map<string, AgentEvent> = new Map();
+  /** Watches this session's activity and keeps the composer-attached plan
+   * live (lib/plan-keeper/keeper.ts); lazily created once the session id is
+   * known (getPlanKeeper). */
+  private planKeeper: PlanKeeper | null = null;
   /** Resolves once an in-flight destroyAndWait finishes; null when idle. Read
    * by startRpcSession so a replacement spawn awaits the old child's exit. */
   destroyPromise: Promise<void> | null = null;
@@ -453,6 +464,28 @@ export class AgentSessionWrapper {
 
   get sessionId(): string {
     return this._sessionId;
+  }
+
+  /** The session id is not known until applyIdentity/buildWebState runs, so
+   * this stays null until then — real activity always arrives after that. */
+  private getPlanKeeper(): PlanKeeper | null {
+    if (!this._sessionId) return null;
+    if (!this.planKeeper) {
+      this.planKeeper = new PlanKeeper({
+        sessionId: this._sessionId,
+        getTodoPhases: async () => {
+          const state = await this.proc.sendCommand<RpcSessionState>({ type: "get_state" });
+          return state.todoPhases ?? [];
+        },
+        setTodoPhases: async (phases) => {
+          await this.proc.sendCommand({ type: "set_todos", phases });
+        },
+        // The frame interfaces are exact shapes; AgentEvent carries an index
+        // signature, which an interface type does not satisfy structurally.
+        emit: (frame) => this.emit({ ...frame }),
+      });
+    }
+    return this.planKeeper;
   }
 
   get sessionFile(): string {
@@ -501,8 +534,27 @@ export class AgentSessionWrapper {
     this.applyIdentity(state);
   }
 
+  /**
+   * Every write to _sessionId goes through here — both applyIdentity AND
+   * buildWebState can observe a freshly-changed id (a branch/new_session/
+   * switch_session, or a non-resumable restart, surfaces through whichever
+   * one next reads get_state), so the reset lives in one place rather than
+   * being duplicated — and possibly missed — at each call site. A real
+   * change (not the routine "still the same id" case) means the plan
+   * keeper, built for the OLD session's cody-plan/<id>.json, must be
+   * dropped so getPlanKeeper() rebuilds fresh — new digest, new overlay
+   * path — against the new one.
+   */
+  private setSessionId(id: string): void {
+    if (this._sessionId && this._sessionId !== id) {
+      this.planKeeper?.dispose();
+      this.planKeeper = null;
+    }
+    this._sessionId = id;
+  }
+
   private applyIdentity(state: RpcSessionState): void {
-    this._sessionId = state.sessionId;
+    this.setSessionId(state.sessionId);
     this._sessionFile = state.sessionFile ?? "";
     this._sessionName = state.sessionName;
     this.streaming = state.isStreaming;
@@ -547,6 +599,7 @@ export class AgentSessionWrapper {
       }
       case "agent_start":
         this.streaming = true;
+        this.lastReplyText = null;
         // The session file can appear just after the prompt acknowledgement.
         // Invalidate and signal the sidebar now rather than waiting for the
         // agent's first reply or terminal event.
@@ -566,8 +619,57 @@ export class AgentSessionWrapper {
         if (event.isTerminal !== false) {
           this.streaming = false;
           this.promptRunning = false;
+          this.lastReplyText = null;
           invalidateSessionListCache();
+          void this.getPlanKeeper()?.notifyTerminalAgentEnd();
         }
+        break;
+      case "message_end": {
+        const text = assistantReplyText(event as unknown as { type: string; [key: string]: unknown });
+        if (text !== null) {
+          this.lastReplyText = text;
+          this.getPlanKeeper()?.notifyMessageEnd(text);
+        }
+        break;
+      }
+      case "todo_reminder": {
+        // omp auto-continues an unfinished todo list unless the LAST line of
+        // the reply is a question; a question anywhere else in the reply was
+        // overridden and the agent carried on as if the user had answered.
+        // Stop that continuation here so the run ends at the question. A
+        // reply that asked nothing keeps the reminder (it is what makes the
+        // agent mark its tasks done and finish them).
+        if (this.lastReplyText !== null && replyAsksUser(this.lastReplyText)) {
+          this.lastReplyText = null;
+          void this.proc.sendCommand({ type: "abort" }).catch((error: unknown) => {
+            console.warn("[rpc-manager] could not pause the todo reminder:", error);
+          });
+          this.emit({
+            type: "notice",
+            level: "info",
+            message: "Paused for your answer. The engine's todo reminder would have continued without it.",
+          });
+        }
+        break;
+      }
+      case "tool_execution_end": {
+        const toolName = typeof event.toolName === "string" ? event.toolName : "tool";
+        this.getPlanKeeper()?.notifyToolExecutionEnd(toolName, event.args, event.result);
+        break;
+      }
+      case "subagent_lifecycle": {
+        const payload = event.payload;
+        if (isRecord(payload) && (payload.status === "completed" || payload.status === "failed" || payload.status === "aborted")) {
+          this.getPlanKeeper()?.notifySubagentTerminal({
+            agent: typeof payload.agent === "string" ? payload.agent : undefined,
+            description: typeof payload.description === "string" ? payload.description : undefined,
+            status: payload.status,
+          });
+        }
+        break;
+      }
+      case "turn_end":
+        this.getPlanKeeper()?.notifyTurnEnd();
         break;
       case "prompt_result":
         // Local-only prompt (builtin/extension slash command) — no agent run.
@@ -1123,7 +1225,7 @@ export class AgentSessionWrapper {
     this.compacting = state.isCompacting;
     this._sessionName = state.sessionName;
     if (state.sessionId) {
-      this._sessionId = state.sessionId;
+      this.setSessionId(state.sessionId);
       this._sessionFile = state.sessionFile ?? this._sessionFile;
     }
     return {
@@ -1161,6 +1263,9 @@ export class AgentSessionWrapper {
       fastModeEnabled: state.fastModeEnabled ?? state.fastMode ?? this.fastModeEnabled,
       fastModeActive: state.fastModeActive,
       todoPhases: state.todoPhases ?? [],
+      // Absent when the plan keeper has never touched this session — the
+      // client treats that the same as an empty overlay.
+      ...(state.sessionId ? { planOverlay: readPlanOverlay(state.sessionId) ?? undefined } : {}),
       extensionStatuses: Array.from(this.extensionStatuses, ([key, text]) => ({ key, text })),
       extensionWidgets: Array.from(this.extensionWidgets.values()),
     };
@@ -1529,6 +1634,7 @@ export class AgentSessionWrapper {
       clearTimeout(this.sessionFileSignalTimer);
       this.sessionFileSignalTimer = null;
     }
+    this.planKeeper?.dispose();
     this.unsubscribeFrames?.();
     this.clearPendingUiRequests();
     if (this.mcpListWaiter) {

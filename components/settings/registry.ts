@@ -180,9 +180,14 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     group: "engine",
     Icon: Cpu,
     phoneOrder: 3,
+    // Assignments carries no capability gate: the engine's own roles need
+    // `models`, but Cody's Distill chain lives on the same segment and is
+    // gated on its route instead. `ModelsPanel` decides which of the two
+    // it can render (and falls back to the catalog when neither), so the
+    // shell must not strip the sub-view from `sub` before it gets there.
     subViews: [
       { id: "catalog", label: "Catalog" },
-      { id: "assignments", label: "Assignments", needsCapability: "models" },
+      { id: "assignments", label: "Assignments" },
     ],
     // Both reads are cache-only: `/api/models/new?cached=1` peeks the
     // catalog cache (`pending: true` when cold, never a spawn) and carries

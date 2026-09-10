@@ -10,9 +10,28 @@ model is doing the work.
 - **`main` is the only branch.** Commit and push directly to `main`. Never
   create feature branches; delete any that appear. Pull requests are not
   part of this workflow.
-- **Every push to `main` IS a release.** CI (.github/workflows/docker.yml)
-  builds the container, runs the smoke gate, and republishes
-  `ghcr.io/nphil/cody:latest`, which the owner's Unraid server pulls.
+- **The forge is Gitea, not GitHub.** Cody moved to the self-hosted forge
+  at `https://git.nateshome.net/nphilip89/Cody` (git remote `forge`; `main`
+  tracks `forge/main`). Push there and only there: `git push forge main
+  [vX.Y.Z]`. The `origin` remote (github.com/nphil/Cody) is the pre-migration
+  mirror, is no longer pushed, and its `.github/workflows` do not run for
+  this repo; `.github/workflows/desktop.yml` stays only until the desktop
+  build is ported. Never re-point any workflow, update source, image name or
+  release step at GitHub or GHCR.
+- **Every push to `main` IS a release.** CI (`.gitea/workflows/docker.yml`,
+  Gitea Actions on the owner's runners) builds the container, runs the smoke
+  gate, and republishes `git.nateshome.net/nphilip89/cody:latest`, which the
+  owner's Unraid server pulls. A v-tag or a versioned dispatch additionally
+  tags `:X.Y.Z` and cuts a Gitea Release through the Forge API (the
+  changelog ShipLog shows in Unraid's Docker tab).
+  Watch runs with Cody's own `forge` host tool (`lib/forge/tool.ts`, given
+  to every omp session): `forge op=run_watch` after a push polls the newest
+  run on the default host (`nateforge`) and reports failing jobs with a log
+  tail; `op=runs`, `op=packages`, `op=release_create` cover the rest. Never
+  `gh`. When the tool is unavailable (a restricted tool set), the same
+  answers come from the Gitea API: `GET
+  https://git.nateshome.net/api/v1/repos/nphilip89/Cody/actions/runs?limit=3`
+  with `Authorization: token <nateforge token from /data/agent/cody-forge.json>`.
   Therefore: never push unverified work. The bar before any push:
   `npm run typecheck && npm run lint && npm test && npm run build`, plus a
   real exercise of whatever changed (route smoke via jiti, a Playwright
@@ -78,7 +97,7 @@ tokens conserved deliberately:
 ## Deployment context
 
 - Production is a Docker container on the owner's **Unraid** server
-  (reachable over Tailscale), installed from `ghcr.io/nphil/cody:latest`
+  (reachable over Tailscale), installed from `git.nateshome.net/nphilip89/cody:latest`
   with the template in `docker/unraid-template.xml`; walkthrough in
   `docs/unraid.md`. The image is engine-free; engines install from the
   onboarding picker into `/data/agent/tools`.

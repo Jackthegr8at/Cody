@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { Ban, Loader2 } from "lucide-react";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { useI18n } from "@/lib/i18n";
@@ -9,6 +9,7 @@ import { formatCost, formatDuration, formatTokens, shortModel } from "@/lib/suba
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { MarkdownBody } from "./MarkdownBody";
 import { Dialog, DialogContent, DialogTitle } from "./ui/primitives";
+import { toast } from "./ui/toast";
 import type { SubagentInfo } from "@/hooks/useAgentSession";
 import { parseSubagentProgress } from "@/lib/subagent-types";
 import type { SubagentActivityEvent, SubagentProgress, SubagentSnapshotLike } from "@/lib/subagent-types";
@@ -269,6 +270,107 @@ export function subagentActivityLabel(event: SubagentActivityEvent, t: (key: str
   return event.label;
 }
 
+/** Second click within this window confirms the cancel; otherwise it disarms. */
+const CANCEL_CONFIRM_WINDOW_MS = 4000;
+const CANCEL_SUMMARY_MAX = 160;
+
+/** The steer that asks the parent model to cancel a subtask. omp exposes no
+ * per-subagent abort over RPC, so the parent is told exactly which hub job to
+ * cancel and to carry on without it. Exported for tests. */
+export function cancelSubtaskSteerText(subagent: Pick<SubagentInfo, "id" | "agent" | "task" | "description" | "assignment">): string {
+  const raw = (subagent.task ?? subagent.assignment ?? subagent.description ?? "").replace(/\s+/g, " ").trim();
+  const summary = raw.length > CANCEL_SUMMARY_MAX ? raw.slice(0, CANCEL_SUMMARY_MAX - 1).trimEnd() + "…" : raw;
+  const idJson = JSON.stringify(subagent.id);
+  return `The user cancelled subtask ${idJson} (${subagent.agent}: ${summary}). Cancel it now with hub cancel (ids: [${idJson}]) and continue without its result; do not wait for or use anything it produces.`;
+}
+
+/** Header icon button that steers the parent model to cancel a running
+ * subtask. Renders nothing unless the child is still live AND the parent can
+ * be steered; a first click arms it, a second within four seconds sends the
+ * steer. It never claims the child was killed: the parent decides. Mirrors
+ * the DialogContent close button's geometry so the pair reads as one row.
+ * Exported for SSR tests. */
+export function CancelSubtaskButton({ subagent, status, canSteer, requested, onRequested, onSteer }: {
+  subagent: Pick<SubagentInfo, "id" | "agent" | "task" | "description" | "assignment">;
+  status: string | undefined;
+  canSteer: boolean;
+  requested: boolean;
+  onRequested: (subagentId: string) => void;
+  onSteer?: (message: string) => Promise<void>;
+}) {
+  const { t } = useI18n();
+  const [armed, setArmed] = useState(false);
+  const [sending, setSending] = useState(false);
+  const disarmTimerRef = useRef<number | undefined>(undefined);
+
+  // A new subagent in the same mounted button must not inherit an armed
+  // state; the cleanup also covers unmount.
+  useEffect(() => {
+    setArmed(false);
+    return () => clearTimeout(disarmTimerRef.current);
+  }, [subagent.id]);
+
+  const live = status === "started" || status === "pending" || status === "running";
+  if (!live || !canSteer || !onSteer) return null;
+
+  const handleClick = async () => {
+    if (requested || sending) return;
+    if (!armed) {
+      setArmed(true);
+      disarmTimerRef.current = window.setTimeout(() => setArmed(false), CANCEL_CONFIRM_WINDOW_MS);
+      return;
+    }
+    clearTimeout(disarmTimerRef.current);
+    setArmed(false);
+    setSending(true);
+    try {
+      await onSteer(cancelSubtaskSteerText(subagent));
+      onRequested(subagent.id);
+      toast.info(t("subagentTranscript.cancelRequestedToast"));
+    } catch (error) {
+      // A rejected steer (engine without the command, dropped session) is the
+      // whole story: the button stays available so the user can retry.
+      toast.error(t("subagentTranscript.cancelFailed"), error instanceof Error ? error.message : String(error));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const label = requested
+    ? t("subagentTranscript.cancelRequested")
+    : armed ? t("subagentTranscript.cancelConfirm") : t("subagentTranscript.cancel");
+  const color = requested ? "var(--text-dim)" : "var(--status-error)";
+  const idleBackground = armed ? "color-mix(in srgb, var(--status-error) 14%, transparent)" : "transparent";
+  return (
+    <button
+      type="button"
+      onClick={() => { void handleClick(); }}
+      disabled={requested || sending}
+      aria-label={label}
+      title={label}
+      aria-pressed={armed || undefined}
+      data-cancel-subtask={requested ? "requested" : armed ? "armed" : "idle"}
+      className="ui-focus-ring"
+      style={{
+        position: "absolute", top: 8, right: 44, zIndex: 1,
+        width: 32, height: 32, minWidth: 32, minHeight: 32,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        background: idleBackground,
+        border: "none",
+        borderRadius: "var(--radius-control)",
+        color,
+        cursor: requested ? "default" : sending ? "wait" : "pointer",
+        touchAction: "manipulation",
+        transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
+      }}
+      onMouseEnter={(e) => { if (!requested) e.currentTarget.style.background = "var(--bg-hover)"; }}
+      onMouseLeave={(e) => { e.currentTarget.style.background = idleBackground; }}
+    >
+      {sending ? <Loader2 size={16} aria-hidden="true" className="icon-spin" /> : <Ban size={16} aria-hidden="true" />}
+    </button>
+  );
+}
+
 /** Scrollable transcript list with stick-to-bottom follow. Memoized so live
  * status frames re-rendering the dialog shell never touch the (potentially
  * large) message list; rows render additively because the messages array only
@@ -380,16 +482,26 @@ const TranscriptPanel = memo(function TranscriptPanel({ messages, loading, error
   );
 });
 
-export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersion, events, onClose }: {
+export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersion, events, onSteer, onClose }: {
   subagent: SubagentInfo | null;
   sessionId: string | null;
   transcriptVersion: number;
   events?: SubagentActivityEvent[];
+  /** Steers the parent turn (the composer's steer path). Absent when the
+   * engine cannot be steered or the parent is idle; the cancel affordance
+   * then hides rather than rendering broken. */
+  onSteer?: (message: string) => Promise<void>;
   onClose: () => void;
 }) {
   const { t } = useI18n();
   const reducedMotion = usePrefersReducedMotion();
   const [detail, setDetail] = useState<SubagentSnapshotLike | null>(null);
+  // Subagent ids whose cancel steer was sent, for the life of this mounted
+  // dialog: reopening the same child must not offer a second cancel.
+  const [cancelRequestedIds, setCancelRequestedIds] = useState<ReadonlySet<string>>(() => new Set());
+  const markCancelRequested = useCallback((id: string) => {
+    setCancelRequestedIds((prev) => prev.has(id) ? prev : new Set(prev).add(id));
+  }, []);
   const [completion, setCompletion] = useState<string | null>(null);
   const [completionTruncated, setCompletionTruncated] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -643,6 +755,7 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
   const subagentActive = live && !completion
     && (currentStatus === "started" || currentStatus === "pending" || currentStatus === "running");
   const recentEvents = events && events.length > 0 ? events.slice(-4) : null;
+  const cancelVisible = subagentActive && onSteer !== undefined;
 
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
@@ -665,7 +778,17 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
           }}
         >
           <>
-            <div style={{ display: "flex", alignItems: "flex-start", gap: 10, flexShrink: 0, padding: "16px 18px 12px", paddingRight: 44 }}>
+            {subagentActive && (
+              <CancelSubtaskButton
+                subagent={subagent}
+                status={currentStatus}
+                canSteer={cancelVisible}
+                requested={cancelRequestedIds.has(subagent.id)}
+                onRequested={markCancelRequested}
+                onSteer={onSteer}
+              />
+            )}
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 10, flexShrink: 0, padding: "16px 18px 12px", paddingRight: cancelVisible ? 80 : 44 }}>
               <div style={{ minWidth: 0, flex: 1 }}>
                 <DialogTitle style={{ marginBottom: 2, fontSize: 16, lineHeight: 1.3 }}>
                   <span style={{ fontFamily: "var(--font-mono)", color: "var(--accent)", fontSize: 14 }}>{agent}</span>

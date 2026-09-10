@@ -45,3 +45,24 @@ export function requireAdmin(request: Request): { user: UserRecord } | { respons
   }
   return resolved;
 }
+
+/**
+ * Admin-only, except that "no accounts exist yet" (`no_accounts`) is not a
+ * missing permission — it is the OPEN-INSTANCE case, where whoever is looking
+ * is already treated as the administrator (the un-gated `/api/omp-settings`
+ * PUT lets that same viewer write the engine's own config), so refusing an
+ * instance-state write here would only make a feature inert rather than
+ * protect anything.
+ *
+ * Null means "allowed"; a response means "return this". Used by the writes to
+ * Cody-level instance state: the model catalog's seen ledger and Distill's
+ * model chain.
+ */
+export function requireAdminOrOpenInstance(request: Request): NextResponse | null {
+  const resolved = requireCredential(request);
+  if ("response" in resolved) return resolved.response.status === 409 ? null : resolved.response;
+  if (resolved.credential.user.role !== "admin") {
+    return jsonError("Administrator access required", 403, "admin_required");
+  }
+  return null;
+}

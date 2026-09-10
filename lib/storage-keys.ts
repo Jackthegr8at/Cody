@@ -59,6 +59,9 @@ export const STORAGE_KEYS = {
   terminalSoftKeyIds: "cody:terminal-soft-key-ids",
   /** Stream pacing parameters (JSON-serialized StreamTuning). */
   streamTuning: "cody:stream-tuning",
+  /** Distill preferences: reply verbosity + collapsed-thinking summaries
+   * (JSON-serialized DistillPreferences from lib/distill-preferences). */
+  distill: "cody:distill",
 } as const;
 
 /** localStorage prefixes completed with a workspace path. */
@@ -126,6 +129,7 @@ export const STORAGE_EVENTS = {
   soundPrefChange: "cody:sound-pref-change",
   terminalSoftKeysChange: "cody:terminal-soft-keys-change",
   streamTuningChange: "cody:stream-tuning-change",
+  distillChange: "cody:distill-change",
 } as const;
 
 /**

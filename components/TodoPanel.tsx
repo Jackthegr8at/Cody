@@ -8,6 +8,7 @@ import {
   useState,
   type CSSProperties,
   type KeyboardEvent,
+  type MouseEvent,
   type ReactNode,
   type RefObject,
 } from "react";
@@ -24,7 +25,7 @@ import {
   MessageSquare,
   Pencil,
   Plus,
-  RotateCw,
+  RefreshCw,
   Trash2,
   X,
 } from "lucide-react";
@@ -151,6 +152,68 @@ function compactButtonStyle(disabled = false, accent = false): CSSProperties {
     opacity: disabled ? 0.55 : 1,
     touchAction: "manipulation",
   };
+}
+
+/** Header text button: the same treatment TasksPanel and InfoPanel use in the
+ * workspace-subtitle-bar (22px row, bordered, panel background). */
+function toolbarButtonStyle(disabled: boolean): CSSProperties {
+  return {
+    display: "flex",
+    alignItems: "center",
+    gap: 4,
+    flexShrink: 0,
+    height: 22,
+    padding: "0 7px",
+    border: "1px solid var(--border)",
+    borderRadius: "var(--radius-control)",
+    background: "var(--bg-panel)",
+    color: disabled ? "var(--text-dim)" : "var(--text)",
+    cursor: disabled ? "default" : "pointer",
+    fontSize: 11,
+    fontWeight: 600,
+    whiteSpace: "nowrap",
+    opacity: disabled ? 0.6 : 1,
+    transition: "background var(--dur-fast) var(--ease-out-warm), border-color var(--dur-fast) var(--ease-out-warm)",
+  };
+}
+
+function toolbarHoverIn(event: MouseEvent<HTMLButtonElement>) {
+  if (event.currentTarget.disabled) return;
+  event.currentTarget.style.background = "var(--bg-selected)";
+}
+
+function toolbarHoverOut(event: MouseEvent<HTMLButtonElement>) {
+  event.currentTarget.style.background = "var(--bg-panel)";
+}
+
+/** Header icon button: GitPanel's HeaderButton geometry (22px, borderless,
+ * subtle hover) so the refresh control lines up with the Git panel's. */
+function headerIconButtonStyle(disabled: boolean): CSSProperties {
+  return {
+    width: 22,
+    height: 22,
+    padding: 0,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+    border: "none",
+    borderRadius: "var(--radius-control)",
+    background: "transparent",
+    color: "var(--text-muted)",
+    cursor: disabled ? "default" : "pointer",
+    opacity: disabled ? 0.5 : 1,
+    transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
+  };
+}
+
+function headerIconHoverIn(event: MouseEvent<HTMLButtonElement>) {
+  if (event.currentTarget.disabled) return;
+  event.currentTarget.style.background = "var(--bg-subtle)";
+}
+
+function headerIconHoverOut(event: MouseEvent<HTMLButtonElement>) {
+  event.currentTarget.style.background = "transparent";
 }
 
 function inputStyle(): CSSProperties {
@@ -589,7 +652,7 @@ export function TodoPanelContent({
 
 return (
     <section aria-label={t("todo.title")} style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, overflow: "hidden", background: "var(--bg)" }}>
-      <div className="workspace-subtitle-bar" style={{ display: "flex", alignItems: "center", gap: 7, flexShrink: 0, borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
+      <div className="workspace-subtitle-bar" style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0, borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
         <ListTodo size={15} aria-hidden="true" style={{ color: "var(--accent)", flexShrink: 0 }} />
         <span style={{ flex: 1, minWidth: 0, color: "var(--text)", fontSize: 12, fontWeight: 650 }}>{t("todo.title")}</span>
         <button
@@ -597,13 +660,25 @@ return (
           className="ui-focus-ring"
           disabled={!onAskAgent || !cwd}
           onClick={onAskAgent}
-          style={{ ...compactButtonStyle(!onAskAgent || !cwd), minHeight: 26, padding: "3px 7px", flexShrink: 0, whiteSpace: "nowrap" }}
+          style={toolbarButtonStyle(!onAskAgent || !cwd)}
+          onMouseEnter={toolbarHoverIn}
+          onMouseLeave={toolbarHoverOut}
         >
-          <MessageSquare size={13} aria-hidden="true" />
+          <MessageSquare size={11} strokeWidth={2.2} aria-hidden="true" />
           {t("todo.askAgent")}
         </button>
-        <button type="button" className="ui-focus-ring" disabled={loading} onClick={onRefresh} title={t("todo.refresh")} aria-label={t("todo.refresh")} style={{ ...iconButtonStyle(loading), flexShrink: 0 }}>
-          <RotateCw size={14} aria-hidden="true" style={loading ? { animation: "spin 0.8s linear infinite" } : undefined} />
+        <button
+          type="button"
+          className="ui-focus-ring"
+          disabled={loading}
+          onClick={onRefresh}
+          title={t("todo.refresh")}
+          aria-label={t("todo.refresh")}
+          style={headerIconButtonStyle(loading)}
+          onMouseEnter={headerIconHoverIn}
+          onMouseLeave={headerIconHoverOut}
+        >
+          <RefreshCw size={13} strokeWidth={2} aria-hidden="true" style={loading ? { animation: "spin 0.8s linear infinite" } : undefined} />
         </button>
       </div>
 

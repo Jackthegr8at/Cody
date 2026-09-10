@@ -767,6 +767,68 @@ not a string array is `400 keys_required`, as is a body naming none of the
 three; unparseable JSON is `400 invalid_body`. Lists are stored
 deduplicated and sorted.
 
+## Distill — Incidental
+
+Model-written summaries: a one-line status for a collapsed thinking block, and
+a shorter version of a finished reply. Both need a one-off model call, which
+only an rpc-dialect engine (omp, pi) can serve — under an ACP engine every
+surface here refuses with code `unsupported` and the client hides the feature.
+
+### `GET|PUT /api/distill/config`
+
+The model chain. Cody-level state in the instance data dir
+(`cody-distill.json`), so it survives engine switches and engine upgrades.
+
+```json
+{"supported":true,"chain":["<provider>/<id>[:effort]","…"],"canManage":true}
+```
+
+- `chain[0]` is the primary and the rest are fallbacks in order; an empty
+  chain means "the engine's own default", which is also where the chain falls
+  through to once every entry has failed.
+- Selectors are validated SYNTACTICALLY only (non-empty, `provider/id`). A
+  selector the engine no longer knows is not an error: that attempt fails and
+  the next one is tried.
+- `supported` is false with a `reason` when the engine could serve Distill but
+  its binary is not installed; an engine that could never serve it answers
+  `400 unsupported` instead.
+- `canManage` is admin, or any viewer on an open instance (no accounts).
+- `PUT {"chain": [...]}` answers the same shape. A malformed selector or more
+  than eight entries is `400 invalid_chain`; unparseable JSON is
+  `400 invalid_body`.
+
+### `POST /api/distill` — SSE
+
+Body: `{sessionId, entryId?, blockIndex?, kind:"thinking"|"reply", text,
+verbosity?:"low"|"medium"|"high", final}`. `verbosity` is required for
+`kind:"reply"`. The session must be one the caller may see; a session with no
+file yet is allowed, because a thinking summary is asked for mid-turn.
+
+The answer is `text/event-stream`, one JSON object per `data:` line, and it
+always ends with exactly ONE terminal event:
+
+```
+data: {"type":"delta","text":"…"}
+data: {"type":"done","text":"<full text>","model":"<provider>/<id>","cached":false}
+```
+
+- `done.text` is the whole summary: **replace, never append.** `delta` events
+  are an optimization (a reply distill streams them, a thinking distill does
+  not), so a run whose streaming frames were not recognized still ends with
+  one `done`.
+- `model` is the selector that produced the text, or `""` when the engine's
+  own default did.
+- Failures are `{"type":"error","message","code"}` with code `unsupported`
+  (engine cannot run a one-off call), `no_model` (it could, but its binary is
+  missing), `too_large` (request body over 2 MB — the TEXT itself is never
+  rejected, it is truncated head+tail at 200 KB) or `failed`. A failed distill
+  leaves the original thinking or reply untouched.
+- Only the request itself fails with a status: `401 auth_required`,
+  `404 session_not_found`, `400 invalid_body`.
+- A finished summary of an identified entry is cached per session in the
+  instance data dir (`cody-distill/<sessionId>.json`, 400 entries) and is
+  replayed as a single `done` with `"cached":true`.
+
 ## `/api/auth/providers`, `/api/auth/login/{provider}`, `/api/auth/logout/{provider}` — Incidental
 
 Provider SIGN-IN with the active engine's own login (a Claude Pro/Max or

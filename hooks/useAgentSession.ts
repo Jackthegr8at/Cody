@@ -60,8 +60,8 @@ import { SESSION_PROMPT_IMAGE, SESSION_PROMPT_STEERING, sessionPromptCapabilityB
 import { toast } from "@/components/ui/toast";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import { createActiveGoal, parseActiveGoal, type ActiveGoal, type ActivePlan } from "@/lib/web-mode-state";
-import type { HostToolDefinition, HostUriSchemeDefinition, RpcAvailableSlashCommand, SessionStatsInfo, TodoPhase } from "@/lib/pi-types";
-import { asCount, isRecord } from "@/lib/type-guards";
+import type { HostToolDefinition, HostUriSchemeDefinition, PlanOverlay, RpcAvailableSlashCommand, SessionStatsInfo, TodoPhase } from "@/lib/pi-types";
+import { asCount, asNumber, asString, isRecord } from "@/lib/type-guards";
 import { addUsageTotals, aggregateMessageUsage, emptyUsageTotals, usageTokenTotal, type UsageTotals } from "@/lib/session-usage";
 import { SESSION_STORAGE_PREFIXES } from "@/lib/storage-keys";
 import {
@@ -196,6 +196,11 @@ type AgentStateResponse = {
   // omp only reports a count; the queued texts are tracked client-side.
   queuedMessageCount?: number;
   todoPhases?: TodoPhase[];
+  // Plan-keeper overlay (subtasks + which top-level contents the keeper
+  // auto-completed) for the session's in-progress task. Cody's own
+  // buildWebState addition, not an omp-reported field; absent/null means no
+  // keeper data exists yet for this session.
+  planOverlay?: PlanOverlay | null;
   // The engine's OWN model catalog, for engines that carry model selection as
   // per-SESSION state instead of a sessionless registry (every ACP engine:
   // the list an agent publishes depends on the account the session opened
@@ -244,6 +249,36 @@ function readSessionModes(state: AgentStateResponse | null | undefined): Session
     const description = typeof entry?.description === "string" && entry.description ? entry.description : undefined;
     return [description ? { id, name, description } : { id, name }];
   });
+}
+
+function readPlanOverlaySubtask(value: unknown): { content: string; status: "pending" | "completed" } | null {
+  if (!isRecord(value)) return null;
+  const content = asString(value.content);
+  const status = value.status;
+  if (!content || (status !== "pending" && status !== "completed")) return null;
+  return { content, status };
+}
+
+/** Defensively copy a plan-keeper overlay off get_state or a
+ * `plan_overlay_update` frame, dropping anything malformed rather than
+ * rendering a subtask list or auto-mark that cannot be trusted. A record
+ * that fails to parse at all returns null (caller keeps the previous
+ * overlay); a well-formed-but-empty one still returns a real value, so a
+ * keeper clearing its last subtasks actually clears the UI. */
+function readPlanOverlay(value: unknown): PlanOverlay | null {
+  if (!isRecord(value)) return null;
+  const subtasks: PlanOverlay["subtasks"] = {};
+  if (isRecord(value.subtasks)) {
+    for (const [parent, list] of Object.entries(value.subtasks)) {
+      if (!Array.isArray(list)) continue;
+      const items = list.flatMap((item) => readPlanOverlaySubtask(item) ?? []);
+      if (items.length > 0) subtasks[parent] = items;
+    }
+  }
+  const autoCompleted = Array.isArray(value.autoCompleted)
+    ? value.autoCompleted.filter((entry): entry is string => typeof entry === "string")
+    : [];
+  return { subtasks, autoCompleted, updatedAt: asNumber(value.updatedAt) ?? 0 };
 }
 
 export type SessionPromptCapabilities = { imageSupported: boolean };
@@ -945,6 +980,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [subagentEvents, setSubagentEvents] = useState<Record<string, SubagentActivityEvent[]>>({});
   const [subagentTranscriptVersions, setSubagentTranscriptVersions] = useState<Record<string, number>>({});
   const [todoPhases, setTodoPhases] = useState<TodoPhase[]>([]);
+  const [planOverlay, setPlanOverlay] = useState<PlanOverlay | null>(null);
   const [activeGoal, setActiveGoal] = useState<ActiveGoal | null>(null);
   const [activePlan, setActivePlan] = useState<ActivePlan | null>(null);
   const activeSubagentCount = subagents.filter((subagent) => subagent.source !== "history" && subagent.status === "started").length;
@@ -1192,6 +1228,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setLiveContextUsage(null);
     setEngineUsage(null);
     setSubagentUsage(null);
+    setPlanOverlay(null);
   }, [session?.id, newSessionCwd]);
 
   // A plan request is in progress only for its current agent turn.
@@ -1638,6 +1675,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // entirely, and undefined must not be read as "none pending".
           if (liveState.pendingPermissions !== undefined) adoptPermissionRequests(liveState.pendingPermissions);
           if (liveState.todoPhases !== undefined) setTodoPhases(liveState.todoPhases ?? []);
+          if (liveState.planOverlay !== undefined) setPlanOverlay(readPlanOverlay(liveState.planOverlay) ?? null);
           if (liveState.queuedMessageCount === 0 && Date.now() - queueMutatedAtRef.current >= 5000) setQueuedMessages(EMPTY_QUEUE);
         } else {
           // No live engine at all, so nothing can be blocked on an approval.
@@ -2448,6 +2486,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setIsCompacting(state?.isCompacting ?? false);
       // Also mid-run: this poll is the only todo-phase refresh while streaming.
       if (state?.todoPhases !== undefined) setTodoPhases(state.todoPhases ?? []);
+      if (state?.planOverlay !== undefined) setPlanOverlay(readPlanOverlay(state.planOverlay) ?? null);
       // Approvals are mirrored BEFORE the busy check below, because a turn
       // blocked on one is precisely a busy turn — reading them after the early
       // return would only ever see a session that no longer has any. This is
@@ -2472,6 +2511,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Network still down — the next poll / visibility / online tick retries.
     }
   }, [finishPromptWithoutStream, refreshSubagentRoster, adoptPermissionRequests, adoptSessionPromptCapabilities]);
+
+  // todo_auto_update means "todoPhases (and planOverlay) changed, go
+  // refetch" — unlike todo_reminder/todo_auto_clear (omp-native frames that
+  // only ever fire while a turn is actively running, so reconcileAgentState's
+  // run-gate is correct for them), the plan keeper's own final pass fires on
+  // TERMINAL agent_end and finishes its model call well after that — by the
+  // time todo_auto_update arrives, agentRunningRef has already flipped
+  // false and reconcileAgentState would silently no-op, dropping exactly
+  // the completions a trailing keeper pass is most likely to contain. This
+  // refresh is intentionally unconditional and narrow: just the two fields
+  // the keeper owns, regardless of whether a turn is running.
+  const refreshTodoState = useCallback((sid: string) => {
+    fetch(`/api/agent/${encodeURIComponent(sid)}`)
+      .then((r) => (r.ok ? r.json() as Promise<{ state?: AgentStateResponse }> : null))
+      .then((d) => {
+        if (sessionIdRef.current !== sid) return;
+        if (d?.state?.todoPhases !== undefined) setTodoPhases(d.state.todoPhases ?? []);
+        if (d?.state?.planOverlay !== undefined) setPlanOverlay(readPlanOverlay(d.state.planOverlay) ?? null);
+      })
+      .catch(() => {
+        // Network still down — the next todo_auto_update / turn_end / reload retries.
+      });
+  }, []);
 
   // A session with no name of its own shows a 50-character slice of its first
   // message in the sidebar — a sentence fragment, not a name. Once the first
@@ -2714,6 +2776,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               if (d.state?.extensionStatuses !== undefined) setExtensionStatuses(d.state.extensionStatuses ?? []);
               if (d.state?.extensionWidgets !== undefined) setExtensionWidgets(d.state.extensionWidgets ?? []);
               if (d.state?.todoPhases !== undefined) setTodoPhases(d.state.todoPhases ?? []);
+              if (d.state?.planOverlay !== undefined) setPlanOverlay(readPlanOverlay(d.state.planOverlay) ?? null);
               // omp reports only a queued count; an empty (or dead) session
               // means the client-tracked queue texts are stale.
               if ((!d.state || d.state.queuedMessageCount === 0) && Date.now() - queueMutatedAtRef.current >= 5000) setQueuedMessages(EMPTY_QUEUE);
@@ -2995,6 +3058,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "todo_auto_clear":
         if (sessionIdRef.current) void reconcileAgentState(sessionIdRef.current);
         break;
+      case "todo_auto_update":
+        if (sessionIdRef.current) refreshTodoState(sessionIdRef.current);
+        break;
+      case "plan_overlay_update": {
+        const overlay = readPlanOverlay(event.overlay);
+        if (overlay) setPlanOverlay(overlay);
+        break;
+      }
       case "auto_retry_start": {
         const attribution = fallbackAttributionForRole(event.role, subagentsRef.current);
         const errorMessage = typeof event.errorMessage === "string" && event.errorMessage.trim()
@@ -3240,7 +3311,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, beginAuthoritativeModelSync, consumeQueuedMessage, dispatchPendingModelSwitch, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, resetSubagentActivityState]);
+  }, [addNotice, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, beginAuthoritativeModelSync, consumeQueuedMessage, dispatchPendingModelSwitch, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, refreshTodoState, resetSubagentActivityState]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {
@@ -4433,7 +4504,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // label while the stream is not delivering; `streamAlert` is the banner for
     // a lost turn or an exhausted reconnect, with its two actions.
     streamDegraded, streamAlert, dismissStreamAlert, retryEventStream,
-    subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
+    subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases, planOverlay,
     activeGoal, activePlan,
     isNew,
     // Refs

@@ -39,6 +39,33 @@ test("first push after arming snaps: a block mounting mid-stream shows current t
   assert.ok(pacer.caughtUp());
 });
 
+test("revealFromStart animates a target that arrives whole in its first push", () => {
+  // A distilled reply can land in a single `done` frame. Without the flag
+  // the first push snaps and the reveal never happens.
+  const full = "A distilled answer that arrived in one frame and must still be revealed word by word.";
+  const pacer = createStreamPacer({ revealFromStart: true });
+  pacer.push(full);
+  assert.equal(pacer.text(), "", "nothing is shown before the first tick");
+  assert.equal(pacer.caughtUp(), false);
+  let prev = "";
+  drain(pacer);
+  assert.equal(pacer.text(), full);
+  // …and it grew monotonically rather than jumping straight to the end.
+  const stepped = createStreamPacer({ revealFromStart: true });
+  stepped.push(full);
+  stepped.tick(FRAME_MS);
+  prev = stepped.text();
+  assert.ok(prev.length > 0 && prev.length < full.length, `partial reveal after one frame, got ${prev.length}`);
+  assert.ok(full.startsWith(prev));
+});
+
+test("revealFromStart is off by default, so mid-stream mounts still snap", () => {
+  const pacer = createStreamPacer({ revealFromStart: false });
+  pacer.push("already streamed text");
+  assert.ok(pacer.caughtUp());
+  assert.equal(pacer.text(), "already streamed text");
+});
+
 test("paced growth is prefix-monotonic and prefers whole-word cuts", () => {
   const full = "The quick brown fox jumps over the lazy dog while the reveal keeps pace with it.";
   const pacer = createStreamPacer();

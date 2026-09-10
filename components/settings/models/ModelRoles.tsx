@@ -47,7 +47,10 @@ interface ModelRolesBody {
 }
 
 const ROLES_ROUTE = "/api/model-roles";
-function splitSelector(raw: string, selectors: ReadonlySet<string>): { model: string; effort: string } {
+/** Split `provider/id[:effort]` into its model and its reasoning level. A
+ * selector that IS a known model (a bare id containing a colon) keeps its
+ * colon; Distill's chain editor splits the same dialect. */
+export function splitSelector(raw: string, selectors: ReadonlySet<string>): { model: string; effort: string } {
   if (selectors.has(raw)) return { model: raw, effort: "" };
   const colon = raw.lastIndexOf(":");
   if (colon <= raw.lastIndexOf("/") || !isRecognizedThinkingSuffix(raw.slice(colon + 1))) {

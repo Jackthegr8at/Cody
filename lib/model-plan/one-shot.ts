@@ -74,15 +74,92 @@ interface LastAnswer {
 }
 
 /**
+ * The NDJSON reducer, separated from the process so it can be exercised
+ * without spawning anything.
+ *
+ * Every frame type but `turn_end`/`message_end` is noise for the answer, and
+ * an unrecognized one is silently ignored: the frame vocabulary belongs to the
+ * engine, so a renamed or added type must degrade to "no delta seen", never to
+ * a failed run. `onDelta` is an OPTIMIZATION on top of that — the answer is
+ * derived exactly the same way whether or not a single delta was recognized.
+ *
+ * omp's streaming frames carry the FULL accumulated message, never a delta
+ * (docs/api.md: "always replace, never append"), so the appended text is the
+ * suffix past what was already reported. A frame that is not an extension of
+ * what was reported (a restarted or rewritten message) yields no delta at all
+ * rather than duplicated text; the final answer still carries the truth.
+ */
+export function createFrameReader(onDelta?: (text: string) => void): {
+  consume(line: string): void;
+  sawFrame(): boolean;
+  answer(): string | null;
+} {
+  const last: LastAnswer = { turn: null, message: null };
+  let seen = false;
+  let reported = "";
+
+  const report = (text: string | null): void => {
+    if (!onDelta || !text || text === reported || !text.startsWith(reported)) return;
+    const delta = text.slice(reported.length);
+    reported = text;
+    onDelta(delta);
+  };
+
+  return {
+    consume(line: string): void {
+      if (!line.trim()) return;
+      let frame: unknown;
+      try {
+        frame = JSON.parse(line);
+      } catch {
+        return;
+      }
+      if (!isRecord(frame)) return;
+      // Any well-formed frame proves the child spoke; only these four can
+      // carry text, and everything else is skipped before it is inspected.
+      seen = true;
+      const type = frame.type;
+      if (type !== "turn_end" && type !== "message_end" && type !== "message_start" && type !== "message_update") {
+        return;
+      }
+      const text = assistantText(frame);
+      report(text);
+      if (!text) return;
+      // The answer never comes from a partial message.
+      if (type === "turn_end") last.turn = text;
+      else if (type === "message_end") last.message = text;
+    },
+    sawFrame: () => seen,
+    answer: () => last.turn ?? last.message,
+  };
+}
+
+/** Extra hooks the streaming caller needs and the plain one does not. */
+interface RunHooks {
+  onDelta?: (text: string) => void;
+  signal?: AbortSignal;
+}
+
+/**
  * Run omp and keep only the latest assistant text.
  *
  * `--mode=json` emits NDJSON event frames, not one JSON answer, so the stream
- * is parsed line by line; notice/session/message_update frames are noise. The
- * answer is the last assistant `turn_end`, with the last `message_end` as the
- * fallback for a run that ends without a turn frame.
+ * is parsed line by line; notice/session frames are noise. The answer is the
+ * last assistant `turn_end`, with the last `message_end` as the fallback for a
+ * run that ends without a turn frame.
  */
-function runOmpPrint(request: OneShotRequest, overlayPath: string, timeoutMs: number): Promise<LastAnswer> {
-  const { promise, resolve, reject } = Promise.withResolvers<LastAnswer>();
+function runOmpPrint(
+  request: OneShotRequest,
+  overlayPath: string,
+  timeoutMs: number,
+  hooks: RunHooks = {},
+): Promise<string | null> {
+  // A signal that fired BEFORE this call never delivers an "abort" event to a
+  // listener added below, so the check has to happen before the spawn: without
+  // it a run cancelled a tick early would start a child and hold it for the
+  // whole timeout.
+  if (hooks.signal?.aborted) return Promise.reject(new Error("the request was cancelled"));
+  const { promise, resolve, reject } = Promise.withResolvers<string | null>();
   const child = spawn(request.bin, [
     // Print mode: one prompt, one answer, no interactive session.
     "-p",
@@ -124,15 +201,14 @@ function runOmpPrint(request: OneShotRequest, overlayPath: string, timeoutMs: nu
     // silently fall back (a truncated first-message name, the heuristic plan).
   ], { cwd: tmpdir(), stdio: ["ignore", "pipe", "pipe"], env: engineChildEnv() });
 
-  const answer: LastAnswer = { turn: null, message: null };
+  const reader = createFrameReader(hooks.onDelta);
   let pending = "";
   let stderr = "";
-  let timedOut = false;
-  let sawFrame = false;
+  let settled = false;
 
   const timeoutError = `the model did not answer within ${Math.round(timeoutMs / 1000)}s`;
   const timer = setTimeout(() => {
-    timedOut = true;
+    settled = true;
     child.kill("SIGKILL");
     // Settle here rather than waiting for `close`: a killed omp that left a
     // grandchild holding the stdio pipes open never emits one, and the caller
@@ -140,29 +216,25 @@ function runOmpPrint(request: OneShotRequest, overlayPath: string, timeoutMs: nu
     reject(new Error(timeoutError));
   }, timeoutMs);
 
-  const consume = (line: string): void => {
-    if (!line.trim()) return;
-    let frame: unknown;
-    try {
-      frame = JSON.parse(line);
-    } catch {
-      return;
-    }
-    if (!isRecord(frame)) return;
-    sawFrame = true;
-    if (frame.type !== "turn_end" && frame.type !== "message_end") return;
-    const text = assistantText(frame);
-    if (!text) return;
-    if (frame.type === "turn_end") answer.turn = text;
-    else answer.message = text;
+  // A caller that walked away (the browser closed the SSE connection) must not
+  // leave a model call running for the rest of its timeout.
+  const onAbort = (): void => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    child.kill("SIGKILL");
+    reject(new Error("the request was cancelled"));
   };
+  hooks.signal?.addEventListener("abort", onAbort, { once: true });
+  // The signal can fire between the guard above and this registration.
+  if (hooks.signal?.aborted) onAbort();
 
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
     pending += chunk;
     let newline = pending.indexOf("\n");
     while (newline !== -1) {
-      consume(pending.slice(0, newline));
+      reader.consume(pending.slice(0, newline));
       pending = pending.slice(newline + 1);
       newline = pending.indexOf("\n");
     }
@@ -174,33 +246,38 @@ function runOmpPrint(request: OneShotRequest, overlayPath: string, timeoutMs: nu
 
   child.on("error", (error) => {
     clearTimeout(timer);
+    hooks.signal?.removeEventListener("abort", onAbort);
+    if (settled) return;
+    settled = true;
     reject(new Error(`could not run omp: ${error.message}`));
   });
   child.on("close", (code) => {
     clearTimeout(timer);
-    consume(pending);
-    if (timedOut) return; // already settled by the timer
-    if (!sawFrame) {
+    hooks.signal?.removeEventListener("abort", onAbort);
+    reader.consume(pending);
+    if (settled) return; // already settled by the timer or an abort
+    settled = true;
+    if (!reader.sawFrame()) {
       const detail = stderr.trim().split("\n").at(-1);
       reject(new Error(`omp produced no output${code === null ? "" : ` (exit ${code})`}${detail ? `: ${detail}` : ""}`));
       return;
     }
-    resolve(answer);
+    // A non-zero exit that still produced an answer is not a failure the
+    // caller can act on; an exit with no answer is reported as one below.
+    resolve(reader.answer());
   });
 
   return promise;
 }
 
-/** Ask a model one question and return its last assistant text. */
-export async function runOneShotModel(request: OneShotRequest): Promise<OneShotResult> {
+async function runOneShot(request: OneShotRequest, hooks: RunHooks): Promise<OneShotResult> {
   const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   let dir: string | null = null;
   try {
     dir = mkdtempSync(join(tmpdir(), "cody-one-shot-"));
     const overlayPath = join(dir, "overlay.yml");
     writeFileSync(overlayPath, OVERLAY_YAML, "utf8");
-    const answer = await runOmpPrint(request, overlayPath, timeoutMs);
-    const text = answer.turn ?? answer.message;
+    const text = await runOmpPrint(request, overlayPath, timeoutMs, hooks);
     if (!text) return { text: null, error: "the model returned no answer" };
     return { text, error: null };
   } catch (error) {
@@ -208,4 +285,24 @@ export async function runOneShotModel(request: OneShotRequest): Promise<OneShotR
   } finally {
     if (dir) rmSync(dir, { recursive: true, force: true });
   }
+}
+
+/** Ask a model one question and return its last assistant text. */
+export async function runOneShotModel(request: OneShotRequest): Promise<OneShotResult> {
+  return runOneShot(request, {});
+}
+
+/**
+ * The same run, reporting the answer as it arrives.
+ *
+ * `onDelta` receives each newly appended piece of assistant text so a caller
+ * streaming to a browser can paint before the run ends. It is strictly an
+ * optimization: the returned result is derived exactly as `runOneShotModel`
+ * derives it, so a run whose streaming frames were never recognized still
+ * answers with the full text.
+ */
+export async function runOneShotModelStreaming(
+  request: OneShotRequest & { onDelta?: (text: string) => void; signal?: AbortSignal },
+): Promise<OneShotResult> {
+  return runOneShot(request, { onDelta: request.onDelta, signal: request.signal });
 }

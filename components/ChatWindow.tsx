@@ -745,7 +745,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     permissionRequests, respondToPermission,
     isAutoModelSelection, autoModelSwitch, modelSwitchPending,
     agentPhase, streamDegraded, streamAlert, dismissStreamAlert, retryEventStream, activeGoal, activePlan,
-    subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
+    subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases, planOverlay,
     isNew,
     sessionIdRef, messagesEndRef, scrollContainerRef,
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, selectSmartModel,
@@ -1102,7 +1102,10 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
 
   // Steering and the follow-up queue are omp-protocol commands; a turn-based
   // engine answers them "unsupported", so they are not offered at all — the
-  // composer shows a waiting state for the duration of the turn instead.
+  // composer shows a waiting state for the duration of the turn instead. One
+  // steer handler is shared by the composer and the subagent dialog's
+  // "Cancel subtask", so both hide together when steering is not on offer.
+  const steerWhileRunning = (chatExtras || steeringSupported) && agentRunning ? handleSteer : undefined;
   // "Smart" is omp's model-ROLE resolution (config.yml modelRoles reached
   // through /api/model-roles), not a generic "pick one for me". Only an engine
   // with the models surface has roles to resolve, so pi — which has chatExtras
@@ -1121,7 +1124,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       ref={chatInputRef}
       onSend={handleSend}
       onAbort={handleAbort}
-      onSteer={(chatExtras || steeringSupported) && agentRunning ? handleSteer : undefined}
+      onSteer={steerWhileRunning}
       onFollowUp={chatExtras && agentRunning ? handleFollowUp : undefined}
       onPromptWithStreamingBehavior={chatExtras && agentRunning ? handlePromptWithStreamingBehavior : undefined}
       isStreaming={sessionBusy}
@@ -1283,6 +1286,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
         sessionId={session?.id ?? sessionIdRef.current ?? null}
         transcriptVersion={selectedSubagent ? (subagentTranscriptVersions[selectedSubagent.id] ?? 0) : 0}
         events={selectedSubagent ? (subagentEvents[selectedSubagent.id] ?? []) : undefined}
+        onSteer={steerWhileRunning}
         onClose={() => setSelectedSubagent(null)}
       />
 
@@ -1386,7 +1390,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
               handleLoadMoreClick={handleLoadMoreClick}
             />
             {streamState.isStreaming && streamState.streamingMessage && (
-              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} />
+              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} sessionId={session?.id ?? sessionIdRef.current ?? undefined} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} />
             )}
 
             {activityDisplayMode === "compact" && pendingToolHeaders.map((tool) => (
@@ -1546,6 +1550,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
           <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
             <ComposerPanels
               todoPhases={todoPhases}
+              planOverlay={planOverlay}
               subagents={subagentsCapable && chatExtras ? subagents : []}
               onSelectSubagent={setSelectedSubagent}
             />

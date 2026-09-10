@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
 import type { SubagentInfo } from "@/hooks/useAgentSession";
-import type { TodoPhase } from "@/lib/pi-types";
+import type { PlanOverlay, TodoPhase } from "@/lib/pi-types";
 import { countNestedSubagents, formatCost, formatDuration, formatTokens, shortModel } from "@/lib/subagent-format";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { TodoList } from "./TodoList";
@@ -307,8 +307,12 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
  * states. Each panel is independently collapsible via its header and starts
  * collapsed; the headers always show live progress / running-summary over
  * the full roster, even while the chip list is truncated. */
-export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, defaultExpanded = false }: {
+export function ComposerPanels({ todoPhases, planOverlay = null, subagents, onSelectSubagent, defaultExpanded = false }: {
   todoPhases: TodoPhase[];
+  /** Plan-keeper overlay (subtasks + auto-mark contents) for the in-progress
+   * task. Absent/null renders the plan exactly as it did before the keeper
+   * existed. */
+  planOverlay?: PlanOverlay | null;
   subagents: SubagentInfo[];
   onSelectSubagent: (subagent: SubagentInfo) => void;
   /** Initial expansion of both panels (default: collapsed). */
@@ -317,7 +321,7 @@ export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, defaul
   if (todoPhases.length === 0 && subagents.length === 0) return null;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
-      <TodoList phases={todoPhases} collapsible defaultExpanded={defaultExpanded} />
+      <TodoList phases={todoPhases} overlay={planOverlay} collapsible defaultExpanded={defaultExpanded} />
       <SubagentsPanel subagents={subagents} onSelectSubagent={onSelectSubagent} defaultExpanded={defaultExpanded} />
     </div>
   );

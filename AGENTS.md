@@ -171,6 +171,14 @@ app/api/
                                   check at a host; DELETE (admin) one host
   forge/[id]/test/route.ts        POST "test connection": GET {api}/user on that host,
                                   answering the login and (Gitea) the server version
+  distill/route.ts                POST one model-written summary of a thinking block
+                                  or a reply, streamed as SSE: `delta`* then exactly
+                                  one `done` (full text, replace never append) or one
+                                  `error` (unsupported|no_model|too_large|failed).
+                                  Ownership is canAccessSession alone, so a session
+                                  with no file yet (mid-turn) is allowed
+  distill/config/route.ts         GET/PUT the Distill model chain; 400 `unsupported`
+                                  under an ACP engine, PUT admin-or-open-instance
 
 lib/
   omp/                 shared omp foundations (paths, CLI probe, RpcProcess,
@@ -213,6 +221,19 @@ lib/
                        import/archive/export) refuses 400 `unsupported` under any
                        other engine instead of answering with omp's data
   file-access.ts       allowed file roots for /api/files and worktrees
+  distill/             Distill's server half (see "Distill" under Key Design
+                       Decisions):
+    config.ts          cody-distill.json in the instance data dir (0600, atomic):
+                       the fallback chain of `provider/id[:effort]` selectors
+    prompts.ts         the two prompts, the 200 KB head/tail clamp and the
+                       one-line thinking normalizer
+    cache.ts           finished summaries per session (cody-distill/<id>.json,
+                       400 entries, oldest evicted)
+    runner.ts          engine support (same rule as session-namer), the fallback
+                       chain and the 2-at-a-time queue
+  distill-preferences.ts  browser-local Distill preferences (`cody:distill`):
+                       reply verbosity + collapsed-thinking summaries, normalizer
+                       plus subscribe/snapshot like stream-tuning.ts
   harness/             pluggable engine seam: adapters (omp/pi/claude/codex/hermes),
                        runtime selection state, three transports (rpc-ui, ACP,
                        per-turn), session index, binary probe + on-demand install
@@ -429,7 +450,10 @@ components/
                         picker's sections), controls.tsx (shared row bits)
     models/             the Models hub: ModelCatalog, ModelCurationDialog
                         (omp's per-provider selection), ModelAssignments +
-                        ModelRoles (role → model), NewModelsNotice
+                        ModelRoles (role → model), DistillAssignment
+                        (Cody's own Distill chain, gated on
+                        /api/distill/config, not on a capability),
+                        NewModelsNotice
     engine/             the Behavior hub: RecommendedSettings +
                         recommended-cards.ts (the curated-card table),
                         SchemaSettingsList (the engine's complete schema,
@@ -458,6 +482,10 @@ hooks/
   useAudio.ts              completion sound + browser AudioContext unlock
   useDragDrop.ts           shared drag/drop state
   useDisplayRequests.ts    display-request SSE → snapshot/live request state
+  useDistill.ts            the client store over POST /api/distill: SSE framing,
+                           per-key in-memory cache, FIFO queue capped at two
+                           concurrent streams, supersede-by-abort, and the
+                           process-wide dormancy latch (unsupported/401/403)
   useIsMobile.ts           responsive breakpoint hook
   usePrefersReducedMotion.ts OS reduce-motion preference (SMIL-safe)
   useStreamTuning.tsx      live StreamTuning: playground context override, else the stored value
@@ -1237,7 +1265,7 @@ setting added upstream appears without a Cody change.
   file: the panel's "Ask the agent" button drops a prompt into the composer that names
   the path and the tool, so discoverability never depends on prompt injection Cody does
   not do. This remains separate from an engine execution plan (`omp todo` to
-  Composer `TodoList`): the Tasks tab calls the user-owned section To-do, while the legacy
+  Composer `TodoList`): the To-do tab (panel id `tasks`, renamed so the model never confuses it with the composer's task list) calls the user-owned section To-do, while the legacy
   `.cody/tasks.json` runner is its collapsed Commands section only when that file exists.
 - **Client**: `hooks/useDisplayRequests.ts` subscribes to the SSE route;
   `AppShell` auto-opens the right panel in `preview` mode on live requests —
@@ -1621,6 +1649,56 @@ handled or safely ignored.
 - Per-model token totals include input, output, cache-read, and cache-write
   tokens.
 
+### Distill: summaries that never break with the engine
+- **What it is.** A user-chosen model (Settings › Models › Assignments ›
+  Distill: primary + ordered fallbacks, `lib/distill/config.ts`) summarizes
+  two things on the client's request (`hooks/useDistill.ts`): a COLLAPSED
+  thinking block shows a one-line running summary under its header
+  (`data-testid="thinking-summary"`, re-requested while streaming every
+  ≥600 chars and ≥4 s, `final` once the block settles, lazily for history
+  blocks scrolled into view), and a FINISHED reply is replaced by a distilled
+  version at the Preferences verbosity (Off/Low/Medium/High,
+  `lib/distill-preferences.ts`) with a "Show full reply" footer
+  (`distilled-reply` / `distill-toggle`). Replies are distilled ONLY when
+  finalized in this page session or already cached; history is never
+  distilled on load, and replies under `REPLY_DISTILL_MIN_CHARS` (400) are
+  left alone because a paraphrase of a short answer is not shorter.
+- **The subagent "summary" is not a model.** Chips and the transcript dialog
+  show the raw tool-call intent strings and the verbatim `<id>.md`; the
+  reusable one-shot mechanism is the session namer's `omp -p --mode=json`
+  run (`lib/model-plan/one-shot.ts`), which Distill drives with `--model=`
+  per attempt.
+- **Fall through, never fail hard.** Chain entries are validated
+  syntactically only; Cody holds no opinion about which models exist. A
+  spawn failure, non-zero exit, unknown model, timeout and empty answer are
+  ONE case: try the next selector, then the engine's own default with no
+  `--model` at all. A distill that still fails leaves the original thinking
+  or reply exactly as it was, with at most a muted "Could not distill ·
+  Retry" row.
+- **Deltas are an optimization.** `createFrameReader` in one-shot.ts is the
+  pure NDJSON reducer: the answer comes from `turn_end`/`message_end` exactly
+  as the namer takes it, every other frame type (including ones this build
+  has never seen) is ignored silently, and a run whose streaming frames were
+  all renamed still ends in one `done` with the whole text. `done.text`
+  REPLACES what deltas built, never appends.
+- **Cody-owned state.** The chain (`cody-distill.json`) and the summary cache
+  (`cody-distill/<sessionId>.json`, keyed
+  `${entryId}:${blockIndex|-}:${kind}:${verbosity|-}`) live in the instance
+  data dir, never in omp's config.yml or the engine's session files, so an
+  engine upgrade or switch cannot lose or rewrite them. Under an ACP engine
+  the routes answer `unsupported` and every Distill surface hides.
+- **Smoothness.** The distilled reply streams through the same
+  `useSmoothStreamText` pacer as a live block (`revealFromStart` mode, added
+  for a target that arrives whole); cached answers render at once with no
+  animation. Trap fixed on the way: the pacer's unmount cleanup must null
+  `frameRef` after `cancelAnimationFrame`, or StrictMode's effect re-run sees
+  a "pending" frame and never schedules the reveal.
+- **Cancel subtask** (`SubagentTranscriptDialog` `CancelSubtaskButton`): omp's
+  RPC has no per-subagent abort (only whole-turn `abort`), so the button
+  STEERS the parent through the existing `steer` path with an instruction to
+  `hub cancel` that id and continue without its result. It never claims the
+  child was killed; a failed steer is a toast and nothing else.
+
 ### Subagent integration (`lib/subagent-types.ts`, `lib/subagent-history.ts`)
 - **Live detail**: `subagent_progress` frames carry the full `AgentProgress`
   object — `lib/subagent-types.ts` parses it defensively into
@@ -1987,18 +2065,50 @@ palette (`components/CommandPalette.tsx`, ⌘K/Ctrl+K) is built on `cmdk`.
   bootstrap, `layout.tsx`'s themeColor pair and the manifest's `theme_color`
   all read it, and `lib/theme-catalog.test.mjs` reads `globals.css` and fails
   on drift. The manifest's `background_color` stays `--bg` (splash, not chrome).
-- **iOS colours the status-bar glyphs by the SYSTEM appearance, not the
-  page**: `black-translucent` means white glyphs under system dark mode and
-  dark glyphs under system light mode, fixed at launch, with no per-theme
-  variant. When Cody's theme mode disagrees with the system (a light theme on a
-  dark-mode phone or the reverse), `.shell-topbar` repaints ONLY the inset
-  strip with `--status-strip-dark`/`--status-strip-light` via a hard gradient
-  stop at `--safe-top` (`@media (display-mode: standalone) and
-  (prefers-color-scheme: …)`, `globals.css`); when they agree the strip is the
-  bar's own `--bg-panel` and seamless. That is why the top bar's background
-  lives in the stylesheet, not inline — an inline `background` would beat the
-  media rule. Headless Chromium cannot emulate `display-mode`, so verify the
-  rule with the clause removed and the gradient stop checked at `--safe-top`.
+- **iOS's `black-translucent` status-bar glyphs are UNCONDITIONALLY WHITE** —
+  confirmed against Apple's own developer-forum threads and every
+  black-translucent writeup that has actually tested it: glyph colour does
+  NOT adapt to system appearance, `theme-color`, or anything else. (0.17.1
+  assumed the opposite — system dark meaning white glyphs, system light
+  meaning dark glyphs — and keyed the strip off `prefers-color-scheme`. That
+  left a light Cody theme paired with a light system with white glyphs
+  sitting directly on its own light `--bg-panel` (unprotected), and
+  needlessly repainted a dark Cody theme's strip a light colour whenever the
+  system merely happened to be light (a visible, avoidable band on a theme
+  that was already fine).) The one fact that matters is the THEME's own
+  mode, full stop: `.shell-topbar` never touches a dark theme's own
+  `--bg-panel` (already legible for permanently-white glyphs, regardless of
+  the system), and always forces a light theme's inset strip alone to
+  `--status-strip-dark` (never legible otherwise) via a hard gradient stop
+  at `--safe-top` — `@media (display-mode: standalone) { html:not(.dark)
+  .shell-topbar {...} }`, `globals.css`, no `prefers-color-scheme` in sight.
+  A light Cody theme under a dark-mode phone (the case 0.17.1 was built to
+  protect) looks exactly as before: a dark strip, white glyphs legible on
+  it, the bar's own light `--bg-panel` starting right below. That is why the
+  top bar's background lives in the stylesheet, not inline — an inline
+  `background` would beat the media rule. A REAL Chromium (not CDP's
+  `Emulation.setEmulatedMedia`, which cannot fake `display-mode`) launched
+  with `--app=<url>` DOES report `display-mode: standalone` — puppeteer-core
+  + `CODY_CHROMIUM_BIN`, `--remote-debugging-port`, connect over CDP — so the
+  rule verifies end-to-end instead of with the clause removed: fake the
+  inset via an inline style PROPERTY (`documentElement.style.setProperty
+  ("--safe-top", "47px", "important")`, applied on `DOMContentLoaded` too —
+  an appended `<style>` element risks CSP and can throw if run before
+  `documentElement` exists this early, silently skipping any code after it
+  in the same callback), emulate `prefers-color-scheme` either way with
+  `Emulation.setEmulatedMedia` (that part does work), and read the strip's
+  computed background or screenshot it.
+- **`html, body` are `overflow: hidden`.** Every scrollable region in this
+  app (chat, sidebar, settings, dropdowns) is its own nested `overflow-y:
+  auto` pane, so html/body never need to scroll — but leaving them
+  scrollable is not neutral on iOS: Safari's elastic rubber-band at the
+  document edges is a separate, hardcoded behavior that `overscroll-behavior`
+  does not suppress (that property only stops scroll CHAINING) and that
+  fires on any vertical drag near the top even with zero overflow content,
+  revealing whatever is behind the scrolled-away content — `html, body`'s own
+  `background: var(--bg)` — right above `.shell-topbar`. `overflow: hidden`
+  is the only mitigation that actually works for that, and costs nothing
+  here since nothing scrolls at that level to begin with.
 
 ### Phone composer: one row, nothing wraps
 - Below 640px the controls row is `flex-wrap: nowrap`. Every fixed control is

@@ -201,3 +201,25 @@ test("long tool calls surface streamed progress and an elapsed clock", () => {
   // there re-animates the entire status line (user-visible flicker).
   assert.doesNotMatch(chatWindow, /phaseLabel\(agentPhase, toolClockNow\)/, "the crossfaded label must not contain the ticking clock");
 });
+
+test("todo_auto_update's ungated refresh still fences on the current session", () => {
+  // refreshTodoState is deliberately UNGATED (unlike reconcileAgentState,
+  // which only matters while a run is active, so a session switch mid-flight
+  // is moot) so the keeper's trailing pass after agent_end still lands. That
+  // makes it the one todoPhases/planOverlay path with no OTHER guard against
+  // a late reply overwriting a session the user has since switched away
+  // from — the session fence here is load-bearing, not optional.
+  const refresh = hook.slice(
+    hook.indexOf("const refreshTodoState = useCallback"),
+    hook.indexOf("// A session with no name of its own"),
+  );
+  assert.match(refresh, /if \(sessionIdRef\.current !== sid\) return;/);
+  const fenceIdx = refresh.indexOf("if (sessionIdRef.current !== sid) return;");
+  assert.ok(fenceIdx > -1 && fenceIdx < refresh.indexOf("setTodoPhases("), "session fence runs before todoPhases is applied");
+  assert.ok(fenceIdx > -1 && fenceIdx < refresh.indexOf("setPlanOverlay("), "session fence runs before planOverlay is applied");
+  // The other two todo_auto_* frames stay on the run-gated path — only
+  // todo_auto_update was moved off it.
+  const cases = hook.slice(hook.indexOf('case "todo_reminder":'), hook.indexOf('case "plan_overlay_update"'));
+  assert.match(cases, /case "todo_reminder":\s*\n\s*case "todo_auto_clear":\s*\n\s*if \(sessionIdRef\.current\) void reconcileAgentState\(sessionIdRef\.current\);/);
+  assert.match(cases, /case "todo_auto_update":\s*\n\s*if \(sessionIdRef\.current\) refreshTodoState\(sessionIdRef\.current\);/);
+});

@@ -36,6 +36,12 @@ export interface StreamPacerOptions {
    *  frame (streaming tool-call JSON: the closing braces shift while the
    *  interior grows). Off, any rewrite snaps — prose must never replay. */
   lenientPrefix?: boolean;
+  /** Reveal a freshly-armed target from its first character instead of
+   *  snapping to it. For text that is BORN in this component (a distilled
+   *  reply arriving whole in one `done` frame): there is no history to
+   *  replay, so the first push is the animation. Off, the first push snaps —
+   *  a live block mounting mid-stream must show what is already there. */
+  revealFromStart?: boolean;
 }
 
 const DEFAULTS: Required<StreamPacerOptions> = {
@@ -45,6 +51,7 @@ const DEFAULTS: Required<StreamPacerOptions> = {
   wordLookaheadChars: 24,
   maxTickMs: 250,
   lenientPrefix: false,
+  revealFromStart: false,
 };
 
 /** Assumed frame length for the first tick after the loop (re)starts, when
@@ -80,19 +87,18 @@ export function createStreamPacer(options: StreamPacerOptions = {}): StreamPacer
   return {
     push(next: string) {
       if (armed && next === target) return;
-      // The first push after construction snaps: a block mounting mid-stream
-      // (tab reopen, thinking panel expanded late) must show what is already
-      // there, not replay history.
+      // The first push after construction snaps unless `revealFromStart` is
+      // set: a block mounting mid-stream (tab reopen, thinking panel
+      // expanded late) must show what is already there, not replay history.
       const prev = target;
       const wasArmed = armed;
       target = next;
       armed = true;
       if (!wasArmed) {
-        shown = target.length;
+        shown = opts.revealFromStart ? 0 : target.length;
         lastTick = null;
-        return;
-      }
-      if (!next.startsWith(prev)) {
+        if (!opts.revealFromStart) return;
+      } else if (!next.startsWith(prev)) {
         if (!opts.lenientPrefix) {
           shown = target.length;
           lastTick = null;
@@ -223,14 +229,24 @@ export function useSmoothStreamText(target: string, mode: StreamPaceMode | boole
     // via usePacerOptions); a per-render literal would re-run this every frame.
   }, [target, resolved, options]);
 
+  // Cancelling MUST clear the ref: React re-runs effects after their cleanup
+  // (StrictMode's mount/unmount/mount), and the arming effect above treats a
+  // non-null frameRef as "a frame is already pending". Left stale, the
+  // second arming schedules nothing and the reveal never advances — which
+  // only ever bit a pacer that owed backlog on its very first push.
   useEffect(() => () => {
-    if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+    if (frameRef.current === null) return;
+    cancelAnimationFrame(frameRef.current);
+    frameRef.current = null;
   }, []);
 
   // Until the arming effect has run, `displayed` may hold text from a
   // previous paced run — returning it would flash stale content for a frame.
-  // An unarmed pacer means "show the live target".
-  return resolved !== "snap" && pacerRef.current !== null ? displayed : target;
+  // An unarmed pacer means "show the live target", except under
+  // revealFromStart: that mode exists to animate text that arrived whole, so
+  // painting it once before the reveal begins would defeat it.
+  if (pacerRef.current !== null) return resolved === "snap" ? target : displayed;
+  return resolved === "pace" && options?.revealFromStart === true ? "" : target;
 }
 
 export interface RevealSplit {

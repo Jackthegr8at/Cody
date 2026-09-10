@@ -50,6 +50,42 @@ export interface TodoPhase {
   tasks: TodoItem[];
 }
 
+/**
+ * Cody's own overlay atop omp's TodoPhase (lib/plan-keeper/overlay.ts): the
+ * plan keeper's subtasks and which top-level tasks IT (not the model's own
+ * `todo` tool) marked completed. omp's TodoPhase has no subtask field, so
+ * this is never sent to the engine — it lives beside the phases, keyed by
+ * the parent task's exact `content`, and is persisted per session.
+ */
+export interface PlanOverlaySubtask {
+  content: string;
+  status: "pending" | "completed";
+}
+
+export interface PlanOverlay {
+  /** Keyed by the exact content of the parent (top-level) task. */
+  subtasks: Record<string, PlanOverlaySubtask[]>;
+  /** Exact content of top-level tasks the KEEPER completed, so the UI can
+   * show an auto-marked glyph the model's own completions never get. */
+  autoCompleted: string[];
+  updatedAt: number;
+}
+
+/** Emitted by the plan keeper after it applies a cheap-model pass: a full
+ * replacement of the session's overlay, not a merge. */
+export interface PlanOverlayUpdateFrame {
+  type: "plan_overlay_update";
+  overlay: PlanOverlay;
+}
+
+/** Emitted alongside PlanOverlayUpdateFrame exactly when the keeper's
+ * set_todos call changed the engine's phases (a completion or a promotion).
+ * Carries no payload of its own — the browser refetches todoPhases the same
+ * way it already does on turn_end. */
+export interface TodoAutoUpdateFrame {
+  type: "todo_auto_update";
+}
+
 /** Mirror of omp's RpcSessionState (the raw `get_state` payload). */
 export interface RpcSessionState {
   model?: OmpModel;
@@ -105,6 +141,8 @@ export interface WebSessionState {
   fastModeActive?: boolean;
   autoRetryEnabled?: boolean;
   todoPhases: TodoPhase[];
+  /** Absent when the plan keeper has never touched this session. */
+  planOverlay?: PlanOverlay;
   extensionStatuses: Array<{ key: string; text: string }>;
   extensionWidgets: Array<{ key: string; lines: string[]; placement: "aboveEditor" | "belowEditor" }>;
 }

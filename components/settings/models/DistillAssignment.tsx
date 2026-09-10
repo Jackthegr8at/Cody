@@ -1,0 +1,343 @@
+"use client";
+
+/**
+ * Settings › Models › Assignments › Distill: which model writes the running
+ * one line summary shown on a COLLAPSED thinking box, and condenses a
+ * finished reply.
+ *
+ * Cody-owned state, deliberately: the chain lives in Cody's own
+ * `cody-distill.json` behind GET/PUT `/api/distill/config`, never in the
+ * engine's config, and an entry is an opaque `provider/id[:effort]`
+ * selector validated syntactically. A selector the catalog no longer lists
+ * still renders and still saves — the server falls through the chain and
+ * finally to the engine default at run time — so an engine that drops a
+ * model degrades to the next entry instead of erroring here.
+ *
+ * The whole view hides when the route answers `unsupported` (an ACP engine
+ * has no one-shot runner to distill with); `useDistillConfig` is the one
+ * place that decision is read from.
+ */
+import { AlertCircle, ArrowDown, ArrowUp, Trash2 } from "lucide-react";
+import { useMemo, useState, type CSSProperties } from "react";
+import { toast } from "@/components/ui/toast";
+import { invalidateSettingsRoutes, setSettingsRouteData, useSettingsRoute, type SettingsRouteResult } from "@/hooks/useSettingsData";
+import { useI18n } from "@/lib/i18n";
+import { formatModelDisplayName } from "@/lib/model-display";
+import { chipStyle, nativeOptionStyle, nativeSelectStyle, UNAVAILABLE_BADGE } from "../primitives";
+import { useSaveStatus } from "../SaveStatus";
+import { useSettingsShell } from "../shell-context";
+import { splitSelector, type RoleModelOption } from "./ModelRoles";
+
+export const DISTILL_CONFIG_ROUTE = "/api/distill/config";
+
+export interface DistillConfigBody {
+  /** False when Distill cannot run right now (the engine binary is
+   * missing, say). The chain is still editable: the reason is a state of
+   * the machine, not of the feature. */
+  supported: boolean;
+  reason?: string;
+  /** `provider/id[:effort]`, primary first. Empty = engine default. */
+  chain: string[];
+  canManage: boolean;
+}
+
+/** The server's ceiling on chain length (`MAX_CHAIN_LENGTH` in
+ * lib/distill/config.ts, node-only so it cannot be imported here),
+ * mirrored so the picker stops offering models the PUT would reject. */
+export const MAX_CHAIN = 8;
+
+/**
+ * The cached Distill route plus the one boolean the surrounding hub gates
+ * on. `available` is about the SURFACE: an engine with no one-shot runner
+ * answers 400 `unsupported` and the segment is not rendered at all. A 200
+ * with `supported: false` is a different thing — the feature exists and
+ * the chain is still worth editing — so it keeps the surface and shows
+ * the server's reason instead.
+ *
+ * It stays false until the route has actually answered, so the segment
+ * never flashes in before hiding again — and a read that FAILED (any
+ * error, not only `unsupported`) leaves it false too: without the current
+ * chain there is nothing to edit, and an absent segment beats a broken
+ * one.
+ */
+export function useDistillConfig(): { route: SettingsRouteResult<DistillConfigBody>; available: boolean } {
+  const route = useSettingsRoute<DistillConfigBody>(DISTILL_CONFIG_ROUTE);
+  return { route, available: !route.unsupported && route.data !== null };
+}
+
+const sectionCardStyle: CSSProperties = { border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" };
+const sectionHeaderStyle: CSSProperties = { padding: "10px 12px", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12, fontWeight: 600 };
+const noteStyle: CSSProperties = { margin: 0, padding: "8px 12px", borderTop: "1px solid var(--border)", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 };
+const iconButtonStyle: CSSProperties = { padding: 2, border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer" };
+
+/** One chain entry: a model, its reasoning level, and (for a fallback) the
+ * order controls. A selector the catalog does not list keeps its own option
+ * so reordering or removing it never silently rewrites it. */
+function ChainRow({ label, selector, models, selectors, disabled, onModel, onEffort, onMove, onRemove }: {
+  label: string;
+  selector: string;
+  models: RoleModelOption[];
+  selectors: ReadonlySet<string>;
+  disabled: boolean;
+  onModel: (model: string) => void;
+  onEffort: (effort: string) => void;
+  onMove?: (direction: -1 | 1) => void;
+  onRemove?: () => void;
+}) {
+  const { t } = useI18n();
+  const { model, effort } = splitSelector(selector, selectors);
+  const assigned = models.find((item) => item.provider + "/" + item.id === model);
+  const hidden = Boolean(assigned?.hidden);
+  const missing = Boolean(model) && !assigned;
+  const levels = (assigned?.thinkingLevels ?? []).filter((level) => level !== "off");
+  const visible = models.filter((item) => !item.hidden);
+  const flag = missing ? t("distillSettings.unavailable") : hidden ? t("distillSettings.hidden") : null;
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "minmax(74px, 0.28fr) minmax(0, 1fr) minmax(104px, 0.3fr) auto", alignItems: "center", gap: 10, padding: "8px 12px", borderTop: "1px solid var(--border)", fontSize: 12 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0 }}>
+        <span style={{ color: "var(--text-muted)" }}>{label}</span>
+        {flag && (
+          <span style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+            <span style={{ ...chipStyle, color: "var(--status-warning)" }}>{UNAVAILABLE_BADGE}</span>
+            <span style={{ fontSize: 10.5, color: "var(--status-warning)" }}>{flag}</span>
+          </span>
+        )}
+      </div>
+      <select
+        value={model}
+        aria-label={t("distillSettings.modelAria", { position: label })}
+        disabled={disabled}
+        onChange={(event) => onModel(event.target.value)}
+        style={{ ...nativeSelectStyle, minWidth: 0, width: "100%", opacity: disabled ? 0.55 : 1 }}
+      >
+        <option value="" style={nativeOptionStyle}>{t("distillSettings.engineDefault")}</option>
+        {(missing || hidden) && model && (
+          <option value={model} style={nativeOptionStyle}>
+            {assigned
+              ? t("distillSettings.optionHidden", { model: formatModelDisplayName(assigned.id, assigned.name) })
+              : t("distillSettings.optionUnavailable", { model })}
+          </option>
+        )}
+        {visible.map((item) => (
+          <option key={item.provider + "/" + item.id} value={item.provider + "/" + item.id} style={nativeOptionStyle}>
+            {formatModelDisplayName(item.id, item.name)} ({item.provider}/{item.id})
+          </option>
+        ))}
+      </select>
+      <select
+        value={effort}
+        aria-label={t("distillSettings.thinkingAria", { position: label })}
+        disabled={disabled || levels.length === 0}
+        onChange={(event) => onEffort(event.target.value)}
+        style={{ ...nativeSelectStyle, minWidth: 0, width: "100%", opacity: disabled || levels.length === 0 ? 0.55 : 1 }}
+      >
+        <option value="" style={nativeOptionStyle}>{t("distillSettings.modelDefault")}</option>
+        {effort && !levels.includes(effort) && <option value={effort} style={nativeOptionStyle}>{effort}</option>}
+        {levels.map((level) => <option key={level} value={level} style={nativeOptionStyle}>{level}</option>)}
+      </select>
+      <div style={{ display: "flex", alignItems: "center", gap: 2, justifyContent: "flex-end" }}>
+        {onMove && (
+          <>
+            <button type="button" disabled={disabled} onClick={() => onMove(-1)} title={t("distillSettings.moveUp")} aria-label={t("distillSettings.moveUp")} style={{ ...iconButtonStyle, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.4 : 1 }}><ArrowUp size={14} aria-hidden="true" /></button>
+            <button type="button" disabled={disabled} onClick={() => onMove(1)} title={t("distillSettings.moveDown")} aria-label={t("distillSettings.moveDown")} style={{ ...iconButtonStyle, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.4 : 1 }}><ArrowDown size={14} aria-hidden="true" /></button>
+          </>
+        )}
+        {onRemove && (
+          <button type="button" disabled={disabled} onClick={onRemove} title={t("distillSettings.remove")} aria-label={t("distillSettings.remove")} style={{ ...iconButtonStyle, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.4 : 1 }}><Trash2 size={14} aria-hidden="true" /></button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function DistillAssignment({ models, panelId }: { models: RoleModelOption[]; panelId: string }) {
+  const { t } = useI18n();
+  const { harnessLabel } = useSettingsShell();
+  const { track } = useSaveStatus(panelId);
+  const { route } = useDistillConfig();
+  // The server's copy is the value until the user edits: a draft of `null`
+  // means "whatever the route says", so the first paint already shows the
+  // saved chain instead of an empty one that fills in an effect later.
+  const [draft, setDraft] = useState<string[] | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [candidate, setCandidate] = useState("");
+  const selectors = useMemo(() => new Set(models.map((item) => item.provider + "/" + item.id)), [models]);
+
+  const chain = draft ?? route.data?.chain ?? [];
+  const dirty = draft !== null;
+  const canManage = route.data?.canManage === true;
+  const editable = canManage && !saving;
+  const primary = chain[0] ?? "";
+  const fallbacks = chain.slice(1);
+
+  const setEntry = (index: number, next: { model?: string; effort?: string }) => {
+    const current = splitSelector(chain[index] ?? "", selectors);
+    const model = next.model ?? current.model;
+    // Clearing the primary clears the chain: fallbacks with nothing to fall
+    // back FROM would be saved as a primary the user never chose.
+    if (index === 0 && !model) {
+      setDraft([]);
+      return;
+    }
+    if (!model) {
+      setDraft(chain.filter((_, position) => position !== index));
+      return;
+    }
+    // On a model switch the reasoning level survives only when the new
+    // model advertises it, so a saved selector never carries a level that
+    // model cannot take.
+    const levels = models.find((item) => item.provider + "/" + item.id === model)?.thinkingLevels ?? [];
+    const effort = next.model !== undefined
+      ? (levels.includes(current.effort) ? current.effort : "")
+      : (next.effort ?? current.effort);
+    const nextChain = [...chain];
+    nextChain[index] = effort ? model + ":" + effort : model;
+    setDraft(nextChain);
+  };
+
+  const move = (index: number, direction: -1 | 1) => {
+    const target = index + direction;
+    if (target < 1 || target >= chain.length) return;
+    const next = [...chain];
+    [next[index], next[target]] = [next[target], next[index]];
+    setDraft(next);
+  };
+
+  const save = () => {
+    setSaving(true);
+    void track(async () => {
+      const response = await fetch(DISTILL_CONFIG_ROUTE, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chain }) });
+      const data = (await response.json().catch(() => ({}))) as Partial<DistillConfigBody> & { error?: string };
+      if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+      // The PUT answers with the chain as STORED (duplicates collapsed,
+      // entries trimmed), so that body — not the draft — becomes the
+      // route's value while the confirming re-read is in flight.
+      const saved = Array.isArray(data.chain) ? data.chain : chain;
+      setSettingsRouteData<DistillConfigBody>(DISTILL_CONFIG_ROUTE, {
+        supported: data.supported !== false,
+        ...(data.reason ? { reason: data.reason } : {}),
+        chain: saved,
+        canManage: data.canManage !== false,
+      });
+      setDraft(null);
+      invalidateSettingsRoutes("/api/distill");
+      const head = splitSelector(saved[0] ?? "", selectors).model;
+      const named = models.find((item) => item.provider + "/" + item.id === head);
+      toast.success(
+        t("distillSettings.savedTitle"),
+        head
+          ? t("distillSettings.savedBody", { model: named ? formatModelDisplayName(named.id, named.name) : head })
+          : t("distillSettings.savedBodyDefault", { engine: harnessLabel }),
+      );
+    }).finally(() => setSaving(false));
+  };
+
+  const used = new Set(chain.map((entry) => splitSelector(entry, selectors).model));
+  const full = chain.length >= MAX_CHAIN;
+  const addable = full ? [] : models.filter((item) => !item.hidden && !used.has(item.provider + "/" + item.id));
+  // A 200 that says the engine cannot run right now: the chain is still
+  // worth setting, so the view stays and names the blocker.
+  const blocked = route.data?.supported === false ? route.data.reason ?? null : null;
+
+  return (
+    <div data-search-id="distill-chain" style={{ display: "flex", flexDirection: "column", gap: 14, minWidth: 0 }}>
+      <div>
+        <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>{t("distillSettings.title")}</div>
+        <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>{t("distillSettings.intro")}</p>
+        <p style={{ margin: "4px 0 0", fontSize: 11, color: "var(--text-dim)", lineHeight: 1.45 }}>{t("distillSettings.prefsHint")}</p>
+      </div>
+
+      {blocked && (
+        <div role="status" style={{ display: "flex", alignItems: "flex-start", gap: 7, padding: "8px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", fontSize: 11.5, color: "var(--status-warning)", lineHeight: 1.45 }}>
+          <AlertCircle size={13} aria-hidden="true" style={{ flexShrink: 0, marginTop: 1 }} />
+          <span>{t("distillSettings.notReady")} {blocked}</span>
+        </div>
+      )}
+
+      {route.loading && !route.data ? (
+        <div style={{ color: "var(--text-muted)", fontSize: 12 }}>{t("distillSettings.loading")}</div>
+      ) : (
+        <>
+          <section style={sectionCardStyle}>
+            <div style={sectionHeaderStyle}>{t("distillSettings.primaryTitle")}</div>
+            <ChainRow
+              label={t("distillSettings.primaryLabel")}
+              selector={primary}
+              models={models}
+              selectors={selectors}
+              disabled={!editable}
+              onModel={(model) => setEntry(0, { model })}
+              onEffort={(effort) => setEntry(0, { effort })}
+            />
+            <p style={noteStyle}>{primary ? t("distillSettings.primaryNote") : t("distillSettings.engineDefaultNote", { engine: harnessLabel })}</p>
+          </section>
+
+          <section style={sectionCardStyle}>
+            <div style={sectionHeaderStyle}>{t("distillSettings.fallbackTitle")}</div>
+            <p style={noteStyle}>{t("distillSettings.fallbackNote")}</p>
+            {!primary ? (
+              <p style={noteStyle}>{t("distillSettings.needPrimary")}</p>
+            ) : (
+              <>
+                {fallbacks.length === 0 && <p style={noteStyle}>{t("distillSettings.noFallbacks")}</p>}
+                {fallbacks.map((entry, index) => (
+                  <ChainRow
+                    key={`${entry}-${index}`}
+                    label={t("distillSettings.fallbackLabel", { position: index + 1 })}
+                    selector={entry}
+                    models={models}
+                    selectors={selectors}
+                    disabled={!editable}
+                    onModel={(model) => setEntry(index + 1, { model })}
+                    onEffort={(effort) => setEntry(index + 1, { effort })}
+                    onMove={(direction) => move(index + 1, direction)}
+                    onRemove={() => setDraft(chain.filter((_, position) => position !== index + 1))}
+                  />
+                ))}
+                {full && <p style={noteStyle}>{t("distillSettings.chainFull", { max: MAX_CHAIN })}</p>}
+                <div style={{ padding: "8px 12px", borderTop: "1px solid var(--border)" }}>
+                  <select
+                    value={candidate}
+                    aria-label={t("distillSettings.addFallback")}
+                    disabled={!editable || addable.length === 0}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setCandidate("");
+                      if (value) setDraft([...chain, value]);
+                    }}
+                    style={{ ...nativeSelectStyle, maxWidth: "100%", opacity: !editable || addable.length === 0 ? 0.55 : 1 }}
+                  >
+                    <option value="" style={nativeOptionStyle}>{t("distillSettings.addFallback")}</option>
+                    {addable.map((item) => (
+                      <option key={item.provider + "/" + item.id} value={item.provider + "/" + item.id} style={nativeOptionStyle}>
+                        {formatModelDisplayName(item.id, item.name)} ({item.provider}/{item.id})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </>
+            )}
+          </section>
+        </>
+      )}
+
+      {route.error && <div role="alert" style={{ color: "var(--status-error)", fontSize: 12 }}>{route.error}</div>}
+
+      {canManage ? (
+        <div>
+          <button
+            type="button"
+            onClick={save}
+            disabled={!dirty || saving}
+            style={{ padding: "7px 12px", minHeight: 32, border: "none", borderRadius: "var(--radius-control)", background: dirty ? "var(--accent)" : "var(--bg-hover)", color: dirty ? "var(--on-accent)" : "var(--text-dim)", cursor: saving ? "wait" : dirty ? "pointer" : "default", fontSize: 12, fontWeight: 600 }}
+          >
+            {saving ? t("distillSettings.saving") : t("distillSettings.save")}
+          </button>
+        </div>
+      ) : (
+        <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.45 }}>{t("distillSettings.readOnly")}</p>
+      )}
+    </div>
+  );
+}

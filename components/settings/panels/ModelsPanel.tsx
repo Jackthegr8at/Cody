@@ -2,19 +2,24 @@
 
 /**
  * Settings › Models: the catalog (every engine) and, on an engine with a
- * roles surface, the assignments. Two segments under one hub:
+ * roles surface or Cody's own Distill, the assignments. Two segments under
+ * one hub:
  *
  *   - Catalog — `ModelCatalog` over `useModelCatalog`: hide (instance or
  *     personal), pin, curation per provider, what is new since the user
  *     last looked. On an ACP engine the rows are the open session's models
  *     and the hub says so when there is none.
- *   - Assignments (`capabilities.models`) — roles, retry & fallback, plan.
+ *   - Assignments — roles, retry & fallback, plan (`capabilities.models`)
+ *     and Distill (Cody's own chain, gated on `/api/distill/config`
+ *     answering `supported`, so pi gets the segment with Distill alone).
  *
  * `openSettings("models", {sub: "assignments"})` lands on the second
  * segment; the default is the catalog.
  */
 import { Cpu } from "lucide-react";
+import { useMemo } from "react";
 import { useModelCatalog } from "@/hooks/useModelCatalog";
+import { useDistillConfig } from "../models/DistillAssignment";
 import { ModelAssignments } from "../models/ModelAssignments";
 import { ModelCatalog } from "../models/ModelCatalog";
 import { SaveStatusCorner } from "../SaveStatus";
@@ -28,7 +33,9 @@ type Segment = "catalog" | "assignments";
 
 /** What the dialog-wide search can jump to inside this hub. Assignments
  * entries carry the `models` gate so search never offers a role picker to
- * an engine without roles. */
+ * an engine without roles. Distill is NOT here: it is Cody's own feature
+ * rather than an engine capability, so whether it exists is a route
+ * answer — `useModelsSearchEntries` adds it when the route says yes. */
 export const SEARCH_ENTRIES: readonly SearchEntry[] = [
   { id: "model-search", tab: "models", label: "Model catalog", description: "Every model the engine can reach: search, hide, pin, and see what is new.", keywords: ["models", "catalog", "hide", "pin", "visible"], breadcrumb: ["Models", "Catalog"], action: "jump" },
   { id: "new-models", tab: "models", label: "New models", description: "Models added to the catalog since you last looked.", keywords: ["new", "seen", "recent"], breadcrumb: ["Models", "Catalog"], action: "jump" },
@@ -38,10 +45,25 @@ export const SEARCH_ENTRIES: readonly SearchEntry[] = [
   { id: "model-plan-usage-aware-fallback", tab: "models", sub: "assignments", label: "Plan roles & fallbacks", description: "Propose a model for every role and the fallback chains that go with them.", keywords: ["plan", "planner", "propose"], breadcrumb: ["Models", "Assignments"], needsCapability: "models", action: "jump" },
 ];
 
+/** The Distill row, only on an engine that can actually distill. Search
+ * must never offer a jump to a view the hub hides. */
+export function useModelsSearchEntries(): SearchEntry[] {
+  const { available } = useDistillConfig();
+  return useMemo<SearchEntry[]>(
+    () => (available
+      ? [{ id: "distill-chain", tab: "models", sub: "assignments", label: "Distill model", description: "Which model summarizes thinking and condenses replies, and what it falls back to.", keywords: ["distill", "summary", "summarize", "condense", "thinking", "recap"], breadcrumb: ["Models", "Assignments"], action: "jump" }]
+      : []),
+    [available],
+  );
+}
+
 export function ModelsPanel() {
   const { capabilities, harnessLabel, sub, sessionModels, callbacks } = useSettingsShell();
   const catalog = useModelCatalog();
-  const hasAssignments = capabilities.models;
+  const distill = useDistillConfig();
+  // The engine's own assignments need `models`; Distill only needs its own
+  // route to have answered, so the segment exists whenever EITHER renders.
+  const hasAssignments = capabilities.models || distill.available;
   // Derived from `sub`, not local state: a repeated jump to the same
   // section (e.g. search landing on "assignments" twice) must still select
   // it even though the shell's `sub` does not change on the second jump.
@@ -65,7 +87,7 @@ export function ModelsPanel() {
             <Cpu size={15} aria-hidden="true" style={{ color: "var(--accent)" }} /> Models
           </h3>
           <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
-            Every model {harnessLabel} can reach, which ones show in the composer{hasAssignments ? ", and which one plays each role" : ""}.
+            Every model {harnessLabel} can reach, which ones show in the composer{capabilities.models ? ", and which one plays each role" : ""}.
             {summary ? <span style={{ color: "var(--text-dim)" }}> · {summary}</span> : null}
           </p>
         </div>
@@ -80,7 +102,7 @@ export function ModelsPanel() {
       </div>
       {segment === "assignments" && hasAssignments ? (
         <div role="tabpanel" id="settings-subpanel-assignments" aria-labelledby="settings-subtab-assignments" style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
-          <ModelAssignments catalog={catalog} panelId={MODELS_PANEL_ID} />
+          <ModelAssignments catalog={catalog} panelId={MODELS_PANEL_ID} engineViews={capabilities.models} distillView={distill.available} />
         </div>
       ) : (
         <div role="tabpanel" id="settings-subpanel-catalog" aria-labelledby={hasAssignments ? "settings-subtab-catalog" : undefined} style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>

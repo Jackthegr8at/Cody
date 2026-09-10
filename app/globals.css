@@ -39,11 +39,12 @@
   --safe-right: env(safe-area-inset-right, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
-  /* Grounds the iOS status-bar glyphs are legible on: white glyphs on the
-     dark one, dark glyphs on the light one (see .shell-topbar below). Fixed
-     on purpose — they answer to the SYSTEM appearance, not the theme. */
+  /* The ground iOS's permanently-white `black-translucent` status-bar glyphs
+     sit on when the active theme's own --bg-panel would be too light for
+     them (see .shell-topbar below). Fixed on purpose: verified against
+     Apple's own black-translucent behavior, glyph colour never adapts to
+     system appearance, theme-color, or anything else — it is white, always. */
   --status-strip-dark: #1E1E2E;
-  --status-strip-light: #EFF1F5;
 }
 
 /* Cody's default palette: Catppuccin Latte. Every pair below is verified for
@@ -432,6 +433,21 @@ html, body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   font-size: 14px;
   overscroll-behavior: none;
+  /* Every scrollable region in this app (chat, sidebar, settings, dropdowns)
+     is its own nested `overflow-y: auto` pane — html/body never need to
+     scroll. Leaving them scrollable costs nothing on Chromium
+     (`overscroll-behavior: none` above already suppresses its glow/chaining
+     there), but iOS Safari's elastic rubber-band at the document edges is a
+     separate, hardcoded behavior that `overscroll-behavior` does not
+     suppress and that fires on ANY vertical drag near the top even with zero
+     overflow content — it reveals whatever is behind the scrolled-away
+     content, i.e. this rule's own `background: var(--bg)`, in the safe-area
+     strip above `.shell-topbar`. `overflow: hidden` removes html/body from
+     being a scrollable target at all, which is the only mitigation that
+     actually works for that one (confirmed: no page in this app relies on
+     window/body-level scroll — hooks/useVisualViewportHeight.ts's own
+     `window.scrollTo(0, 0)` correction becomes a no-op, not a conflict). */
+  overflow: hidden;
 }
 
 body {
@@ -1817,6 +1833,71 @@ html.dark .dropdown-surface :is(select, option) {
   to   { opacity: 1; transform: translateY(0); }
 }
 
+/* ── Distill ──
+   A collapsed thinking box can carry one muted line saying what the model is
+   doing, and a finished reply can be replaced by a distilled version. Both
+   are additive: with nothing distilled neither rule matches and the
+   transcript renders exactly as it did before.
+
+   The summary shares the box's header surface and clips to a single line —
+   the server caps the sentence at ~140 characters, but a narrow column still
+   needs the ellipsis, and the whole sentence stays in the title attribute.
+   A new sentence fades in over the old one's place (the .stream-word idea at
+   line scale). While the first one is being written the row shimmers as
+   TEXT, never a spinner: a spinning glyph beside settled transcript content
+   reads as a fault, and this box is quiet by design. The distilled reply
+   enters on the same keyframes as any collapse box's content, so the swap
+   between full and distilled matches every other box in the transcript. */
+.distill-summary {
+  max-width: min(72ch, 100cqi);
+  padding: 4px 10px 6px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.distill-summary-line {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  animation: distill-summary-in var(--dur-med) var(--ease-out-warm) both;
+}
+@keyframes distill-summary-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.distill-summary-wait {
+  background: linear-gradient(90deg, var(--text-dim) 0%, var(--text) 45%, var(--text-dim) 90%);
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: distill-shimmer 1.6s linear infinite;
+}
+@keyframes distill-shimmer {
+  from { background-position: 120% 0; }
+  to   { background-position: -120% 0; }
+}
+.distill-reply {
+  animation: collapse-content-in var(--collapse-dur) var(--stream-anim-ease) backwards;
+}
+/* Same contract as .skeleton: the affordance survives without the motion. */
+@media (prefers-reduced-motion: reduce) {
+  .distill-summary-wait {
+    animation: none;
+    background: none;
+    -webkit-background-clip: border-box;
+    background-clip: border-box;
+    color: var(--text-dim);
+  }
+}
+
 /* ── Live status line above the composer ──────────────────────────────────
    The slot exists for the whole run, sized to the row it holds (matches the
    old py-2 rows: 2×8px + the 13px/1.5 line), so the row mounting and
@@ -1955,23 +2036,46 @@ html.dark .dropdown-surface :is(select, option) {
   padding-right: var(--safe-right);
   background: var(--bg-panel);
 }
-/* iOS draws the status-bar glyphs in the colour of the SYSTEM appearance, not
-   the page's: `black-translucent` gives white glyphs under system dark mode
-   and dark glyphs under system light mode, and no meta tag changes that per
-   theme. When Cody's theme agrees with the system, the glyphs sit on the bar's
-   own --bg-panel and read fine. When they disagree (a light Cody theme on a
-   phone in dark mode, or the reverse) only the inset strip is repainted in a
-   ground the glyphs can be read on: a hard gradient stop at --safe-top keeps
-   the bar's controls on --bg-panel. The strip exists only in a standalone
-   install — a browser tab never puts glyphs over the page. */
-@media (display-mode: standalone) and (prefers-color-scheme: dark) {
+/* iOS's `black-translucent` status-bar glyphs are UNCONDITIONALLY WHITE —
+   confirmed against Apple's own developer-forum threads and every
+   black-translucent writeup that has actually tested it: glyph colour does
+   NOT adapt to system appearance, `theme-color`, or anything else (0.17.1
+   assumed it tracked system dark/light mode; that pairing does not exist).
+   White glyphs read fine on a dark --bg-panel unconditionally, so a dark
+   theme is never touched here — regardless of the system's own appearance.
+   A light --bg-panel is where they would vanish, so a light theme ALWAYS
+   gets its inset strip alone repainted --status-strip-dark, with a hard
+   gradient stop at --safe-top that keeps the bar's own controls (and a dark
+   theme's bar, entirely) on --bg-panel. The strip exists only in a
+   standalone install — a browser tab never puts glyphs over the page.
+
+   iOS 26 changed the underlying mechanism and this block now fixes BOTH:
+   Safari dropped `theme-color` for a standalone install's chrome tint and
+   instead paints the forehead/chin from `<body>`'s own background-color
+   (confirmed against a linked WebKit bug report — this is a real paint, not
+   page content showing through a translucent overlay anymore), so
+   `html, body`'s background has to carry the SAME colour `.shell-topbar`
+   resolves to, never the page's own --bg — otherwise iOS paints that strip
+   from whatever --bg happens to be instead of --bg-panel: a near-black band
+   above a dark-purple bar on a DARK theme, independent of system appearance
+   entirely, which is the exact shape of the reported bug (`--bg` and
+   `--bg-panel` differ in every theme by design). Safe to override
+   unconditionally because `overflow: hidden` above already makes html/body's
+   own background invisible within the page itself — nothing can ever scroll
+   to reveal it, so repointing it here changes nothing except what iOS 26
+   reads for the chrome tint. (iOS 26 will also, per that same report, tint
+   from a `position: fixed` element's background if one happens to be
+   painted when the tint is read — an open WebKit bug with no reliable
+   author-side CSS workaround; see AGENTS.md.) */
+@media (display-mode: standalone) {
+  html, body {
+    background: var(--bg-panel);
+  }
+  html:not(.dark), html:not(.dark) body {
+    background: var(--status-strip-dark);
+  }
   html:not(.dark) .shell-topbar {
     background: linear-gradient(to bottom, var(--status-strip-dark) var(--safe-top), var(--bg-panel) var(--safe-top));
-  }
-}
-@media (display-mode: standalone) and (prefers-color-scheme: light) {
-  html.dark .shell-topbar {
-    background: linear-gradient(to bottom, var(--status-strip-light) var(--safe-top), var(--bg-panel) var(--safe-top));
   }
 }
 /* Compact icon-led top-toolbar buttons: consistent 28x28px invisible hit
