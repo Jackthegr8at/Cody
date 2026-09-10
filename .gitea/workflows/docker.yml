@@ -384,8 +384,12 @@ jobs:
           else
             tag="$GITHUB_REF_NAME"
             ref_json=$(curl -fsS "${auth[@]}" "$FORGE_API/repos/$REPOSITORY/git/refs/tags/$tag")
-            type=$(jq -r '.object.type' <<<"$ref_json")
-            sha=$(jq -r '.object.sha' <<<"$ref_json")
+            # Gitea answers /git/refs/tags/<tag> with an ARRAY (GitHub returns
+            # the object), so index it before reading .object — reading it
+            # directly fails the whole release job with "Cannot index array".
+            ref_one=$(jq -c 'if type == "array" then .[0] else . end' <<<"$ref_json")
+            type=$(jq -r '.object.type' <<<"$ref_one")
+            sha=$(jq -r '.object.sha' <<<"$ref_one")
             if [ "$type" = "tag" ]; then
               tag_json=$(curl -fsS "${auth[@]}" "$FORGE_API/repos/$REPOSITORY/git/tags/$sha")
               notes=$(jq -r '.message // empty' <<<"$tag_json")
