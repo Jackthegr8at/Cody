@@ -1536,13 +1536,10 @@ export class AgentSessionWrapper {
     this.mcpListWaiter = waiter;
 
     try {
-<<<<<<< HEAD
-=======
       // Bound the transport acknowledgement separately from the command
       // output timeout. A child can accept this prompt frame and then stop
       // responding before it emits command_output; without this cap the
       // wrapper remains busy forever and later MCP refreshes are blocked.
->>>>>>> 47dc6b1 (fix: harden OMP session state and recovery)
       await this.proc.sendCommand({ type: "prompt", message: "/mcp list" }, PROMPT_ACK_TIMEOUT_MS);
       return await output;
     } catch (error) {
