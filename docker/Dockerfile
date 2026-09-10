@@ -195,6 +195,9 @@ WORKDIR /app
 COPY --from=build /app/package.json /app/next.config.ts ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/.next ./.next
+# public/ holds the PWA icons and the service worker; next start serves it
+# from the working directory, so it has to ship alongside .next.
+COPY --from=build /app/public ./public
 COPY --from=build /app/bin ./bin
 COPY --from=build /app/lib ./lib
 # scripts/ ships so engine bring-up can be run against the RUNNING container:
