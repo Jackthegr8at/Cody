@@ -89,18 +89,34 @@ jobs:
         # scheduler picks either — the gate therefore discovers a route that
         # works instead of assuming one, preferring the container's own address
         # on the daemon bridge (always reachable, no published port involved).
+        # Two runs share ONE host daemon (a push to main and its v-tag start
+        # together), so a fixed container name and fixed published ports make
+        # the second run fail on `Conflict. The container name "/cody-smoke"
+        # is already in use` — the image was fine, the gate collided with
+        # itself. The name carries the run id and the host ports are chosen by
+        # the daemon, then discovered with `docker port`.
         env:
           SMOKE_HOST: host.docker.internal
-          # Host-gateway route only; on the bridge route sshd is on 2222
-          # directly. 2222 on the host is the forge's own git+ssh port.
-          SMOKE_SSH_PUBLISH: 2322
         run: |
           set -euo pipefail
           fail() {
             echo "::error::$1" >&2
-            docker logs cody-smoke >&2 || true
-            docker rm -f cody-smoke >/dev/null || true
+            docker logs "$SMOKE_NAME" >&2 || true
+            docker rm -f "$SMOKE_NAME" >/dev/null || true
             exit 1
+          }
+
+          SMOKE_NAME="cody-smoke-${GITHUB_RUN_ID:-local}-$$"
+
+          # Starts the image under this run's own name with both ports
+          # published on daemon-chosen host ports, and records them for the
+          # host-gateway route below. Args after the first are extra `docker
+          # run` flags.
+          smoke_start() {
+            docker run -d --name "$SMOKE_NAME" -p 30177 -p 2222 "$@" cody:smoke >/dev/null
+            SMOKE_HTTP_PORT=$(docker port "$SMOKE_NAME" 30177 | head -1 | sed 's/.*://')
+            SMOKE_SSH_PUBLISH=$(docker port "$SMOKE_NAME" 2222 | head -1 | sed 's/.*://')
+            export SMOKE_HTTP_PORT SMOKE_SSH_PUBLISH
           }
 
           # Sets SMOKE_BASE (HTTP origin) plus SMOKE_SSH_HOST/SMOKE_SSH_PORT
@@ -109,8 +125,8 @@ jobs:
           wait_ready() {
             last=000
             for _ in $(seq 1 30); do
-              ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' cody-smoke 2>/dev/null || echo '')
-              for cand in ${ip:+"$ip:30177:2222"} "${SMOKE_HOST}:30177:${SMOKE_SSH_PUBLISH}"; do
+              ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$SMOKE_NAME" 2>/dev/null || echo '')
+              for cand in ${ip:+"$ip:30177:2222"} "${SMOKE_HOST}:${SMOKE_HTTP_PORT}:${SMOKE_SSH_PUBLISH}"; do
                 addr=${cand%:*}
                 last=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://${addr}/login" || echo 000)
                 if [ "$last" = "200" ]; then
@@ -132,7 +148,7 @@ jobs:
           # (accounts required from the first request), walk the opener through
           # first-run setup, and grant the created account access.
           # ------------------------------------------------------------------
-          docker run -d --name cody-smoke -p 30177:30177 cody:smoke
+          smoke_start
           wait_ready
           root=$(curl -s -o /dev/null -w '%{http_code}' ${SMOKE_BASE}/ || echo 000)
           [ "$root" = "307" ] || fail "fresh install: GET / expected 307 to the setup screen, got $root"
@@ -166,7 +182,7 @@ jobs:
             ${SMOKE_BASE}/api/engines/install || echo 000)
           [ "$install" = "200" ] || fail "fresh install: omp install expected 200, got $install ($(cat /tmp/install-body))"
           grep -q '"installed":true' /tmp/install-body || fail "fresh install: omp install did not report installed ($(cat /tmp/install-body))"
-          docker exec cody-smoke /data/agent/tools/bin/omp --version \
+          docker exec "$SMOKE_NAME" /data/agent/tools/bin/omp --version \
             || fail "fresh install: installed omp does not run from the tools prefix"
 
           # The OTHER install mechanism. Everything above exercises the npm
@@ -184,12 +200,12 @@ jobs:
           # server ships as an optional extra, and `hermes --version` reports a
           # healthy version with or without it — an engine that installs clean
           # and then dies on every chat turn.
-          docker exec cody-smoke /data/agent/tools/bin/hermes acp --version \
+          docker exec "$SMOKE_NAME" /data/agent/tools/bin/hermes acp --version \
             || fail "uv install: hermes acp does not run — the [acp] extra is missing from the install"
           # The Hermes settings panel derives its schema by running the venv
           # interpreter uv places beside the shim's target. No python there, no
           # settings tab — and nothing else would notice.
-          docker exec cody-smoke sh -c 'test -x "$(dirname "$(readlink -f /data/agent/tools/bin/hermes)")/python"' \
+          docker exec "$SMOKE_NAME" sh -c 'test -x "$(dirname "$(readlink -f /data/agent/tools/bin/hermes)")/python"' \
             || fail "uv install: no venv python beside the hermes shim — the settings panel derives its schema from there"
 
           # The remaining three. Cody ships five engines and the owner uses
@@ -212,9 +228,9 @@ jobs:
           # suppresses the adapter's own bundled binary on purpose, so if
           # installAlso ever stops running these are simply absent and every
           # turn dies at runtime with the adapter reporting a healthy version.
-          docker exec cody-smoke test -x /data/agent/tools/bin/claude \
+          docker exec "$SMOKE_NAME" test -x /data/agent/tools/bin/claude \
             || fail "engine install: claude-agent-acp installed without the Claude CLI beside it"
-          docker exec cody-smoke test -x /data/agent/tools/bin/codex \
+          docker exec "$SMOKE_NAME" test -x /data/agent/tools/bin/codex \
             || fail "engine install: codex-acp installed without the Codex CLI beside it"
 
           # Does each engine actually START on the transport Cody says it
@@ -228,7 +244,7 @@ jobs:
           # Runs here, with ALL FIVE installed and before the uninstall below
           # removes one. --require names them because they were just installed:
           # "not installed" would mean the install lied.
-          docker exec cody-smoke sh -c 'cd /app && node scripts/engine-bringup.mjs --require omp,pi,claude,codex,hermes' \
+          docker exec "$SMOKE_NAME" sh -c 'cd /app && node scripts/engine-bringup.mjs --require omp,pi,claude,codex,hermes' \
             || fail "engine bring-up: an installed engine does not start on its declared transport"
 
           # Uninstall must use the manager that installed it. npm against a
@@ -239,7 +255,7 @@ jobs:
             --max-time 120 \
             ${SMOKE_BASE}/api/engines/install || echo 000)
           [ "$hermes_rm" = "200" ] || fail "uv uninstall: expected 200, got $hermes_rm ($(cat /tmp/hermes-rm))"
-          docker exec cody-smoke test ! -e /data/agent/tools/bin/hermes \
+          docker exec "$SMOKE_NAME" test ! -e /data/agent/tools/bin/hermes \
             || fail "uv uninstall: reported success but /data/agent/tools/bin/hermes is still installed"
 
           # Screenshot capability contract: the preview_screenshot host tool
@@ -247,15 +263,15 @@ jobs:
           # --version alone would not catch a renderer that cannot start in
           # the slim image, so capture a REAL page served inside the container
           # end to end through the API.
-          docker exec cody-smoke /usr/bin/chromium --version \
+          docker exec "$SMOKE_NAME" /usr/bin/chromium --version \
             || fail "screenshot support: bundled chromium missing or broken"
           # Cody ships ja/zh-CN UIs; screenshots of them need CJK + emoji
           # coverage or they render as tofu boxes.
-          docker exec cody-smoke sh -c 'ls /usr/share/fonts/opentype/noto/ | grep -qi cjk' \
+          docker exec "$SMOKE_NAME" sh -c 'ls /usr/share/fonts/opentype/noto/ | grep -qi cjk' \
             || fail "screenshot support: CJK fonts missing from the image"
-          docker exec cody-smoke sh -c 'ls /usr/share/fonts/truetype/noto/ | grep -qi emoji' \
+          docker exec "$SMOKE_NAME" sh -c 'ls /usr/share/fonts/truetype/noto/ | grep -qi emoji' \
             || fail "screenshot support: emoji font missing from the image"
-          docker exec -d cody-smoke python3 -m http.server 4655 --bind 127.0.0.1
+          docker exec -d "$SMOKE_NAME" python3 -m http.server 4655 --bind 127.0.0.1
           sleep 1
           shot=$(curl -s -o /tmp/shot-body -w '%{http_code}' -b /tmp/smoke-cookies \
             -H 'Content-Type: application/json' -d '{"url":"http://127.0.0.1:4655"}' \
@@ -280,7 +296,7 @@ jobs:
           else
             echo "::warning::omp settings schema did not load in the image"
           fi
-          docker rm -f cody-smoke >/dev/null
+          docker rm -f "$SMOKE_NAME" >/dev/null
           echo "fresh-install verified (locked, setup mints an admin, omp installs via npm and hermes via uv, both run, uv uninstall removes, screenshots capture)"
 
           # ------------------------------------------------------------------
@@ -289,9 +305,9 @@ jobs:
           # on), and CODY_SSH_PASSWORD must bring sshd up on its port with the
           # engine-first login profile installed.
           # ------------------------------------------------------------------
-          docker run -d --name cody-smoke -p 30177:30177 -p ${SMOKE_SSH_PUBLISH}:2222 \
+          smoke_start \
             -e CODY_PASSWORD=smoke-test-password \
-            -e CODY_SSH_PASSWORD=smoke-ssh-password cody:smoke
+            -e CODY_SSH_PASSWORD=smoke-ssh-password
           wait_ready
           basic=$(curl -s -o /dev/null -w '%{http_code}' -u cody:smoke-test-password ${SMOKE_BASE}/api/sessions || echo 000)
           [ "$basic" = "200" ] || fail "password mode: GET /api/sessions with Basic Auth expected 200, got $basic"
@@ -300,11 +316,11 @@ jobs:
             SSH-2.0*) ;;
             *) fail "sshd did not answer on ${SMOKE_SSH_HOST}:${SMOKE_SSH_PORT} (banner: '$banner')" ;;
           esac
-          docker exec cody-smoke test -f /etc/profile.d/50-cody-engine.sh \
+          docker exec "$SMOKE_NAME" test -f /etc/profile.d/50-cody-engine.sh \
             || fail "engine-first SSH login profile is missing"
-          docker exec cody-smoke sh -c 'grep -q "root:.*:/data/home:" /etc/passwd' \
+          docker exec "$SMOKE_NAME" sh -c 'grep -q "root:.*:/data/home:" /etc/passwd' \
             || fail "root home was not moved to the persistent /data/home"
-          docker rm -f cody-smoke >/dev/null
+          docker rm -f "$SMOKE_NAME" >/dev/null
           echo "password-mode Basic Auth + SSH verified"
 
       - name: Build and push
