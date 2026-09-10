@@ -1,6 +1,7 @@
 {
   "agentSession.commandCompleted": "コマンドが完了しました",
   "agentSession.commandFailed": "コマンドが失敗しました",
+  "agentSession.responseFailed": "応答が内容なしで終了しました",
   "agentSession.commandRequiresArgs": "使用法: {command} {usage}",
   "agentSession.compactedContext": "コンテキストを圧縮しました",
   "agentSession.copiedLastMessage": "最後のアシスタントメッセージをコピーしました",
@@ -767,6 +768,7 @@
   "messageView.noMessage": "（メッセージなし）",
   "messageView.noOutput": "（出力なし）",
   "messageView.noSummary": "（要約なし）",
+  "messageView.interruptedByUser": "ユーザーによって生成が停止されました",
   "messageView.readFiles": "読み取ったファイル",
   "messageView.showDetails": "詳細を表示",
   "messageView.showExtensionMessage": "拡張機能メッセージを表示",

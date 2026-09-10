@@ -1,6 +1,7 @@
 {
   "agentSession.commandCompleted": "Command completed",
   "agentSession.commandFailed": "Command failed",
+  "agentSession.responseFailed": "The response ended without any content",
   "agentSession.commandRequiresArgs": "Usage: {command} {usage}",
   "agentSession.compactedContext": "Compacted context",
   "agentSession.copiedLastMessage": "Copied last assistant message",
@@ -767,6 +768,7 @@
   "messageView.noMessage": "(no message)",
   "messageView.noOutput": "(no output)",
   "messageView.noSummary": "(no summary)",
+  "messageView.interruptedByUser": "Generation stopped by user",
   "messageView.readFiles": "Read files",
   "messageView.showDetails": "Show details",
   "messageView.showExtensionMessage": "Show extension message",

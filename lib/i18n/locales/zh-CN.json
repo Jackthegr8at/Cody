@@ -1,6 +1,7 @@
 {
   "agentSession.commandCompleted": "命令已完成",
   "agentSession.commandFailed": "命令失败",
+  "agentSession.responseFailed": "响应在没有内容的情况下结束",
   "agentSession.commandRequiresArgs": "用法：{command} {usage}",
   "agentSession.compactedContext": "已压缩上下文",
   "agentSession.copiedLastMessage": "已复制最后一条助手消息",
@@ -767,6 +768,7 @@
   "messageView.noMessage": "（无消息）",
   "messageView.noOutput": "（无输出）",
   "messageView.noSummary": "（无摘要）",
+  "messageView.interruptedByUser": "生成已被用户停止",
   "messageView.readFiles": "已读取的文件",
   "messageView.showDetails": "显示详情",
   "messageView.showExtensionMessage": "显示扩展消息",
