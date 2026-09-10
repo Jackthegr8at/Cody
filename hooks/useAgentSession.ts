@@ -25,6 +25,7 @@ import { translate } from "@/lib/i18n";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { createMessageUpdateCoalescer, type MessageUpdateCoalescer } from "@/lib/message-update-coalescer";
+import { createReconcileGuard, type ReconcileGuard } from "@/lib/reconcile-guard";
 import {
   evaluateStreamHealth,
   reconnectDelayMs,
@@ -121,6 +122,46 @@ function streamReducer(state: StreamingState, action: StreamAction): StreamingSt
 interface AgentEvent {
   type: string;
   [key: string]: unknown;
+}
+
+/** Read provider/runtime errors without ever rendering an object as
+ * "[object Object]". Error payloads vary across OMP versions and may be
+ * nested inside assistant, turn_end, or response frames. */
+function readAgentError(value: unknown): string | null {
+  if (typeof value === "string") {
+    const text = value.trim();
+    return text || null;
+  }
+  if (!isRecord(value)) return null;
+  for (const key of ["errorMessage", "error", "message", "detail"]) {
+    const text = readAgentError(value[key]);
+    if (text) return text;
+  }
+  return value.stopReason === "error" ? translate("agentSession.responseFailed") : null;
+}
+
+function readTerminalAgentError(event: AgentEvent): string | null {
+  for (const value of [event.errorMessage, event.error, event.message]) {
+    const text = readAgentError(value);
+    if (text) return text;
+  }
+  if (Array.isArray(event.messages)) {
+    for (let index = event.messages.length - 1; index >= 0; index -= 1) {
+      const text = readAgentError(event.messages[index]);
+      if (text) return text;
+    }
+  }
+  return null;
+}
+
+function hasVisibleAssistantContent(value: unknown): boolean {
+  if (!isRecord(value) || value.role !== "assistant") return false;
+  if (!Array.isArray(value.content)) return typeof value.content === "string" && value.content.trim().length > 0;
+  return value.content.some((block) => {
+    if (!isRecord(block)) return false;
+    if (block.type === "text") return typeof block.text === "string" && block.text.trim().length > 0;
+    return block.type === "image";
+  });
 }
 
 const SUBAGENT_ACTIVITY_BUFFER_MAX = 50;
@@ -1071,10 +1112,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // so a stale get_subagents cannot target a session that was switched away.
   const rosterRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const promptRunIdRef = useRef(0);
+  // Reconciliation can be triggered by several independent browser events.
+  // Keep one authoritative poll in flight and retry once when another trigger
+  // arrived while it was running; a stalled request expires after 30 seconds.
+  const reconcileGuardRef = useRef<ReconcileGuard | null>(null);
+  if (reconcileGuardRef.current === null) reconcileGuardRef.current = createReconcileGuard({ timeoutMs: 30_000 });
   // Last quota-like error seen during the current run, and whether the run
   // produced any assistant content. Used to surface a persistent error when
   // the agent stops without a visible failure.
   const lastQuotaErrorRef = useRef<string | null>(null);
+  const lastRunErrorRef = useRef<string | null>(null);
+  const slashCommandRunRef = useRef(false);
   const runHadContentRef = useRef(false);
   // Bumped on every roster clear (run end): in-flight get_subagents/history
   // responses from the finished run must not merge into the cleared (or next
@@ -2333,6 +2381,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (runId !== undefined && promptRunIdRef.current !== runId) return;
     const hadContent = runHadContentRef.current;
     const quotaMessage = lastQuotaErrorRef.current;
+    const runError = lastRunErrorRef.current;
+    const allowEmptyResponse = slashCommandRunRef.current;
     try {
       // The reload below replaces `messages` wholesale. A follower must be
       // re-pinned instantly through the reflow; a reader scrolled up must
@@ -2349,9 +2399,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (runId !== undefined && promptRunIdRef.current !== runId) return;
       optimisticUserMessageKeyRef.current = null;
       if (!agentRunningRef.current) return;
-      if (!hadContent && quotaMessage && isQuotaLikeError(quotaMessage)) {
+      if (runError) {
+        addNotice({ type: "error", message: runError });
+        if (isQuotaLikeError(runError)) {
+          toast.error("Quota reached", runError, { durationMs: 12000 });
+        } else {
+          toast.error("Request failed", runError, { durationMs: 12000 });
+        }
+      } else if (!hadContent && quotaMessage && isQuotaLikeError(quotaMessage)) {
         addNotice({ type: "error", message: quotaMessage });
         toast.error("Quota reached", quotaMessage, { durationMs: 12000 });
+      } else if (!hadContent && !allowEmptyResponse) {
+        const message = translate("agentSession.responseFailed");
+        addNotice({ type: "error", message });
+        toast.error("Request failed", message, { durationMs: 10000 });
       }
       agentRunningRef.current = false;
       assistantProviderCallRef.current = false;
@@ -2372,6 +2433,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       dispatch({ type: "end" });
       runHadContentRef.current = false;
       lastQuotaErrorRef.current = null;
+      lastRunErrorRef.current = null;
+      slashCommandRunRef.current = false;
       onAgentEnd?.();
     }
   }, [addNotice, dispatchPendingModelSwitch, loadSession, onAgentEnd, refreshSubagentUsage, resetSubagentActivityState]);
@@ -2453,6 +2516,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const reconcileAgentState = useCallback(async (sid: string) => {
     if (!agentRunningRef.current) return;
     const runId = promptRunIdRef.current;
+    const guard = reconcileGuardRef.current;
+    if (!guard) return;
+    const token = guard.tryAcquire();
+    if (token === null) return;
     try {
       const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
       if (!res.ok) return;
@@ -2492,6 +2559,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await finishPromptWithoutStream(sid, runId);
     } catch {
       // Network still down — the next poll / visibility / online tick retries.
+    } finally {
+      const reissue = guard.release(token);
+      if (reissue && agentRunningRef.current && promptRunIdRef.current === runId && sessionIdRef.current === sid) {
+        void reconcileAgentState(sid);
+      }
     }
   }, [finishPromptWithoutStream, refreshSubagentRoster, adoptPermissionRequests, adoptSessionPromptCapabilities]);
 
@@ -2598,6 +2670,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useEffect(() => {
     setStreamAlert(null);
     setStreamDegraded(false);
+    reconcileGuardRef.current?.reset();
     streamAttachedRef.current = false;
     streamUnhealthySinceRef.current = null;
     reconnectAttemptRef.current = 0;
@@ -2666,6 +2739,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     switch (event.type) {
       case "agent_start":
         interruptReplyPendingRef.current = false;
+        reconcileGuardRef.current?.reset();
         agentRunningRef.current = true;
         assistantProviderCallRef.current = true;
         retryErrorByJobRef.current.clear();
@@ -2679,6 +2753,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         dispatch({ type: "start" });
         runHadContentRef.current = false;
         lastQuotaErrorRef.current = null;
+        lastRunErrorRef.current = null;
         break;
       case "agent_end": {
         // isTerminal === false means an async delivery resumes this run soon.
@@ -2698,9 +2773,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // even when the engine sent no terminal notice.
         const hadContent = runHadContentRef.current;
         const previousQuotaMessage = lastQuotaErrorRef.current;
-        const endErrorMessage = typeof event.errorMessage === "string" ? event.errorMessage.trim() : "";
-        const endMessage = typeof event.message === "string" ? event.message.trim() : "";
-        const terminalError = endErrorMessage || endMessage;
+        const terminalError = readTerminalAgentError(event) ?? lastRunErrorRef.current;
         if (terminalError && isQuotaLikeError(terminalError)) {
           lastQuotaErrorRef.current = terminalError;
         }
@@ -2712,7 +2785,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             addNotice({ type: "error", message: quotaMessage });
             toast.error("Quota reached", quotaMessage, { durationMs: 12000 });
           } else if (terminalError) {
-            addNotice({ type: "warning", message: terminalError });
+            addNotice({ type: "error", message: terminalError });
+            toast.error("Request failed", terminalError, { durationMs: 12000 });
+          } else if (!slashCommandRunRef.current) {
+            const message = translate("agentSession.responseFailed");
+            addNotice({ type: "error", message });
+            toast.error("Request failed", message, { durationMs: 10000 });
           }
         } else if (terminalError && isQuotaLikeError(terminalError)) {
           // The provider can exhaust quota after a partial response; keep that
@@ -2738,6 +2816,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         dispatch({ type: "end" });
         runHadContentRef.current = false;
         lastQuotaErrorRef.current = null;
+        lastRunErrorRef.current = null;
+        slashCommandRunRef.current = false;
         if (endedSid) {
           // Same contract as finishPromptWithoutStream: re-pin a follower,
           // anchor a reader, before the reload's content-visibility reflow.
@@ -2787,24 +2867,36 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         void finishPromptWithoutStream(sessionIdRef.current, promptRunIdRef.current);
         break;
       case "prompt_error": {
-        const rawPromptError = event.errorMessage;
-        const promptMsg = typeof rawPromptError === "string" && rawPromptError.trim()
-          ? rawPromptError.trim()
-          : translate("agentSession.commandFailed");
-        addNotice({ type: "error", message: promptMsg });
-        if (isQuotaLikeError(promptMsg)) {
-          lastQuotaErrorRef.current = promptMsg;
-          toast.error("Quota reached", promptMsg, { durationMs: 12000 });
-        }
+        const promptMsg = readAgentError(event.errorMessage)
+          ?? readAgentError(event.error)
+          ?? readAgentError(event.message)
+          ?? translate("agentSession.commandFailed");
+        lastRunErrorRef.current = promptMsg;
         // A failed prompt is terminal: no agent_end follows it. Without this the
         // spinner and the locked input wait for the 15s reconcile poll. Fenced
         // with the run id for the same reason as prompt_result above.
         if (agentRunningRef.current) void finishPromptWithoutStream(sessionIdRef.current, promptRunIdRef.current);
+        else addNotice({ type: "error", message: promptMsg });
+        break;
+      }
+      case "error":
+      case "agent_error":
+      case "turn_error":
+      case "model_error":
+      case "server_error":
+      case "internal_error":
+      case "rpc_frame_error": {
+        const message = readTerminalAgentError(event) ?? translate("agentSession.responseFailed");
+        lastRunErrorRef.current = message;
+        if (!agentRunningRef.current) addNotice({ type: "error", message });
         break;
       }
       case "notice": {
         const level = event.level as string | undefined;
-        const message = (event.message as string | undefined)?.trim() ?? "";
+        const message = readAgentError(event.message)
+          ?? readAgentError(event.errorMessage)
+          ?? readAgentError(event.error)
+          ?? "";
         if (/^xd:\/\/:\s*mounted\s+mcp__/i.test(message)) {
           toast.info("MCP tools updated", message, { clamp: true });
         } else {
@@ -2851,7 +2943,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "command_output": {
-        const text = (event.text as string | undefined)?.trim() ?? "";
+        const text = readAgentError(event.text) ?? "";
         if (/^xd:\/\/:\s*mounted\s+mcp__/i.test(text)) toast.info("MCP tools updated", text, { clamp: true });
         else if (text) {
           addNotice({ type: "info", message: text });
@@ -2946,12 +3038,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // reconcile) — they would resurrect a ghost streaming bubble.
         if (!agentRunningRef.current) break;
         const msg = event.message as Partial<AgentMessage> | undefined;
+        const messageError = readAgentError(msg);
+        if (messageError) lastRunErrorRef.current = messageError;
         if (msg?.role === "user") {
           break;
         }
         assistantProviderCallRef.current = true;
         if (msg) {
-          runHadContentRef.current = true;
+          if (hasVisibleAssistantContent(msg)) runHadContentRef.current = true;
           const text = extractMessageText(msg);
           if (text && isQuotaLikeError(text)) lastQuotaErrorRef.current = text.slice(0, 800);
           dispatch({ type: "update", message: normalizeToolCalls(msg as AgentMessage) });
@@ -2965,8 +3059,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // appending it again would duplicate it.
         if (!agentRunningRef.current) break;
         const completed = event.message as AgentMessage | undefined;
+        const messageError = readAgentError(completed);
+        if (messageError) lastRunErrorRef.current = messageError;
         if (completed) {
-          runHadContentRef.current = true;
+          if (hasVisibleAssistantContent(completed)) runHadContentRef.current = true;
           const text = extractMessageText(completed as Partial<AgentMessage>);
           if (text && isQuotaLikeError(text)) lastQuotaErrorRef.current = text.slice(0, 800);
         }
@@ -3035,7 +3131,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         void dispatchPendingModelSwitch();
         const id = event.toolCallId as string;
         const name = event.toolName as string;
-        runHadContentRef.current = true;
         setAgentPhase((prev) => {
           const tools = prev?.kind === "running_tools" ? [...prev.tools] : [];
           if (!tools.some((t) => t.id === id)) tools.push({ id, name, startedAt: Date.now() });
@@ -3114,6 +3209,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 15s reconcile poll, so items check off as they complete instead of
       // arriving in poll-sized batches.
       case "turn_end":
+        {
+          const messageError = readTerminalAgentError(event);
+          if (messageError) lastRunErrorRef.current = messageError;
+        }
         assistantProviderCallRef.current = false;
         void dispatchPendingModelSwitch();
         if (sessionIdRef.current) {
@@ -3362,6 +3461,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setMessages((prev) => [...prev, userMsg]);
     optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
     promptRunIdRef.current = promptRunId;
+    slashCommandRunRef.current = isSlashCommandPrompt;
     agentRunningRef.current = true;
     assistantProviderCallRef.current = true;
     // Optimistic: the stream is opened and the prompt posted below, so the
@@ -3460,6 +3560,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       optimisticUserMessageKeyRef.current = null;
       agentRunningRef.current = false;
       assistantProviderCallRef.current = false;
+      lastRunErrorRef.current = null;
+      slashCommandRunRef.current = false;
       setAgentRunning(false);
       setAgentPhase(null);
       dispatch({ type: "end" });
