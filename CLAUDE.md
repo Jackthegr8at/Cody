@@ -10,33 +10,36 @@ model is doing the work.
 - **`main` is the only branch.** Commit and push directly to `main`. Never
   create feature branches; delete any that appear. Pull requests are not
   part of this workflow.
-- **The forge is Gitea, not GitHub.** Cody moved to the self-hosted forge
-  at `https://git.nateshome.net/nphilip89/Cody` (git remote `forge`; `main`
-  tracks `forge/main`). Push there and only there: `git push forge main
-  [vX.Y.Z]`. The `origin` remote (github.com/nphil/Cody) is the pre-migration
-  mirror, is no longer pushed, and its `.github/workflows` do not run for
-  this repo; `.github/workflows/desktop.yml` stays only until the desktop
-  build is ported. Never re-point any workflow, update source, image name or
-  release step at GitHub or GHCR.
-- **Every push to `main` IS a release.** CI (`.gitea/workflows/docker.yml`,
-  Gitea Actions on the owner's runners) builds the container, runs the smoke
-  gate, and republishes `git.nateshome.net/nphilip89/cody:latest`, which the
-  owner's Unraid server pulls. A v-tag or a versioned dispatch additionally
-  tags `:X.Y.Z` and cuts a Gitea Release through the Forge API (the
+- **Two release hosts, both of them real.** Cody's home is the self-hosted
+  Gitea forge at `https://git.nateshome.net/nphilip89/Cody` (git remote
+  `forge`; `main` tracks `forge/main`), and it ALSO releases on GitHub at
+  `github.com/nphil/Cody` (remote `origin`). Push every release to both:
+  `git push forge main [vX.Y.Z] && git push origin main [vX.Y.Z]`. Each host
+  builds and publishes its own container from its own workflow
+  (`.gitea/workflows/docker.yml` → `git.nateshome.net/nphilip89/cody`,
+  `.github/workflows/docker.yml` → `ghcr.io/nphil/cody`); keep the two
+  workflows in step when either changes, and never let one host's image name
+  or release step be re-pointed at the other's registry.
+- **Every push to `main` IS a release.** On each host CI builds the
+  container, runs the smoke gate, and republishes that host's `:latest` —
+  the forge image is what the owner's Unraid server pulls. A v-tag or a
+  versioned dispatch additionally tags `:X.Y.Z` and cuts a Release (the
   changelog ShipLog shows in Unraid's Docker tab).
-  Watch runs with Cody's own `forge` host tool (`lib/forge/tool.ts`, given
-  to every omp session): `forge op=run_watch` after a push polls the newest
-  run on the default host (`nateforge`) and reports failing jobs with a log
-  tail; `op=runs`, `op=packages`, `op=release_create` cover the rest. Never
-  `gh`. When the tool is unavailable (a restricted tool set), the same
-  answers come from the Gitea API: `GET
+  Watch forge runs with Cody's own `forge` host tool (`lib/forge/tool.ts`,
+  given to every omp session): `forge op=run_watch` after a push polls the
+  newest run on the default host (`nateforge`) and reports failing jobs with
+  a log tail; `op=runs`, `op=packages`, `op=release_create` cover the rest.
+  When the tool is unavailable (a restricted tool set), the same answers come
+  from the Gitea API: `GET
   https://git.nateshome.net/api/v1/repos/nphilip89/Cody/actions/runs?limit=3`
-  with `Authorization: token <nateforge token from /data/agent/cody-forge.json>`.
+  with `Authorization: token <nateforge token from /data/agent/cody-forge.json>`,
+  and from the GitHub API for the GitHub half.
   Therefore: never push unverified work. The bar before any push:
   `npm run typecheck && npm run lint && npm test && npm run build`, plus a
   real exercise of whatever changed (route smoke via jiti, a Playwright
   pass, or a live local server — match the verification to the change).
-- **Watch CI after every push** until the run for your head commit is green
+- **Watch CI on both hosts after every push** until the run for your head
+  commit is green
   (~4–8 min; longer since the smoke test installs omp in-container). Use a
   scheduled check-in (send_later or equivalent) rather than polling. If CI
   fails, diagnosing and pushing the fix is part of the same task — the
