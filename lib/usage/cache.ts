@@ -1,5 +1,26 @@
+import { listOmpCredentials } from "../harness/omp-credentials";
+import { applyCredentialOrder } from "./credential-order";
 import { fetchOmpUsageSnapshot, unavailableUsageSnapshot } from "./omp-usage";
 import type { UsageSnapshot } from "./types";
+
+/**
+ * The default read: quota numbers, then the credential store's ordering laid
+ * over them (see credential-order.ts — it is what keeps the composer and
+ * Settings naming the same account "Primary"). The store read is best-effort
+ * and adds one helper spawn per cache refresh, not per request; a failure
+ * leaves the engine's own ordering exactly as it was.
+ */
+async function loadUsageSnapshot(): Promise<UsageSnapshot> {
+  const snapshot = await fetchOmpUsageSnapshot();
+  if (!snapshot.available) return snapshot;
+  try {
+    const stored = await listOmpCredentials();
+    if (stored.available) return applyCredentialOrder(snapshot, stored.credentials);
+  } catch {
+    // Ordering is a nicety; quota numbers are the point of this read.
+  }
+  return snapshot;
+}
 
 /**
  * The single shared usage read.
@@ -87,7 +108,7 @@ export function getUsageSnapshot(options: GetUsageSnapshotOptions = {}): Promise
   const entry = state.entry;
   if (entry && isFresh(entry, options.maxAgeMs)) return Promise.resolve(entry.snapshot);
 
-  const load = state.inFlight ?? startUsageLoad(state, options.load ?? fetchOmpUsageSnapshot);
+  const load = state.inFlight ?? startUsageLoad(state, options.load ?? loadUsageSnapshot);
 
   if (entry && entry.snapshot.available) {
     const lastGood = entry.snapshot;

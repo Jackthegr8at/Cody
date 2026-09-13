@@ -16,8 +16,8 @@
  * `KeyMethodCard` is exported for the setup wizard, which renders it in
  * its own card for the key providers the picker offers.
  */
-import { AlertCircle, AlertTriangle, Check, ChevronDown, ChevronRight, KeyRound, Loader2, LogIn, LogOut, Plus, RefreshCw, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { AlertCircle, AlertTriangle, Check, ChevronDown, ChevronRight, KeyRound, Loader2, LogIn, LogOut, Plus, RefreshCw, Trash2, UserPlus } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { ModelCatalogPicker } from "@/components/ModelCatalogPicker";
 import { ModelEntryEditor, ProviderEntryEditor, type ModelEntry, type ModelsFileData, type ProviderEntry } from "@/components/ModelsConfig";
 import { ConfirmDialog } from "@/components/ui/field";
@@ -25,6 +25,7 @@ import { toast } from "@/components/ui/toast";
 import { useNativeSettings } from "@/hooks/useConfigWriter";
 import { useModelCatalog } from "@/hooks/useModelCatalog";
 import { useSettingsRoute } from "@/hooks/useSettingsData";
+import type { ProviderLoginAccount } from "@/lib/harness/types";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { providerGlob } from "@/lib/model-allow-list";
 import { omitUntouchedModelDrafts } from "@/lib/models-config-drafts";
@@ -79,7 +80,53 @@ export function loginRowOf(row: ProviderRow, method: ProviderMethod): ProviderLo
 
 // ── Sign-in ──────────────────────────────────────────────────────────────────
 
-function LoginMethodCard({ row, method, canEdit, shortName, autoStart, onChanged }: {
+/** A limited account's local reset clock. This file carries no i18n (unlike
+ * ChatInput's near-identical `formatResetTime`), so it stays a plain
+ * browser-locale format. */
+function formatLocalTime(iso: string | null): string | null {
+  if (!iso) return null;
+  const at = new Date(iso);
+  return Number.isNaN(at.getTime()) ? null : at.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
+function AccountStateChip({ state, resetsAt }: { state: ProviderLoginAccount["state"]; resetsAt: string | null }) {
+  if (state === "serving") return <span style={{ ...chipStyle, color: "var(--accent)" }}>Serving</span>;
+  if (state === "standby") return <span style={{ ...chipStyle, color: "var(--text-dim)" }}>Standby</span>;
+  if (state === "disabled") return <span style={{ ...chipStyle, color: "var(--status-error)" }}>Disabled</span>;
+  const reset = formatLocalTime(resetsAt);
+  return <span style={{ ...chipStyle, color: "var(--status-warning)" }}>{reset ? `Limited · resets ${reset}` : "Limited"}</span>;
+}
+
+/** One account under a multi-account sign-in: identity, plan, the state omp
+ * ranked it at, and — when it is not the credential's only remaining copy —
+ * removal. */
+function AccountRow({ account, canEdit, busy, onRemove }: {
+  account: ProviderLoginAccount;
+  canEdit: boolean;
+  busy: boolean;
+  onRemove: () => void;
+}) {
+  const title = account.position === 0 ? "Primary" : account.position === 1 ? "Secondary" : `Account ${account.position + 1}`;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+      <span style={{ flex: "1 1 120px", minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+        <span style={{ fontSize: 12, fontWeight: 600 }}>{title}</span>
+        <span style={{ fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={account.label}>
+          {account.label}
+        </span>
+      </span>
+      {account.planType && <span style={{ fontSize: 11, color: "var(--text-muted)", whiteSpace: "nowrap" }}>{account.planType}</span>}
+      <AccountStateChip state={account.state} resetsAt={account.resetsAt} />
+      {account.canRemove && canEdit && (
+        <button type="button" className="ui-focus-ring" onClick={onRemove} disabled={busy} aria-label={`Remove ${account.label}`} style={{ ...quietButtonStyle, padding: "6px 8px" }}>
+          {busy ? <Loader2 size={12} aria-hidden="true" className="icon-spin" /> : <Trash2 size={12} aria-hidden="true" />}
+        </button>
+      )}
+    </div>
+  );
+}
+
+export function LoginMethodCard({ row, method, canEdit, shortName, autoStart, onChanged }: {
   row: ProviderRow;
   method: ProviderMethod;
   canEdit: boolean;
@@ -91,8 +138,15 @@ function LoginMethodCard({ row, method, canEdit, shortName, autoStart, onChanged
   const [starting, setStarting] = useState(autoStart);
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [removeTarget, setRemoveTarget] = useState<ProviderLoginAccount | null>(null);
+  const [removingId, setRemovingId] = useState<string | null>(null);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  const removingRef = useRef(false);
   const provider = loginRowOf(row, method);
   const connected = method.state === "connected";
+  const accounts = method.accounts;
+  const hasAccounts = (accounts?.length ?? 0) > 0;
+  const showAddAccount = hasAccounts;
 
   const logout = async () => {
     setLogoutError(null);
@@ -113,6 +167,32 @@ function LoginMethodCard({ row, method, canEdit, shortName, autoStart, onChanged
     }
   };
 
+  const removeAccount = async (account: ProviderLoginAccount) => {
+    if (removingRef.current) return;
+    removingRef.current = true;
+    setRemovingId(account.id);
+    setRemoveError(null);
+    try {
+      const response = await fetch(`/api/auth/logout/${encodeURIComponent(provider.id)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountId: account.id }),
+      });
+      const body = await response.json().catch(() => null) as { error?: string; code?: string } | null;
+      if (!response.ok) {
+        setRemoveError(body?.error || body?.code ? formatApiError(body ?? {}) : `HTTP ${response.status}`);
+        return;
+      }
+      setRemoveTarget(null);
+      onChanged();
+    } catch (failure) {
+      setRemoveError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      removingRef.current = false;
+      setRemovingId(null);
+    }
+  };
+
   return (
     <div style={cardStyle}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -124,11 +204,11 @@ function LoginMethodCard({ row, method, canEdit, shortName, autoStart, onChanged
       </div>
       {canEdit && (
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-          <button type="button" className="ui-focus-ring" onClick={() => { setLogoutError(null); setStarting(true); setExpanded(true); }} aria-expanded={expanded} style={connected ? buttonStyle : primaryButtonStyle}>
-            {connected ? <RefreshCw size={12} aria-hidden="true" /> : <LogIn size={12} aria-hidden="true" />}
-            {connected ? "Re-login" : "Sign in"}
+          <button type="button" className="ui-focus-ring" onClick={() => { setLogoutError(null); setRemoveError(null); setStarting(true); setExpanded(true); }} aria-expanded={expanded} style={connected ? buttonStyle : primaryButtonStyle}>
+            {showAddAccount ? <UserPlus size={12} aria-hidden="true" /> : connected ? <RefreshCw size={12} aria-hidden="true" /> : <LogIn size={12} aria-hidden="true" />}
+            {showAddAccount ? (accounts?.length === 1 ? "Add secondary account" : "Add account") : connected ? "Re-login" : "Sign in"}
           </button>
-          {connected && method.canLogout && (
+          {connected && method.canLogout && !hasAccounts && (
             <button type="button" className="ui-focus-ring" onClick={() => { void logout(); }} disabled={loggingOut} style={dangerButtonStyle}>
               {loggingOut ? <Loader2 size={12} aria-hidden="true" className="icon-spin" /> : <LogOut size={12} aria-hidden="true" />}
               Sign out
@@ -146,16 +226,48 @@ function LoginMethodCard({ row, method, canEdit, shortName, autoStart, onChanged
           </button>
         </div>
       )}
-      {connected && !method.canLogout && (
-        <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.45 }}>
-          Sign out from the {shortName} TUI (<code style={{ fontFamily: "var(--font-mono)" }}>/logout</code> in a Cody terminal); {shortName} keeps this credential in its own store.
-        </p>
+      {hasAccounts && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {accounts?.map((account) => (
+            <AccountRow
+              key={account.id}
+              account={account}
+              canEdit={canEdit}
+              busy={removingId === account.id}
+              onRemove={() => { setRemoveError(null); setRemoveTarget(account); }}
+            />
+          ))}
+        </div>
       )}
+      {accounts === undefined ? (
+        connected && !method.canLogout && (
+          <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.45 }}>
+            Sign out from the {shortName} TUI (<code style={{ fontFamily: "var(--font-mono)" }}>/logout</code> in a Cody terminal); {shortName} keeps this credential in its own store.
+          </p>
+        )
+      ) : hasAccounts && method.multiAccount ? (
+        <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.45 }}>
+          {shortName} rotates between these accounts automatically and skips a limited one until it resets.
+        </p>
+      ) : null}
       {logoutError && <ErrorLine>{logoutError}</ErrorLine>}
+      {removeError && <ErrorLine>{removeError}</ErrorLine>}
       {canEdit && expanded && (
         <div style={{ borderTop: "1px solid var(--border)", paddingTop: 10 }}>
           <ProviderLoginFlow key={provider.id} provider={provider} onChanged={onChanged} autoStart={starting} compact />
         </div>
+      )}
+      {removeTarget && (
+        <ConfirmDialog
+          open
+          onOpenChange={(open) => { if (!open) setRemoveTarget(null); }}
+          title={`Remove ${removeTarget.label}?`}
+          description={`Sessions stop using this ${removeTarget.label} account.${accounts?.length === 1 ? ` This is the last account, so ${row.name} is disconnected.` : ""}`}
+          confirmLabel="Remove"
+          danger
+          busy={removingId === removeTarget.id}
+          onConfirm={() => { void removeAccount(removeTarget); }}
+        />
       )}
     </div>
   );

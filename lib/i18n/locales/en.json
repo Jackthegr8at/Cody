@@ -1860,5 +1860,14 @@
   "directChat.noSkills": "No installed prompt skills found.",
   "directChat.pluginsExcluded": "Plugin tools and hooks never run in Direct API chat.",
   "directChat.refreshPromptCommands": "Refresh installed prompt commands in Extensions",
-  "directChat.compactFailed": "Could not compact this direct conversation."
+  "directChat.compactFailed": "Could not compact this direct conversation.",
+  "usage.accountsHeading": "Accounts · {count}",
+  "usage.accountServing": "Serving",
+  "usage.accountStandby": "Standby",
+  "usage.accountLimited": "Limited · resets {time}",
+  "usage.accountDisabled": "Disabled",
+  "usage.accountsNote": "The engine switches to another account automatically when one is limited.",
+  "usage.accountPrimary": "Primary",
+  "usage.accountSecondary": "Secondary",
+  "usage.accountNth": "Account {n}"
 }

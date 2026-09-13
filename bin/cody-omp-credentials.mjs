@@ -1,0 +1,113 @@
+#!/usr/bin/env bun
+/** Isolated Bun bridge to OMP's installed AuthStorage credential list/removal API. */
+import { createRequire } from "node:module";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+console.log = (...args) => console.error(...args);
+console.info = console.log;
+console.debug = console.log;
+function emit(value) { process.stdout.write(JSON.stringify(value)); }
+function fail(type, code, message) { emit({ type, ok: false, code, message }); process.exitCode = 1; }
+function asRecord(value) { return value && typeof value === "object" && !Array.isArray(value) ? value : null; }
+function safeString(value) { return typeof value === "string" && value.trim() ? value.trim() : null; }
+/** Epoch-ms (native block timestamps) to ISO, or null. Distinct from the
+ * ISO-string dates cody-omp-reset-credits.mjs normalizes: blocks are always
+ * numeric epoch ms on the wire. */
+function isoFromEpochMs(value) { return typeof value === "number" && Number.isFinite(value) ? new Date(value).toISOString() : null; }
+
+async function loadStorage(packageRoot, agentDir) {
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  const require = createRequire(join(packageRoot, "package.json"));
+  let aiPath; let utilsPath;
+  try { aiPath = require.resolve("@oh-my-pi/pi-ai/auth-storage.js"); utilsPath = require.resolve("@oh-my-pi/pi-utils/dirs.js"); } catch { throw new Error("OMP's installed credential modules are unavailable."); }
+  const ai = await import(pathToFileURL(aiPath).href); const utils = await import(pathToFileURL(utilsPath).href);
+  if (typeof ai.AuthStorage?.create !== "function" || typeof utils.getAgentDbPath !== "function") throw new Error("Installed OMP does not expose AuthStorage credential support.");
+  const storage = await ai.AuthStorage.create(utils.getAgentDbPath()); await storage.reload(); return storage;
+}
+
+/** email ?? orgName ?? accountId — the display identity for one credential.
+ * NEVER reads token/refresh/key material; api_key credentials (no such
+ * fields) always resolve to null here. */
+function identityOfCredential(credential) {
+  if (!credential || credential.type !== "oauth") return null;
+  return safeString(credential.email) ?? safeString(credential.orgName) ?? safeString(credential.accountId) ?? null;
+}
+function identityOfDisabledSummary(row) {
+  return safeString(row.email) ?? safeString(row.orgName) ?? safeString(row.accountId) ?? null;
+}
+
+/** Latest UNEXPIRED block across every scope for one credential id, or null. */
+function blockedUntilFor(credentialId, blocks) {
+  const now = Date.now();
+  let latest = null;
+  for (const block of blocks) {
+    if (block.credentialId !== credentialId) continue;
+    if (typeof block.blockedUntilMs !== "number" || block.blockedUntilMs <= now) continue;
+    if (latest === null || block.blockedUntilMs > latest) latest = block.blockedUntilMs;
+  }
+  return isoFromEpochMs(latest);
+}
+
+/** Every stored credential row, active and disabled, allow-listing exactly
+ * the fields Cody's UI needs — never the credential object itself, so a
+ * token/refresh/api key can never leak through a spread. */
+async function listCredentials(storage) {
+  const active = storage.listStoredCredentials();
+  const disabled = await storage.listDisabledCredentials();
+  const blocks = storage.listCredentialBlocks([...active.map((row) => row.id), ...disabled.map((row) => row.id)]);
+  const activeRows = active.map((row) => ({
+    id: row.id,
+    provider: row.provider,
+    type: row.credential.type,
+    identity: identityOfCredential(row.credential),
+    // AuthStorage's OAuth/api_key credential never carries a plan tier; the
+    // caller (lib/omp/provider-login.ts) fills this from the usage snapshot.
+    planType: null,
+    disabledCause: null,
+    blockedUntil: blockedUntilFor(row.id, blocks),
+  }));
+  const disabledRows = disabled.map((row) => ({
+    id: row.id,
+    provider: row.provider,
+    type: row.type,
+    identity: identityOfDisabledSummary(row),
+    planType: null,
+    disabledCause: safeString(row.cause) ?? "disabled",
+    blockedUntil: blockedUntilFor(row.id, blocks),
+  }));
+  return [...activeRows, ...disabledRows].sort((a, b) => a.id - b.id);
+}
+
+async function main() {
+  let request; try { request = asRecord(JSON.parse(process.argv[2] ?? "")); } catch { return fail("error", "invalid_request", "Malformed credential request."); }
+  const validOp = request && (request.operation === "list" || request.operation === "remove" || request.operation === "remove_provider");
+  if (!validOp || typeof request.packageRoot !== "string" || typeof request.agentDir !== "string") return fail("error", "invalid_request", "Malformed credential request.");
+  if (request.operation !== "list" && typeof request.provider !== "string") return fail(request.operation, "invalid_request", "A provider id is required.");
+  if (request.operation === "remove" && !(typeof request.credentialId === "number" && Number.isSafeInteger(request.credentialId))) return fail("remove", "invalid_request", "A credential id is required.");
+  let storage;
+  try { storage = await loadStorage(request.packageRoot, request.agentDir); } catch (error) { return fail(request.operation, "unsupported", error instanceof Error ? error.message : String(error)); }
+  try {
+    if (request.operation === "list") {
+      let credentials; try { credentials = await listCredentials(storage); } catch (error) { return fail("list", "credential_list_failed", error instanceof Error ? error.message : String(error)); }
+      return emit({ type: "list", ok: true, credentials });
+    }
+    if (request.operation === "remove") {
+      let removed; try { removed = await storage.removeCredential(request.provider, request.credentialId); } catch (error) { return fail("remove", "credential_remove_failed", error instanceof Error ? error.message : String(error)); }
+      // Recount rather than trust an in-memory tally: the authoritative
+      // "anything left" answer is another read of the same store the removal
+      // just went through.
+      const providerRemoved = removed ? storage.listStoredCredentials(request.provider).length === 0 : false;
+      return emit({ type: "remove", ok: true, removed, providerRemoved });
+    }
+    // remove_provider: storage.remove() itself returns void, so "removed"
+    // is answered from a before-check against the same active-row read
+    // `remove`'s providerRemoved uses.
+    let removed;
+    try {
+      removed = storage.listStoredCredentials(request.provider).length > 0;
+      await storage.remove(request.provider);
+    } catch (error) { return fail("remove_provider", "credential_remove_failed", error instanceof Error ? error.message : String(error)); }
+    return emit({ type: "remove_provider", ok: true, removed });
+  } finally { await storage.close?.(); }
+}
+main().catch((error) => fail("error", "unsupported", error instanceof Error ? error.message : String(error)));

@@ -8,10 +8,21 @@
  * progress, `cancel` withdraws an input request, and the `login` command
  * resolves once the credential is stored. The list comes from omp's own
  * `get_login_providers` (its /login list), so nothing here names a provider.
+ *
+ * omp's own store keeps every credential for a provider, not just one —
+ * `list()` enumerates them (lib/harness/omp-credentials.ts, a Bun bridge to
+ * omp's installed AuthStorage) and ranks each by the state omp itself would
+ * report were it routing that provider right now (lib/usage/select.ts).
+ * `logout` and `removeAccount` edit that same store directly; neither goes
+ * through a running rpc-ui child.
  */
 import { homedir } from "os";
-import type { ProviderLoginList, ProviderLoginSurface, ProviderLoginUi } from "../harness/types";
+import type { ProviderLoginAccount, ProviderLoginList, ProviderLoginSurface, ProviderLoginUi } from "../harness/types";
+import { listOmpCredentials, removeOmpCredential, removeOmpProvider, type OmpCredentialRemoval, type OmpCredentialRow, type OmpCredentialsSnapshot } from "../harness/omp-credentials";
 import { invalidateModelsCache } from "../models-cache";
+import { getUsageSnapshot } from "../usage/cache";
+import { rankProviderAccounts } from "../usage/select";
+import type { UsageAccount, UsageAccountService } from "../usage/types";
 import { enableProvider } from "./model-roles";
 import { RpcProcess, type RpcFrame } from "./rpc-process";
 import { disposeUtilityRpc, type OmpLoginProvider, runUtilityCommand } from "./rpc-utility";
@@ -35,6 +46,14 @@ export interface OmpProviderLoginDeps {
   listProviders?: () => Promise<OmpLoginProvider[]>;
   /** What a stored credential changes on Cody's side. */
   afterLogin?: (providerId: string) => void;
+  /** Every stored credential, active and disabled, across every provider. */
+  listCredentials?: () => Promise<OmpCredentialsSnapshot>;
+  /** Quota snapshot used to rank which stored credential is actually serving. */
+  listUsage?: () => Promise<{ accounts: UsageAccount[] }>;
+  /** Remove exactly one stored credential. */
+  removeCredential?: (provider: string, credentialId: number) => Promise<OmpCredentialRemoval>;
+  /** Remove every credential stored for a provider. */
+  removeProvider?: (provider: string) => Promise<OmpCredentialRemoval>;
 }
 
 const defaultDeps: Required<OmpProviderLoginDeps> = {
@@ -48,7 +67,43 @@ const defaultDeps: Required<OmpProviderLoginDeps> = {
     invalidateModelsCache();
     disposeUtilityRpc();
   },
+  listCredentials: () => listOmpCredentials(),
+  listUsage: () => getUsageSnapshot(),
+  removeCredential: (provider, credentialId) => removeOmpCredential(provider, credentialId),
+  removeProvider: (provider) => removeOmpProvider(provider),
 };
+
+/** Every credential stored for one provider, ranked by the state omp itself
+ * would report were it routing that provider right now. `position` is the
+ * index in omp's own id-ascending order (disabled credentials included), so
+ * removing one account never renumbers the ones left behind. */
+function buildProviderAccounts(
+  credentials: readonly OmpCredentialRow[],
+  usageAccounts: readonly UsageAccount[],
+  providerId: string,
+  providerName: string,
+): ProviderLoginAccount[] {
+  const rows = credentials.filter((row) => row.provider === providerId);
+  const ranks = rankProviderAccounts([...usageAccounts], providerId);
+  return rows.map((row, position) => {
+    const rank = row.identity !== null
+      ? ranks.find((entry) => entry.account.id === row.identity || entry.account.identity === row.identity)
+      : undefined;
+    // AuthStorage's own disabled/blocked state is authoritative — it is the
+    // source lib/usage's snapshot itself was built from — and only falls
+    // through to the ranked quota state when neither applies.
+    const state: UsageAccountService = row.disabledCause !== null ? "disabled" : row.blockedUntil !== null ? "limited" : (rank?.state ?? "standby");
+    return {
+      id: String(row.id),
+      label: row.identity ?? providerName,
+      position,
+      state,
+      planType: rank?.account.planType ?? null,
+      resetsAt: state === "limited" ? (row.blockedUntil ?? rank?.binding?.resetsAt ?? null) : null,
+      canRemove: true,
+    };
+  });
+}
 
 export function createOmpProviderLogins(overrides: OmpProviderLoginDeps = {}): ProviderLoginSurface {
   const deps = { ...defaultDeps, ...overrides };
@@ -56,18 +111,37 @@ export function createOmpProviderLogins(overrides: OmpProviderLoginDeps = {}): P
   async function list(): Promise<ProviderLoginList> {
     try {
       const providers = await deps.listProviders();
+      let credentials: OmpCredentialRow[] | null = null;
+      try {
+        const snapshot = await deps.listCredentials();
+        if (snapshot.available) credentials = snapshot.credentials;
+      } catch {
+        // accounts stays undefined below — the row renders exactly as it did
+        // before per-account listing existed.
+      }
+      let usageAccounts: UsageAccount[] = [];
+      if (credentials) {
+        try { usageAccounts = (await deps.listUsage()).accounts; } catch {
+          // Every stored credential still lists; without quota it just ranks
+          // as "standby" instead of naming which one is actually serving.
+        }
+      }
       return {
         providers: providers
           .filter((provider) => provider.available !== false)
-          .map((provider) => ({
-            id: provider.id,
-            name: provider.name,
-            authenticated: provider.authenticated,
-            kind: "oauth" as const,
-            // omp has no logout command outside its own TUI (/logout), and its
-            // credential store is not Cody's to edit.
-            canLogout: false,
-          })),
+          .map((provider) => {
+            const accounts = credentials ? buildProviderAccounts(credentials, usageAccounts, provider.id, provider.name) : undefined;
+            return {
+              id: provider.id,
+              name: provider.name,
+              authenticated: provider.authenticated,
+              kind: "oauth" as const,
+              // omp's AuthStorage is Cody's own to edit (lib/harness/omp-credentials.ts);
+              // logout only offers itself when there is a stored credential to remove.
+              canLogout: accounts !== undefined && accounts.length > 0,
+              ...(accounts ? { accounts, multiAccount: accounts.length > 1 } : {}),
+            };
+          }),
       };
     } catch (error) {
       return { providers: [], reason: error instanceof Error ? error.message : String(error) };
@@ -146,7 +220,22 @@ export function createOmpProviderLogins(overrides: OmpProviderLoginDeps = {}): P
     }
   }
 
-  return { list, login };
+  async function logout(providerId: string): Promise<void> {
+    const outcome = await deps.removeProvider(providerId);
+    if (outcome.code) throw new Error(outcome.message ?? `Cody could not disconnect "${providerId}".`);
+    disposeUtilityRpc();
+  }
+
+  async function removeAccount(providerId: string, accountId: string): Promise<{ removed: boolean; providerRemoved: boolean }> {
+    const credentialId = Number(accountId);
+    if (!Number.isSafeInteger(credentialId)) throw new Error(`"${accountId}" is not a valid account id.`);
+    const outcome = await deps.removeCredential(providerId, credentialId);
+    if (outcome.code) throw new Error(outcome.message ?? `Cody could not remove that ${providerId} account.`);
+    disposeUtilityRpc();
+    return { removed: outcome.removed, providerRemoved: outcome.providerRemoved };
+  }
+
+  return { list, login, logout, removeAccount };
 }
 
 export const ompProviderLogins: ProviderLoginSurface = createOmpProviderLogins();

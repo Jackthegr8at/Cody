@@ -200,12 +200,72 @@ test("buildQuotaView keys every window uniquely across accounts on one provider"
   assert.equal(view.known, true);
   assert.equal(view.windows.length, 2);
   assert.equal(new Set(view.windows.map((w) => w.key)).size, 2, "window keys must be unique");
-  // The labels disambiguate too — under the brand name the owner knows the
-  // subscription by, never the raw provider id.
+  // The labels disambiguate too — by position ("Primary"/"Secondary"), never
+  // by the raw identity or org name the account's own label carries.
   assert.deepEqual(view.windows.map((w) => w.label), [
-    "Claude (Work Org) · 5-hour window",
-    "Claude (personal@example.invalid) · 5-hour window",
+    "Claude · Secondary · 5-hour window",
+    "Claude · Primary · 5-hour window",
   ]);
+});
+
+test("the popover lists every sibling account serving the selected model's provider, by position only", () => {
+  const snapshot = usageSnapshot({
+    accounts: [
+      {
+        provider: "anthropic",
+        id: "acct-1",
+        identity: "nitinphilip@gmail.com",
+        label: "Anthropic (nitinphilip@gmail.com's Organization)",
+        planType: "max",
+        unlimited: false,
+        windows: [usageWindow({
+          id: "7d", label: "weekly", utilization: 100, state: "exhausted", resetsAt: "2026-09-15T00:00:00.000Z",
+        })],
+      },
+      {
+        provider: "anthropic",
+        id: "acct-2",
+        identity: "nathanrkx@gmail.com",
+        label: "Anthropic (nathanrkx@gmail.com's Organization)",
+        planType: "max",
+        unlimited: false,
+        windows: [usageWindow({
+          id: "7d", label: "weekly", utilization: 1, state: "ok", resetsAt: "2026-09-20T00:00:00.000Z",
+        })],
+      },
+      {
+        provider: "openai-codex",
+        id: "acct-3",
+        identity: null,
+        label: "Openai Codex",
+        planType: "plus",
+        unlimited: false,
+        windows: [usageWindow({ id: "7d", label: "weekly", utilization: 63, state: "warning" })],
+      },
+    ],
+  });
+  const model = { provider: "anthropic", modelId: "claude-fable-5-1" };
+  const view = buildQuotaView(snapshot, false, false, model);
+
+  assert.equal(view.known, true);
+  // omp already rotated onto the second (unexhausted) account; the ring
+  // gauges what is actually serving, never the exhausted sibling.
+  assert.equal(view.percent, 1);
+  assert.equal(view.state, "ok");
+
+  assert.equal(view.accounts.length, 2);
+  assert.deepEqual(view.accounts.map((a) => a.state), ["serving", "limited"]);
+  assert.deepEqual(view.accounts.map((a) => a.percent), [1, 100]);
+  const limited = view.accounts.find((a) => a.state === "limited");
+  assert.equal(limited.resetsAt, "2026-09-15T00:00:00.000Z");
+  // Position in ORIGINAL snapshot order, never rank order — and never the
+  // raw identity/org name either account actually carries.
+  assert.deepEqual(view.accounts.map((a) => a.label), ["Secondary", "Primary"]);
+  assert.ok(view.accounts.every((a) => !a.label.includes("@") && !a.label.includes("Organization")));
+
+  // Both anthropic siblings are already covered above; "Other limits" keeps
+  // only the other provider's window, never a duplicate of either of these.
+  assert.deepEqual(view.others.map((entry) => entry.provider), ["openai-codex"]);
 });
 
 test("buildQuotaView paints an exhausted low-percentage window as exhausted", () => {

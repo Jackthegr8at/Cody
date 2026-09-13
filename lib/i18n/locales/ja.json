@@ -1860,5 +1860,14 @@
   "directChat.noSkills": "インストール済みのプロンプトスキルはありません。",
   "directChat.pluginsExcluded": "Direct API チャットではプラグインツールとフックは実行されません。",
   "directChat.refreshPromptCommands": "拡張機能でインストール済みのプロンプトコマンドを更新",
-  "directChat.compactFailed": "この Direct 会話を圧縮できませんでした。"
+  "directChat.compactFailed": "この Direct 会話を圧縮できませんでした。",
+  "usage.accountsHeading": "アカウント · {count}",
+  "usage.accountServing": "使用中",
+  "usage.accountStandby": "待機中",
+  "usage.accountLimited": "上限到達 · {time} にリセット",
+  "usage.accountDisabled": "無効",
+  "usage.accountsNote": "1つのアカウントが上限に達すると、エンジンは自動的に別のアカウントに切り替えます。",
+  "usage.accountPrimary": "メイン",
+  "usage.accountSecondary": "サブ",
+  "usage.accountNth": "アカウント {n}"
 }

@@ -1,6 +1,6 @@
 import { execFile } from "child_process";
 import { resolveOmpBin } from "../omp/omp-cli";
-import type { UsageAccount, UsageSnapshot, UsageWindow, UsageWindowState } from "./types";
+import type { UsageAccount, UsageProviderCapacity, UsageSnapshot, UsageWindow, UsageWindowState } from "./types";
 
 /**
  * Reading plan quota out of the omp engine.
@@ -105,11 +105,28 @@ export function parseOmpUsagePayload(payload: unknown): UsageSnapshot {
   if (!reports) return unavailableUsageSnapshot("omp usage reported no accounts");
 
   const records = reports.filter(isRecord);
+  const disabledRecords = (Array.isArray(payload.disabledCredentials) ? payload.disabledCredentials : []).filter(
+    isRecord,
+  );
+
+  // Disambiguation (a per-provider label discriminator) has to see every
+  // account that will occupy the provider's rows, disabled ones included —
+  // otherwise a lone reporting account paired with one disabled tombstone
+  // would both render as a bare "Anthropic" with nothing telling them apart.
   const providerCounts = new Map<string, number>();
-  for (const report of records) {
-    const provider = readString(report.provider);
+  for (const entry of [...records, ...disabledRecords]) {
+    const provider = readString(entry.provider);
     if (provider) providerCounts.set(provider, (providerCounts.get(provider) ?? 0) + 1);
   }
+
+  const usedIdsByProvider = new Map<string, Set<string>>();
+  const usedIdsFor = (provider: string): Set<string> => {
+    const existing = usedIdsByProvider.get(provider);
+    if (existing) return existing;
+    const created = new Set<string>();
+    usedIdsByProvider.set(provider, created);
+    return created;
+  };
 
   const accounts: UsageAccount[] = [];
   let latestFetchedAt: number | undefined;
@@ -121,18 +138,43 @@ export function parseOmpUsagePayload(payload: unknown): UsageSnapshot {
     if (fetchedAt !== undefined && (latestFetchedAt === undefined || fetchedAt > latestFetchedAt)) {
       latestFetchedAt = fetchedAt;
     }
-    const account = buildAccount(report, provider, index, (providerCounts.get(provider) ?? 0) > 1);
+    const account = buildAccount(
+      report,
+      provider,
+      index,
+      (providerCounts.get(provider) ?? 0) > 1,
+      usedIdsFor(provider),
+    );
+    if (account) accounts.push(account);
+  }
+
+  // Appended after every reporting account: a disabled credential still holds
+  // a provider slot omp will not route to, so it must stay visible (with no
+  // live windows) rather than silently vanish once auth-storage tombstones it.
+  for (let index = 0; index < disabledRecords.length; index += 1) {
+    const summary = disabledRecords[index]!;
+    const provider = readString(summary.provider);
+    if (!provider) continue;
+    const account = buildDisabledAccount(
+      summary,
+      provider,
+      index,
+      (providerCounts.get(provider) ?? 0) > 1,
+      usedIdsFor(provider),
+    );
     if (account) accounts.push(account);
   }
 
   if (accounts.length === 0) return unavailableUsageSnapshot("omp usage reported no quota windows");
 
   const generatedAt = readNumber(payload.generatedAt) ?? latestFetchedAt;
+  const capacity = buildCapacity(payload.capacity);
   return {
     available: true,
     accounts,
     fetchedAt: toIsoString(generatedAt) ?? new Date().toISOString(),
     stale: false,
+    ...(capacity ? { capacity } : {}),
   };
 }
 
@@ -141,6 +183,7 @@ function buildAccount(
   provider: string,
   index: number,
   disambiguate: boolean,
+  usedIds: Set<string>,
 ): UsageAccount | null {
   const metadata = isRecord(report.metadata) ? report.metadata : {};
   const limits = Array.isArray(report.limits) ? report.limits.filter(isRecord) : [];
@@ -160,12 +203,89 @@ function buildAccount(
 
   return {
     provider,
+    id: resolveAccountId(metadata, provider, index, usedIds),
+    identity: readString(metadata.email) ?? readString(metadata.orgName) ?? null,
+    // Active reports carry no credential row id; the cache enriches it from
+    // the credential store (lib/usage/credential-order.ts).
+    credentialId: null,
     label: buildAccountLabel(provider, metadata, index, disambiguate),
     planType: readString(metadata.planType) ?? null,
     unlimited,
     windows,
     ...(resetCredits ? { resetCredits } : {}),
   };
+}
+
+/**
+ * A disabled credential still occupies a provider slot omp will not route to
+ * — surfacing it (with no live windows, `disabled.cause` explaining why) is
+ * what lets Settings show and remove it instead of it silently vanishing the
+ * moment auth-storage tombstones the row.
+ */
+function buildDisabledAccount(
+  summary: Record<string, unknown>,
+  provider: string,
+  index: number,
+  disambiguate: boolean,
+  usedIds: Set<string>,
+): UsageAccount {
+  return {
+    provider,
+    id: resolveAccountId(summary, provider, index, usedIds),
+    identity: readString(summary.email) ?? readString(summary.orgName) ?? null,
+    // A disabled tombstone DOES name its row, so ordering works even when the
+    // credential store cannot be read.
+    credentialId: readNumber(summary.id) ?? null,
+    label: buildAccountLabel(provider, summary, index, disambiguate),
+    planType: null,
+    unlimited: false,
+    windows: [],
+    disabled: { cause: readString(summary.cause) ?? null },
+  };
+}
+
+/**
+ * Stable per-account identity: the engine's own account id, else the
+ * account's email, else a positional `${provider}#${index}` fallback. Only
+ * suffixed with `#${index}` when that candidate already names an earlier
+ * account of the same provider — two real accounts sharing no reported
+ * identity at all is the one case a bare index cannot already disambiguate.
+ */
+function resolveAccountId(
+  fields: Record<string, unknown>,
+  provider: string,
+  index: number,
+  usedIds: Set<string>,
+): string {
+  const base = readString(fields.accountId) ?? readString(fields.email) ?? `${provider}#${index}`;
+  const id = usedIds.has(base) ? `${base}#${index}` : base;
+  usedIds.add(id);
+  return id;
+}
+
+/**
+ * Parse `{ [provider]: ProviderWindowStat[] }` (omp's `computeProviderWindowStats`
+ * output, keyed by provider) into `UsageSnapshot.capacity`. A stat missing its
+ * window id or account counts is dropped rather than defaulted — capacity for
+ * nothing is not a reading.
+ */
+function buildCapacity(value: unknown): Record<string, UsageProviderCapacity[]> | undefined {
+  if (!isRecord(value)) return undefined;
+  const capacity: Record<string, UsageProviderCapacity[]> = {};
+  for (const [provider, rawStats] of Object.entries(value)) {
+    if (!Array.isArray(rawStats)) continue;
+    const stats: UsageProviderCapacity[] = [];
+    for (const rawStat of rawStats) {
+      if (!isRecord(rawStat)) continue;
+      const windowId = readString(rawStat.window);
+      const accountsCount = readNumber(rawStat.accounts);
+      const remainingAccounts = readNumber(rawStat.remainingAccounts);
+      if (windowId === undefined || accountsCount === undefined || remainingAccounts === undefined) continue;
+      stats.push({ windowId, meter: readString(rawStat.meter) ?? null, accounts: accountsCount, remainingAccounts });
+    }
+    if (stats.length > 0) capacity[provider] = stats;
+  }
+  return Object.keys(capacity).length > 0 ? capacity : undefined;
 }
 /**
  * OMP's resetCredits is a bank of saved rate-limit resets, not a plan limit or

@@ -1,4 +1,4 @@
-import type { UsageAccount, UsageWindow } from "./types";
+import type { UsageAccount, UsageAccountService, UsageWindow } from "./types";
 
 /**
  * Picking the binding constraint.
@@ -31,14 +31,109 @@ export interface ModelRef {
   modelId: string;
 }
 
+/** One ranked account for a provider, alongside the windows that actually
+ * constrain the given model and the single window binding it, if any. */
+export interface ProviderAccountRank {
+  account: UsageAccount;
+  /** This account's windows that constrain the given model, most binding first. */
+  windows: UsageWindow[];
+  state: UsageAccountService;
+  /** windows[0], or null when the account has nothing applicable. */
+  binding: UsageWindow | null;
+}
+
 /**
- * The windows that actually constrain one model, most binding first.
+ * Ranking every account serving one provider by the state omp itself would
+ * assign it right now: whichever account is actually taking this provider's
+ * traffic ("serving"), any healthy siblings held in reserve ("standby"), any
+ * account whose binding window is spent ("limited"), and any credential the
+ * engine disabled outright ("disabled") — always last, regardless of usage.
+ *
+ * Gauging the tightest account across a provider's siblings is the wrong
+ * read: omp rotates the same model onto another credential the moment one is
+ * rate-limited, so a gauge built on the exhausted sibling is reporting quota
+ * nothing is being charged against anymore. This ranks by the account omp
+ * would actually route to next, mirroring its own credential-ranking order.
+ *
+ * Precedence, most to least preferred: a **measured** account (a real window
+ * applies to this model) ordered by ascending binding utilization, then an
+ * **unmeasured** one (nothing applies — not limited, but not evidence of
+ * anything either, so it never outranks a sibling with real telemetry), then
+ * **limited** (earliest reset first), then **disabled**.
+ *
+ * `modelId` scopes which windows count as each account's binding window, same
+ * as `selectWindowsForModel` below; omit it (or pass `""`) to rank by
+ * provider-level (untiered) windows only.
+ */
+export function rankProviderAccounts(
+  accounts: UsageAccount[],
+  provider: string,
+  modelId?: string,
+): ProviderAccountRank[] {
+  const normalizedProvider = normalize(provider);
+  if (!normalizedProvider) return [];
+  const scopeModelId = typeof modelId === "string" ? modelId : "";
+
+  const entries = (accounts ?? [])
+    .filter(
+      (account): account is UsageAccount => Boolean(account) && normalize(account.provider) === normalizedProvider,
+    )
+    .map((account, index) => {
+      const windows = (account.windows ?? [])
+        .filter((window): window is UsageWindow => Boolean(window) && windowConstrainsModel(window, scopeModelId))
+        .sort(compareBinding);
+      return { account, windows, binding: windows[0] ?? null, index };
+    });
+
+  // Disabled always sorts last, whatever it reports; a live rank never has
+  // windows to weigh it against anyway (omp-usage.ts gives it windows: []).
+  const disabled = entries.filter((entry) => Boolean(entry.account.disabled));
+  const live = entries.filter((entry) => !entry.account.disabled);
+  const limited = live.filter((entry) => entry.binding?.state === "exhausted");
+  const measured = live.filter((entry) => entry.binding !== null && entry.binding.state !== "exhausted");
+  // An account with nothing applicable to this model is not limited — no
+  // reported window means no reported constraint — but it is also not
+  // evidence of anything, so real telemetry on a sibling always outranks a
+  // guess: it sorts after every measured account, ahead only of accounts omp
+  // has actually cut off.
+  const unmeasured = live.filter((entry) => entry.binding === null);
+
+  measured.sort((a, b) => {
+    const utilA = toUtilization(a.binding!.utilization);
+    const utilB = toUtilization(b.binding!.utilization);
+    return utilA !== utilB ? utilA - utilB : a.index - b.index;
+  });
+  unmeasured.sort((a, b) => a.index - b.index);
+  limited.sort((a, b) => {
+    const resetA = toResetTime(a.binding?.resetsAt ?? null);
+    const resetB = toResetTime(b.binding?.resetsAt ?? null);
+    return resetA !== resetB ? resetA - resetB : a.index - b.index;
+  });
+
+  const ranked: ProviderAccountRank[] = [];
+  for (const { account, windows, binding } of [...measured, ...unmeasured]) {
+    ranked.push({ account, windows, binding, state: ranked.length === 0 ? "serving" : "standby" });
+  }
+  for (const { account, windows, binding } of limited) ranked.push({ account, windows, binding, state: "limited" });
+  for (const { account, windows, binding } of disabled) ranked.push({ account, windows, binding, state: "disabled" });
+  return ranked;
+}
+
+/**
+ * The windows that actually constrain one model, most binding first, read off
+ * the account omp is actually serving this model from right now.
  *
  * Quota is per provider, so a model is only ever limited by the account that
- * serves it: a spent quota on another provider says nothing about whether this
- * model can run. No account for the provider means no answer at all (null) —
- * the caller must say "no quota reported" rather than borrow another
+ * serves it: a spent quota on another provider says nothing about whether
+ * this model can run. No account for the provider means no answer at all
+ * (null) — the caller must say "no quota reported" rather than borrow another
  * provider's numbers.
+ *
+ * A provider can have more than one account; the exhausted-but-idle sibling
+ * is not the honest gauge, because omp already rotated the model onto
+ * whichever account `rankProviderAccounts` ranks first ("serving"). This
+ * returns that account's windows, keeping every window-picking caller in
+ * sync with the engine instead of naming whichever sibling is tightest.
  *
  * Returns a matched account with an empty `windows` list when the provider
  * reports quota but none of it applies to this model.
@@ -50,21 +145,8 @@ export function selectWindowsForModel(
   const provider = normalize(model?.provider);
   if (!provider) return null;
   const modelId = typeof model?.modelId === "string" ? model.modelId : "";
-
-  let best: { account: UsageAccount; windows: UsageWindow[] } | null = null;
-  for (const account of accounts ?? []) {
-    if (!account || normalize(account.provider) !== provider) continue;
-    const windows = (account.windows ?? [])
-      .filter((window): window is UsageWindow => Boolean(window) && windowConstrainsModel(window, modelId))
-      .sort(compareBinding);
-    // Two subscriptions can serve one provider, and only one of them is paying
-    // for this turn; the tighter one is the honest thing to show. Ranking on
-    // the windows that survive filtering (not on every window the account
-    // reports) keeps an account whose binding window belongs to another tier
-    // from shadowing a sibling that really does constrain this model.
-    if (best === null || isMoreBindingAccount(windows, best.windows)) best = { account, windows };
-  }
-  return best;
+  const top = rankProviderAccounts(accounts, provider, modelId)[0];
+  return top ? { account: top.account, windows: top.windows } : null;
 }
 
 /** The one window that will stop this model next, or null when none applies. */
@@ -107,16 +189,6 @@ export function modelMatchesTier(modelId: string, tier: string): boolean {
 function windowConstrainsModel(window: UsageWindow, modelId: string): boolean {
   const tier = typeof window.tier === "string" ? window.tier.trim() : "";
   return !tier || modelMatchesTier(modelId, tier);
-}
-
-/** Accounts rank by their own binding window; one that constrains this model
- * at all outranks one that reports nothing applicable. */
-function isMoreBindingAccount(candidate: UsageWindow[], incumbent: UsageWindow[]): boolean {
-  const candidateBinding = candidate[0];
-  const incumbentBinding = incumbent[0];
-  if (!candidateBinding) return false;
-  if (!incumbentBinding) return true;
-  return isMoreBinding(candidateBinding, incumbentBinding);
 }
 
 function isMoreBinding(candidate: UsageWindow, incumbent: UsageWindow): boolean {

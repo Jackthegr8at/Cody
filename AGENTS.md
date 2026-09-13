@@ -262,6 +262,9 @@ lib/
     codex-login.ts     `codex login --device-auth` / `login status` / `logout`
     hermes-login.ts    `hermes auth add <provider> --type oauth` / `auth list`
                        / `auth logout`
+    omp-credentials.ts omp's stored credentials, read and removed through
+                       bin/cody-omp-credentials.mjs (never agent.db directly);
+                       feeds the per-account rows in lib/omp/provider-login.ts
     pi-login.ts        pi's pi-ai OAuth flows, run in bin/cody-pi-login.mjs (a
                        child that imports the INSTALLED pi package) and bridged
                        over JSON lines
@@ -501,6 +504,9 @@ bin/
                            package's AuthStorage/OAuth flows and speaks JSON
                            lines to lib/harness/pi-login.ts (list / login /
                            logout), so pi's own auth.json holds the credential
+  cody-omp-credentials.mjs omp's credential list/remove helper: runs omp's own
+                           AuthStorage under Bun (list / remove / removeProvider),
+                           emits identities and block state only, never a token
   cody-session-tail.js     read-only live view of a chat session for the FIRST
                            web terminal of a workspace (spawned by
                            lib/terminal-manager.ts); renders + follows the
@@ -801,6 +807,37 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   never pass through Cody: a driver relays a URL out and a code in and reads
   the engine's answer. `/api/auth/all-providers` stays omp-only (it reads
   omp's model catalog to list configured API-key providers).
+- **Several accounts can serve one provider, and Cody never invents a
+  priority for them** (omp only today). omp's `agent.db` may hold more than
+  one OAuth credential per provider (two Claude subscriptions, say) and omp
+  itself rotates the SAME model to a sibling credential on a usage limit
+  before any model fallback — it has no primary/secondary setting, its
+  ordering is emergent (usage-ranked, id-order ties). So Cody MIRRORS that
+  ranking rather than adding a control: `lib/usage/select.ts`
+  `rankProviderAccounts` (disabled last; binding window exhausted →
+  `limited`; the rest by binding-window utilization ascending, measured
+  accounts strictly ahead of unmeasured ones; first = `serving`, rest =
+  `standby`), and `selectWindowsForModel` returns the SERVING account's
+  windows, which is what fixed the composer ring painting the exhausted
+  sibling's 100% instead of the account actually answering. Accounts are
+  named by POSITION everywhere in the composer (`usage.accountPrimary` /
+  `usage.accountSecondary` / `usage.accountNth`, computed in the snapshot's
+  original order, never the rank order) — no emails or org names in the
+  quota popup; Settings shows the identity as muted secondary text.
+  Credential ROWS come from the store, not the usage snapshot:
+  `bin/cody-omp-credentials.mjs` runs omp's own `AuthStorage` under Bun
+  (`list` / `remove` / `removeProvider`, the reset-credits pattern) and
+  never emits tokens or keys; `lib/harness/omp-credentials.ts` bridges it,
+  `lib/omp/provider-login.ts` joins rows to usage state as
+  `ProviderLoginOption.accounts` (`ProviderLoginAccount {id, position,
+  label, state, planType, resetsAt, canRemove}`) and implements
+  `removeAccount`/`logout`. `POST /api/auth/logout/[provider]` with a JSON
+  body `{accountId}` removes ONE credential (404 `not_found` if gone, 400
+  `unsupported` on an engine without `removeAccount`); no body is the
+  provider-wide logout it always was. `accounts` is `undefined` (never
+  `[]`) when the read fails, and the sign-in row then behaves exactly as
+  before. No restart of live children is needed: omp reads credentials from
+  `AuthStorage` per turn, unlike `config.yml`.
 - **The composer reads whichever catalog is real.** `useAgentSession` keeps
   `modelCatalogSource` from `/api/models` and, when it says `"session"`,
   serves the composer the list it adopted off `get_state` instead (measured:

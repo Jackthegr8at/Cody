@@ -1860,5 +1860,14 @@
   "directChat.noSkills": "未找到已安装的提示技能。",
   "directChat.pluginsExcluded": "Direct API 聊天绝不会运行插件工具或钩子。",
   "directChat.refreshPromptCommands": "在扩展中刷新已安装的提示命令",
-  "directChat.compactFailed": "无法压缩此 Direct 对话。"
+  "directChat.compactFailed": "无法压缩此 Direct 对话。",
+  "usage.accountsHeading": "账户 · {count}",
+  "usage.accountServing": "使用中",
+  "usage.accountStandby": "待机",
+  "usage.accountLimited": "已达上限 · {time} 重置",
+  "usage.accountDisabled": "已禁用",
+  "usage.accountsNote": "当一个账户达到上限时，引擎会自动切换到另一个账户。",
+  "usage.accountPrimary": "主账户",
+  "usage.accountSecondary": "副账户",
+  "usage.accountNth": "账户 {n}"
 }

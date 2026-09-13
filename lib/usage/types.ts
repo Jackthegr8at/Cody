@@ -46,10 +46,28 @@ export interface UsageResetCredits {
   earliestExpiresAt: string | null;
 }
 
+/** Which account, among every account serving one provider, omp is actually
+ * routing a model's requests to right now. */
+export type UsageAccountService = "serving" | "standby" | "limited" | "disabled";
+
 /** One authenticated account, with every quota window it reports. */
 export interface UsageAccount {
   /** Engine-side provider id, e.g. "anthropic" or "openai-codex". */
   provider: string;
+  /** Stable identity within the provider: engine account id, else email, else
+   * a positional `${provider}#${index}` fallback. Stable across reads so a
+   * removal or a re-rank never relabels an account the user was looking at. */
+  id: string;
+  /** Human-facing identity — email, else org/workspace name — or null when
+   * the engine reports neither. Distinct from `label`, which is display copy
+   * built for the composer, not a stable identity. */
+  identity: string | null;
+  /** omp's credential row id, when it can be resolved. It is creation order
+   * and it is what Settings numbers accounts by, so ordering on it is what
+   * keeps "Primary"/"Secondary" naming the SAME account in the composer and
+   * in Settings. Null when the engine reported no row for this account —
+   * such accounts sort last, after every identified one. */
+  credentialId: number | null;
   /** Short human-facing name, e.g. "Anthropic" or "Openai Codex (work)". */
   label: string;
   /** Subscription tier when the provider reports one, else null. */
@@ -59,6 +77,24 @@ export interface UsageAccount {
   windows: UsageWindow[];
   /** Saved rate-limit resets, when the provider explicitly reports them. */
   resetCredits?: UsageResetCredits;
+  /** Present when omp has disabled this credential outright (auth failure,
+   * replaced, deleted); such an account reports no live windows. */
+  disabled?: { cause: string | null };
+}
+
+/** Per-window quota capacity for one provider, aggregated across every
+ * account serving it (see omp's `computeProviderWindowStats`). */
+export interface UsageProviderCapacity {
+  /** Compact window label, e.g. "5h", "7d". */
+  windowId: string;
+  /** Meter identity when a provider keeps independent meters in one window,
+   * e.g. Codex's chat vs. Spark tiers. Null when the window has one meter. */
+  meter: string | null;
+  /** Accounts reporting a limit in this window. */
+  accounts: number;
+  /** Sum of each account's headroom in this window — accounts' worth of
+   * quota left, not a percentage. */
+  remainingAccounts: number;
 }
 
 /** A point-in-time view of every quota-reporting account. */
@@ -71,4 +107,7 @@ export interface UsageSnapshot {
   /** True when served past its TTL while a refresh runs behind it. */
   stale: boolean;
   reason?: string;
+  /** Per-window capacity for every provider that reported one, keyed by
+   * provider id. Absent (rather than empty) when omp reported none at all. */
+  capacity?: Record<string, UsageProviderCapacity[]>;
 }

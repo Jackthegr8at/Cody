@@ -840,8 +840,11 @@ the credential is shared by every user's sessions.
 
 - `GET /api/auth/providers` → `{"engine":{"id","shortName"},
   "providers":[{"id","name","authenticated","kind":"oauth"|"device",
-  "canLogout","hint"?}],"reason"?}`. `reason` explains an empty roster (the
-  engine is not installed).
+  "canLogout","hint"?,"accounts"?,"multiAccount"?}],"reason"?}`. `reason`
+  explains an empty roster (the engine is not installed). `accounts` (an
+  engine that can enumerate its own stored credentials, e.g. omp) is
+  `[{"id","label","position","state":"serving"|"standby"|"limited"|"disabled","planType","resetsAt","canRemove"}]`;
+  absent, not empty, means the engine cannot enumerate per-account state.
 - `GET /api/auth/login/{provider}` is an SSE stream of the flow: `auth
   {url, instructions, token}` (open the URL), `device_code {userCode,
   verificationUri, expiresInSeconds}` (type the code there), `prompt_request
@@ -850,7 +853,11 @@ the credential is shared by every user's sessions.
   `POST /api/auth/login/{provider}` with `{"token","code"}` hands the pasted
   value back; a value posted before the engine asks is held for it.
 - `POST /api/auth/logout/{provider}` → `{"ok":true}`; `400 unsupported` for
-  an engine whose only logout is interactive (omp).
+  an engine whose only logout is interactive. With a JSON body
+  `{"accountId"}` it removes just that one stored credential instead of
+  every credential for the provider → `{"ok":true,"provider","accountId",
+  "providerRemoved"}`; `404 not_found` when that id no longer exists, `400
+  unsupported` for an engine with no per-account removal (only omp has one).
 
 ## `GET|PUT /api/provider-keys` — Incidental
 

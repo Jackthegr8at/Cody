@@ -9,6 +9,7 @@
  * cannot serve, and `createSession` supplies live chat for engines that speak
  * something other than omp's rpc-ui protocol.
  */
+import type { UsageAccountService } from "../usage/types";
 
 export interface HarnessCapabilities {
   /** Live chat via a child process (send prompts, stream events). */
@@ -261,6 +262,37 @@ export interface ProviderLoginOption {
   canLogout: boolean;
   /** One line of context for the row ("Claude Pro/Max subscription"). */
   hint?: string;
+  /**
+   * Every credential stored for this provider, when the engine can enumerate
+   * them (omp's AuthStorage; absent for engines with no multi-account
+   * concept). Absent, NOT empty, means "unknown" — the row then renders
+   * exactly as it did before per-account listing existed.
+   */
+  accounts?: ProviderLoginAccount[];
+  /** True when `accounts` has more than one entry — the row should offer
+   * "add another account" alongside each account's own remove control. */
+  multiAccount?: boolean;
+}
+
+/** One stored credential for a provider, enough for Settings to show its
+ * state and offer removal without ever touching the credential itself. */
+export interface ProviderLoginAccount {
+  /** Opaque, stable: omp uses `String(credential row id)`. */
+  id: string;
+  /** Identity for display — email or org, whichever the credential carries;
+   * a neutral fallback when the engine reports neither. */
+  label: string;
+  /** 0-based index among this provider's credentials, ordered by the
+   * engine's own stable ordering (omp: credential row id ascending,
+   * disabled credentials included so a removal never renumbers the rest).
+   * The composer's compact views label position 0 "Primary", 1 "Secondary";
+   * Settings shows `label` instead. */
+  position: number;
+  state: UsageAccountService;
+  planType: string | null;
+  /** When `state === "limited"`: the block or window reset time. */
+  resetsAt: string | null;
+  canRemove: boolean;
 }
 
 /**
@@ -298,6 +330,13 @@ export interface ProviderLoginSurface {
   login(providerId: string, ui: ProviderLoginUi): Promise<void>;
   /** Absent when the engine has no non-interactive logout; the row then offers none. */
   logout?(providerId: string): Promise<void>;
+  /**
+   * Removes exactly one stored credential (an `accounts[].id` from `list()`).
+   * Absent when the engine cannot enumerate/remove individual accounts.
+   * `providerRemoved` is true when that was the account, so the caller knows
+   * the provider itself just went back to signed-out.
+   */
+  removeAccount?(providerId: string, accountId: string): Promise<{ removed: boolean; providerRemoved: boolean }>;
 }
 
 /**

@@ -42,11 +42,11 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useResetCredits, useUsage } from "@/hooks/useUsage";
 import { useOpenRouterAccount, type UseOpenRouterAccountResult } from "@/hooks/useOpenRouterAccount";
 import { OpenRouterCredits } from "./OpenRouterCredits";
-import { selectBindingWindow, selectWindowsForModel, type ModelRef } from "@/lib/usage/select";
-import type { UsageAccount, UsageSnapshot, UsageWindow, UsageWindowState } from "@/lib/usage/types";
+import { rankProviderAccounts, selectBindingWindow, selectWindowsForModel, type ModelRef } from "@/lib/usage/select";
+import type { UsageAccount, UsageAccountService, UsageSnapshot, UsageWindow, UsageWindowState } from "@/lib/usage/types";
 import { brandAccountLabel } from "@/lib/provider-brand";
 import { ModelIcon, ProviderIcon } from "./ProviderIcon";
-import { useI18n } from "@/lib/i18n";
+import { translate, useI18n } from "@/lib/i18n";
 import { selectableThinkingLevels } from "@/lib/thinking-levels";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { STORAGE_EVENTS } from "@/lib/storage-keys";
@@ -265,6 +265,21 @@ export interface QuotaOtherWindowView {
   resetsAt: string | null;
 }
 
+/** One account among several serving the same provider as the selected
+ *  model. omp routes to exactly one at a time (`serving`); every other
+ *  reports `standby`, `limited`, or `disabled`. Rendered only when more than
+ *  one account can serve the model — a single-account provider never grows
+ *  this list. `label` is a position ("Primary", "Secondary", …), never the
+ *  account's raw identity, which can be an email address or an org name. */
+export interface QuotaAccountRowView {
+  key: string;
+  label: string;
+  state: UsageAccountService;
+  percent: number;
+  resetsAt: string | null;
+  planType: string | null;
+}
+
 export interface QuotaKnownView {
   known: true;
   /** Engine provider id of the binding account, for the header's brand mark. */
@@ -279,6 +294,9 @@ export interface QuotaKnownView {
   inUse: QuotaInUseWindowView[];
   /** Everything the section above does not cover, de-emphasised. */
   others: QuotaOtherWindowView[];
+  /** Every account serving the selected model's provider, serving-first.
+   *  Empty unless more than one account can serve it. */
+  accounts: QuotaAccountRowView[];
   fetchedAt: string | null;
   stale: boolean;
   /** Subscription name only when the engine reported one. */
@@ -420,6 +438,42 @@ function accountWindowKey(accountIndex: number, account: UsageAccount, window: P
   return accountIndex + ":" + account.provider + ":" + window.id;
 }
 
+/** "Primary" / "Secondary" / "Account {n}" — never the raw identity, which
+ *  can be an email address or an organization name the composer must not
+ *  print. */
+function accountPositionLabel(position: number): string {
+  if (position === 0) return translate("usage.accountPrimary");
+  if (position === 1) return translate("usage.accountSecondary");
+  return translate("usage.accountNth", { n: position + 1 });
+}
+
+/** Brand name, plus a position discriminator when this account's provider
+ *  has more than one — e.g. "Claude · Secondary". Built from the provider id
+ *  and ORIGINAL snapshot position only, so it never touches `label`/`identity`. */
+function brandedAccountLabel(accounts: UsageAccount[], account: UsageAccount): string {
+  const brand = brandAccountLabel(account.provider, account.provider);
+  const siblings = accounts.filter((candidate) => candidate.provider === account.provider);
+  return siblings.length > 1 ? `${brand} · ${accountPositionLabel(siblings.indexOf(account))}` : brand;
+}
+
+/** Tone for each per-account state chip — accent for the one actually
+ *  serving, muted for a healthy standby, the shared error tone for anything
+ *  blocked (limited or disabled alike). */
+const ACCOUNT_STATE_COLOR: Record<UsageAccountService, string> = {
+  serving: "var(--accent)",
+  standby: "var(--text-muted)",
+  limited: "var(--status-error)",
+  disabled: "var(--status-error)",
+};
+
+/** i18n key for each per-account state chip's label. */
+const ACCOUNT_STATE_LABEL_KEYS: Record<UsageAccountService, string> = {
+  serving: "usage.accountServing",
+  standby: "usage.accountStandby",
+  limited: "usage.accountLimited",
+  disabled: "usage.accountDisabled",
+};
+
 function isSelectedModel(active: SessionActiveModel, selected: ModelRef): boolean {
   return active.provider.trim().toLocaleLowerCase() === selected.provider.trim().toLocaleLowerCase()
     && active.modelId.trim() === selected.modelId.trim();
@@ -497,6 +551,7 @@ function buildOtherWindows(
   accounts: UsageAccount[],
   primary: { account: UsageAccount; windows: UsageWindow[] } | null,
   inUseKeys: ReadonlySet<string>,
+  excludeProvider: string | null = null,
 ): QuotaOtherWindowView[] {
   const primaryAccountIndex = primary ? accounts.indexOf(primary.account) : -1;
   const primaryKeys = new Set(
@@ -507,6 +562,7 @@ function buildOtherWindows(
   const rows: QuotaOtherWindowView[] = [];
   accounts.forEach((account, index) => {
     if (!account) return;
+    if (excludeProvider !== null && account.provider === excludeProvider) return;
     const leftover = (account.windows ?? []).filter((window): window is UsageWindow => (
       Boolean(window)
       && !primaryKeys.has(accountWindowKey(index, account, window))
@@ -519,7 +575,7 @@ function buildOtherWindows(
     rows.push({
       key: accountWindowKey(index, account, binding.window),
       provider: account.provider,
-      account: brandAccountLabel(account.provider, account.label || account.provider),
+      account: brandedAccountLabel(accounts, account),
       label: binding.window.label,
       percent: clampQuotaPercent(binding.window.utilization),
       state: binding.window.state,
@@ -584,7 +640,7 @@ export function buildQuotaView(
   const multipleAccounts = accounts.length > 1;
   const nameWindow = (account: UsageAccount, windowLabel: string) => {
     if (!multipleAccounts) return windowLabel;
-    const accountLabel = brandAccountLabel(account.provider, account.label || account.provider);
+    const accountLabel = brandedAccountLabel(accounts, account);
     return accountLabel ? `${accountLabel} · ${windowLabel}` : windowLabel;
   };
 
@@ -595,7 +651,25 @@ export function buildQuotaView(
     // and the list below it name the same window.
     const modelBinding = match?.windows[0] ?? null;
     const inUse = buildInUseWindows(accounts, match, activeModels, model, nameWindow);
-    const others = buildOtherWindows(accounts, match, new Set(inUse.map((entry) => entry.key)));
+    // Only worth ranking when more than one account can actually serve this
+    // model — a single-account provider has nothing to disambiguate.
+    const providerAccounts = accounts.filter((account) => account.provider === model.provider);
+    const accountRows: QuotaAccountRowView[] = providerAccounts.length > 1
+      ? rankProviderAccounts(accounts, model.provider, model.modelId).map((rank) => ({
+          key: rank.account.id,
+          label: accountPositionLabel(providerAccounts.indexOf(rank.account)),
+          state: rank.state,
+          percent: clampQuotaPercent(rank.binding?.utilization ?? 0),
+          resetsAt: rank.binding?.resetsAt ?? null,
+          planType: rank.account.planType,
+        }))
+      : [];
+    const others = buildOtherWindows(
+      accounts,
+      match,
+      new Set(inUse.map((entry) => entry.key)),
+      accountRows.length > 1 ? model.provider : null,
+    );
     const reason = readableReason(snapshot.reason);
 
     if (!match || !modelBinding) {
@@ -640,6 +714,7 @@ export function buildQuotaView(
         };
       }),
       others,
+      accounts: accountRows,
       inUse,
       fetchedAt: snapshot.fetchedAt ?? null,
       stale: snapshot.stale === true,
@@ -683,6 +758,7 @@ export function buildQuotaView(
     // The account-wide list above already shows every window there is.
     inUse: [],
     others: [],
+    accounts: [],
     fetchedAt: snapshot.fetchedAt ?? null,
     stale: snapshot.stale === true,
     planType: binding.account.planType,
@@ -961,6 +1037,54 @@ export function QuotaPopover({
           <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-muted)" }}>
             {t("usage.reportedPlan", { plan: quota.planType })}
           </div>
+        )}
+        {/* Every sibling account serving this model's provider gets exactly
+            one compact row here — never its own window list, which stays
+            reserved for the account actually serving the model. */}
+        {quota.known && quota.accounts.length > 1 && (
+          <section style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)" }}>
+              {t("usage.accountsHeading", { count: quota.accounts.length })}
+            </div>
+            <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+              {quota.accounts.map((account) => {
+                const tone = ACCOUNT_STATE_COLOR[account.state];
+                const reset = account.state === "limited" ? formatResetTime(account.resetsAt, locale, now) : null;
+                const stateLabel = reset
+                  ? t("usage.accountLimited", { time: reset })
+                  : t(ACCOUNT_STATE_LABEL_KEYS[account.state]);
+                return (
+                  <div key={account.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                      <div style={{
+                        fontSize: 12, fontWeight: 600, color: "var(--text)",
+                        whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                      }}>
+                        {account.label}
+                      </div>
+                      <div style={{
+                        flexShrink: 0,
+                        fontSize: 9, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase",
+                        color: tone,
+                        border: `1px solid ${tone}`,
+                        borderRadius: 999,
+                        padding: "1px 5px",
+                        whiteSpace: "nowrap",
+                      }}>
+                        {stateLabel}
+                      </div>
+                    </div>
+                    <div style={{ flexShrink: 0, fontSize: 12, fontWeight: 700, color: tone, fontVariantNumeric: "tabular-nums" }}>
+                      {`${Math.round(account.percent)}%`}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-muted)" }}>
+              {t("usage.accountsNote")}
+            </div>
+          </section>
         )}
         {/* The balance sits directly under the headline, before banked resets
             and other providers' windows: for an OpenRouter model it is THE

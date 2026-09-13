@@ -22,7 +22,7 @@
  */
 import { groupForRow, POPULAR_ORDER, popularityRank, PROVIDER_VARIANTS, SUBSCRIPTION_IDS, type ProviderGroup } from "@/components/settings/providers/provider-groups";
 import type { ProviderDefinition } from "@/lib/harness/provider-catalog";
-import type { ProviderDirectoryInfo, ProviderLoginOption } from "@/lib/harness/types";
+import type { ProviderDirectoryInfo, ProviderLoginAccount, ProviderLoginOption } from "@/lib/harness/types";
 
 export type ProviderMethodKind = "oauth" | "device" | "key" | "env" | "custom";
 export type ProviderMethodState = "connected" | "available" | "unset";
@@ -56,6 +56,12 @@ export interface ProviderMethod {
   hint?: string;
   /** The key method's variables; `key` and `env` carry the same list. */
   variables?: ProviderMethodVariable[];
+  /** Every credential stored for this sign-in, when the engine can enumerate
+   * them. Absent, NOT empty, means "unknown" — the row renders exactly as it
+   * did before per-account listing existed. */
+  accounts?: ProviderLoginAccount[];
+  /** True when `accounts` has more than one entry. */
+  multiAccount?: boolean;
   /** The one method the row's status line describes: the highest-precedence
    * connected method (signed in › key saved in Cody › key from the
    * container › custom endpoint), or the first method when none is. */
@@ -176,6 +182,8 @@ function loginMethod(login: ProviderLoginOption): ProviderMethod {
     name: login.name,
     canLogout: login.canLogout,
     ...(login.hint ? { hint: login.hint } : {}),
+    ...(login.accounts ? { accounts: login.accounts } : {}),
+    ...(login.multiAccount !== undefined ? { multiAccount: login.multiAccount } : {}),
     winning: false,
   };
 }
