@@ -27,6 +27,7 @@ import { getRpcSession } from "@/lib/rpc-manager";
 import { forgetSession } from "@/lib/auth/session-owners";
 import { getHarness } from "@/lib/harness";
 import { removeEngineSession, upsertEngineSession, type EngineSessionRow } from "@/lib/harness/engine-sessions";
+import { forgetSessionLocalRouting } from "@/lib/local-model-routing";
 import type { AgentMessage } from "@/lib/types";
 
 // BranchNavigator still traverses recursively, so keep the response tree shallow.
@@ -360,6 +361,7 @@ export async function DELETE(
       await getRpcSession(id)?.destroyAndWait?.();
       removeEngineSession(id);
       forgetSession(id);
+      forgetSessionLocalRouting(id);
       return NextResponse.json({ ok: true });
     }
 
@@ -483,6 +485,7 @@ export async function DELETE(
     invalidateSessionPathCache(id);
     invalidateSessionListCache();
     forgetSession(deletedSessionId);
+    forgetSessionLocalRouting(deletedSessionId);
     return NextResponse.json({
       ok: true,
       ...(skippedChildren.length > 0 ? { skippedChildren } : {}),

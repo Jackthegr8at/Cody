@@ -3346,3 +3346,9 @@ html.dark .dropdown-surface :is(select, option) {
 }
 .setup-wizard-field input:focus { border-color: var(--accent); }
 .setup-wizard-picker { padding: 8px; }
+
+
+@keyframes compaction-progress-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}

@@ -55,6 +55,7 @@ import { useSettingsRoute } from "@/hooks/useSettingsData";
 import { useSettingsOpener } from "./settings/shell-context";
 import { formatModelDisplayName } from "@/lib/model-display";
 import type { SessionActiveModel } from "@/lib/session-active-models";
+import { PromptProfileIndicator, type LocalModelProfileBody } from "./LocalModelProfile";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix (already compressed if it needed to be)
@@ -100,6 +101,8 @@ interface Props {
    * was running, and to scope per-engine browser storage. */
   engine?: ActiveEngineInfo | null;
   model?: { provider: string; modelId: string } | null;
+  /** Lets the profile API distinguish planned from applied session state. */
+  sessionId?: string | null;
   /** Every concrete model with work attributable to this session. */
   activeModels?: readonly SessionActiveModel[];
   isAutoModelSelection?: boolean;
@@ -115,6 +118,10 @@ interface Props {
    * for a new, not-yet-spawned session — on a live session the Smart row
    * resolves the OMP roles default itself and calls onModelChange instead. */
   onSelectSmartModel?: () => void;
+  /** Backend-confirmed local-only routing for this session. Absent when the
+   * active engine cannot support this routing mode. */
+  localOnly?: { active: boolean; pending: boolean; supported: boolean; error?: string };
+  onSelectLocalOnly?: () => Promise<boolean>;
   /** The engine's last unprompted model switch for this session (retry
    * fallback, usage-aware routing). Renders a persistent marker beside the
    * model control naming what moved and why — the switch outlives its toast. */
@@ -1379,7 +1386,7 @@ function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; plan?: A
 }
 
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, canAttachWhileStreaming = false, canAttachImagesWhileStreaming = false, capabilities = ALL_CAPABILITIES, engine = null, model, activeModels = NO_ACTIVE_MODELS, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, autoModelSwitch, modelSwitchPending, modelChangeWhileStreaming = false, fastModeEnabled, fastModeActive, fastModeCapable, fastModeSupported, fastModePending, fastModeUnavailable, onFastModeChange,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, canAttachWhileStreaming = false, canAttachImagesWhileStreaming = false, capabilities = ALL_CAPABILITIES, engine = null, model, sessionId, activeModels = NO_ACTIVE_MODELS, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, localOnly, onSelectLocalOnly, autoModelSwitch, modelSwitchPending, modelChangeWhileStreaming = false, fastModeEnabled, fastModeActive, fastModeCapable, fastModeSupported, fastModePending, fastModeUnavailable, onFastModeChange,
   onAbortCompaction, isCompacting, compactResult,
   thinkingLevel, onThinkingLevelChange, thinkingLevelPending, thinkingLevelTarget, availableModes = NO_MODES, currentModeId = null, onModeChange, availableThinkingLevels, modelNameOverride,
   retryInfo, queuedMessages, inputHistory = [], onAbortRetry,
@@ -2439,6 +2446,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   // browser mirror of /api/models/visibility (lib/composer-model-visibility).
   // The mirror paints on the first frame; the server's answer refreshes it.
   const engineId = engine?.id ?? null;
+    const profileRoute = useSettingsRoute<LocalModelProfileBody>(
+      model ? `/api/local-model-profile?provider=${encodeURIComponent(model.provider)}&modelId=${encodeURIComponent(model.modelId)}${sessionId ? `&sessionId=${encodeURIComponent(sessionId)}` : ""}` : null,
+      { enabled: engineId === OMP_ENGINE_ID && model !== null, ttlMs: 60_000 },
+    );
   const [visibility, setVisibility] = useState<ComposerVisibility>(() => readComposerVisibility(engineId));
   useEffect(() => {
     const refresh = () => setVisibility(readComposerVisibility(engineId));
@@ -3546,22 +3557,24 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       <ShieldCheck size={13} strokeWidth={2} aria-hidden="true" />
                     </span>
                   )}
-                  {isAutoModelSelection && (
+                  {(localOnly?.active || isAutoModelSelection) && (
                     <span
                       role="img"
-                      title={t("chatInput.smartRouting")}
-                      aria-label={t("chatInput.smartRouting")}
+                      title={localOnly?.active ? t("chatInput.localOnly") : t("chatInput.smartRouting")}
+                      aria-label={localOnly?.active ? t("chatInput.localOnly") : t("chatInput.smartRouting")}
                       style={{ display: "flex", flexShrink: 0, color: "var(--accent)" }}
                     >
-                      <Sparkles size={12} strokeWidth={2} aria-hidden="true" />
+                      {localOnly?.active ? <Target size={12} strokeWidth={2} aria-hidden="true" /> : <Sparkles size={12} strokeWidth={2} aria-hidden="true" />}
                     </span>
                   )}
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
-                    {isAutoModelSelection
-                      ? t("chatInput.smartModel")
-                      : currentName ?? (modelOptions.length > 0
-                        ? t("chatInput.selectModel")
-                        : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noModels"))}
+                    {localOnly?.active
+                      ? t("chatInput.localOnly")
+                      : isAutoModelSelection
+                        ? t("chatInput.smartModel")
+                        : currentName ?? (modelOptions.length > 0
+                          ? t("chatInput.selectModel")
+                          : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noModels"))}
                   </span>
                   <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7 }} aria-hidden="true" />
                 </button>
@@ -3573,9 +3586,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     style={{ display: "inline-flex", alignItems: "center", gap: 4, minWidth: 0, color: "var(--text-dim)", fontSize: 11, whiteSpace: "nowrap" }}
                   >
                     <Loader2 size={11} strokeWidth={2} style={{ flexShrink: 0, animation: "spin 0.8s linear infinite" }} aria-hidden="true" />
-                    <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{modelSwitchStatus}</span>
                   </span>
                 )}
+                <PromptProfileIndicator
+                  selection={profileRoute.data?.selection}
+                  isMobile={isMobile}
+                  onOpen={() => openSettings("models", { sub: "assignments", highlight: "local-model-prompt-profile" })}
+                />
                 {modelDropdownOpen && modelDropdownRect && (() => {
                   const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
                   const bottom = viewportHeight - modelDropdownRect.top + 6;
@@ -3629,6 +3646,41 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         <span style={{ fontSize: 11, color: "var(--text-dim)", fontWeight: 400, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t("chatInput.smartModelHint", { name: engineName })}</span>
                       </span>
                     </button>
+                    )}
+                    {localOnly?.supported && onSelectLocalOnly && (
+                      <button
+                        className="dropdown-item"
+                        key="local-only"
+                        type="button"
+                        aria-pressed={localOnly.active}
+                        disabled={localOnly.pending}
+                        onClick={() => {
+                          if (localOnly.pending) return;
+                          void onSelectLocalOnly().then((selected) => {
+                            if (selected) setModelDropdownOpen(false);
+                          });
+                        }}
+                        style={{
+                          display: "flex", alignItems: "flex-start", gap: 8,
+                          width: "100%", padding: "7px 12px",
+                          background: localOnly.active ? "var(--bg-selected)" : "transparent",
+                          border: "none", borderBottom: "1px solid var(--border)",
+                          color: localOnly.active ? "var(--text)" : "var(--text-muted)",
+                          cursor: localOnly.pending ? "wait" : "pointer", fontSize: 12, textAlign: "left",
+                          fontWeight: localOnly.active ? 600 : 400, opacity: localOnly.pending ? 0.6 : 1,
+                        }}
+                        onMouseEnter={(event) => { if (!localOnly.active && !localOnly.pending) event.currentTarget.style.background = "var(--bg-hover)"; }}
+                        onMouseLeave={(event) => { if (!localOnly.active) event.currentTarget.style.background = "transparent"; }}
+                      >
+                        {localOnly.active
+                          ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 3 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
+                          : <span style={{ width: 10, flexShrink: 0 }} />}
+                        {localOnly.pending ? <Loader2 size={13} strokeWidth={1.8} aria-hidden="true" style={{ flexShrink: 0, marginTop: 2, animation: "spin 0.8s linear infinite" }} /> : <Target size={13} strokeWidth={1.8} aria-hidden="true" style={{ flexShrink: 0, marginTop: 2, color: localOnly.active ? "var(--accent)" : "var(--text-dim)" }} />}
+                        <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+                          <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t("chatInput.localOnly")}</span>
+                          <span style={{ fontSize: 11, color: "var(--text-dim)", fontWeight: 400, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{localOnly.pending ? t("chatInput.localOnlyChanging") : t("chatInput.localOnlyHint")}</span>
+                        </span>
+                      </button>
                     )}
                     {showModelSearch && (
                       <div style={{ padding: "6px 8px", background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 6 }}>

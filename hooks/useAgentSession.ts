@@ -19,7 +19,7 @@ import {
 import { extractLoopbackUrls, normalizePreviewUrl } from "@/lib/preview-url";
 import { derivePersistedContextUsage, type ContextUsageValue } from "@/lib/context-usage";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
-import { sendAgentCommand } from "@/lib/agent-client";
+import { AgentCommandError, sendAgentCommand } from "@/lib/agent-client";
 import { engineSupports } from "@/lib/engine-capabilities";
 import { translate } from "@/lib/i18n";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
@@ -58,6 +58,7 @@ import {
 } from "@/hooks/session-control-scope";
 import { SESSION_PROMPT_IMAGE, SESSION_PROMPT_STEERING, sessionPromptCapabilityBits } from "@/hooks/session-prompt-capabilities";
 import { toast } from "@/components/ui/toast";
+import { compactionStatusReducer, type CompactionStatus } from "@/lib/compaction-status";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import { createActiveGoal, parseActiveGoal, type ActiveGoal, type ActivePlan } from "@/lib/web-mode-state";
 import type { HostToolDefinition, HostUriSchemeDefinition, PlanOverlay, RpcAvailableSlashCommand, SessionStatsInfo, TodoPhase } from "@/lib/pi-types";
@@ -159,6 +160,7 @@ function pruneSubagentIdMap<T>(map: Record<string, T>): Record<string, T> {
 
 
 interface CompactCommandResult {
+  summary?: string;
   tokensBefore?: number;
   estimatedTokensAfter?: number;
 }
@@ -774,16 +776,24 @@ function userMessageKey(message: Partial<AgentMessage>): string {
 }
 
 function readCompactResult(result: unknown, reason: string): CompactResultInfo | null {
-  if (!result || typeof result !== "object") return null;
-  const r = result as CompactCommandResult;
-  if (typeof r.tokensBefore !== "number") return null;
-  // The server estimates estimatedTokensAfter from the summary when omp's
-  // CompactionResult omits it; default to 0 as a last resort.
-  return {
-    reason,
-    tokensBefore: r.tokensBefore,
-    estimatedTokensAfter: typeof r.estimatedTokensAfter === "number" ? r.estimatedTokensAfter : 0,
-  };
+  if (!result || typeof result !== "object" || !("tokensBefore" in result) || typeof result.tokensBefore !== "number") return null;
+  const estimatedTokensAfter = "estimatedTokensAfter" in result && typeof result.estimatedTokensAfter === "number" ? result.estimatedTokensAfter : 0;
+  return { reason, tokensBefore: result.tokensBefore, estimatedTokensAfter };
+}
+
+function readCompactOutcome(result: unknown): "completed" | "noop" {
+  if (!result || typeof result !== "object" || !("summary" in result) || typeof result.summary !== "string") return "completed";
+  return /nothing\s+to\s+compact/i.test(result.summary) ? "noop" : "completed";
+}
+function compactionErrorOutcome(error: unknown): "failed" | "cancelled" | "unsupported" | "noop" {
+  if (error instanceof AgentCommandError) {
+    if (error.code === "unsupported") return "unsupported";
+    if (error.code === "cancelled") return "cancelled";
+    if (error.code === "nothing_to_compact") return "noop";
+  }
+  // OMP 0.18.1 reports its documented no-op only as this RpcCommandError text.
+  if (error instanceof Error && /^nothing\s+to\s+compact\b/i.test(error.message)) return "noop";
+  return "failed";
 }
 
 export interface ChatInputHandle {
@@ -883,6 +893,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [modelThinkingLevels, setModelThinkingLevels] = useState<Record<string, string[]>>({});
   const [newSessionModel, setNewSessionModel] = useState<SelectedModel | null>(null);
   const [newSessionDefaultModel, setNewSessionDefaultModel] = useState<SelectedModel | null>(null);
+  const [localOnly, setLocalOnly] = useState<{ active: boolean; pending: boolean; supported: boolean; error?: string }>({ active: false, pending: false, supported: false });
   const [toolPreset, setToolPreset] = useState<ToolPreset>(() => getPreferredToolPreset());
   useEffect(() => subscribeToPreferredToolPreset(setToolPreset), []);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
@@ -957,6 +968,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [isCompacting, setIsCompacting] = useState(false);
   const [compactError, setCompactError] = useState<string | null>(null);
   const [compactResult, setCompactResult] = useState<CompactResultInfo | null>(null);
+  const initialCompactionStatus: CompactionStatus = { status: "idle", sessionId: session?.id ?? null };
+  const [compactionStatus, dispatchCompactionStatus] = useReducer(compactionStatusReducer, initialCompactionStatus);
+  useEffect(() => {
+    if (compactionStatus.status === "idle" || compactionStatus.status === "pending" || compactionStatus.status === "running") return;
+    const timer = window.setTimeout(() => dispatchCompactionStatus({ type: "dismiss", sessionId: compactionStatus.sessionId }), compactionStatus.status === "noop" ? 5_000 : 8_000);
+    return () => window.clearTimeout(timer);
+  }, [compactionStatus]);
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
   // Event-stream health, surfaced so a believed-running turn is never rendered
   // as a healthy "Waiting for model…" against a stream that is not delivering.
@@ -1022,6 +1040,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const modelSwitchDispatchingSessionRef = useRef<string | null>(null);
   const dispatchPendingModelSwitchRef = useRef<(() => void) | null>(null);
   const modelSwitchPendingRef = useRef<PendingModelSwitchRequest | null>(null);
+  const modelSwitchAwaitingIdleRef = useRef<string | null>(null);
   const writeModelSwitchPending = useCallback((next: PendingModelSwitchRequest | null) => {
     modelSwitchPendingRef.current = next;
     setModelSwitchPending(next);
@@ -1055,6 +1074,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // Mirror of the isCompacting state that survives render batching, so two
   // clicks in the same tick cannot double-send a compact command.
   const isCompactingRef = useRef(false);
+  // Monotonic fence for reconnect snapshots: a GET started before a newer
+  // compaction request must not overwrite the newer request when it resolves.
+  const compactionGenerationRef = useRef(0);
   // Set while an interrupt-and-reply (abort_and_prompt) is in flight: the
   // aborted turn's terminal agent_end must not tear down the new run that is
   // starting. Cleared on the new run's agent_start (or the intercept itself).
@@ -1092,6 +1114,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const ensuringNewSessionRef = useRef<Promise<string | null> | null>(null);
+  const newSessionLocalOnlyRef = useRef(false);
   const newSessionPromotedRef = useRef(false);
   // Raw child-session events stream at token rate; coalesce the per-subagent
   // revision bumps to one per animation frame so an open dialog only re-pages
@@ -1652,6 +1675,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
 
         const liveState = agentState.state;
+                dispatchCompactionStatus({ type: "reconcile", sessionId: sid, active: liveState?.isCompacting === true, now: Date.now() });
         adoptSessionModels(liveState);
         adoptSessionModes(liveState, sid, modeSeq);
         adoptSessionPromptCapabilities(liveState);
@@ -1747,7 +1771,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const selectedModel = newSessionModel ?? newSessionDefaultModel;
         // No explicit pick is Smart. Persist that source against the real session
         // identity before its first reconciliation can resolve a concrete model.
-        const smartSpawn = newSessionModel === null;
+        const smartSpawn = newSessionModel === null && !newSessionLocalOnlyRef.current;
         if (selectedModel) setPendingModel(selectedModel);
         const toolNames = getToolNamesForPreset(toolPreset);
         const res = await fetch("/api/agent/new", {
@@ -1760,12 +1784,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
             ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
             ...(advisorEnabled ? { advisor: true } : {}),
+            ...(newSessionLocalOnlyRef.current ? { localOnly: true } : {}),
           }),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const result = await res.json() as { sessionId: string };
         const realId = result.sessionId;
         sessionIdRef.current = realId;
+        ++compactionGenerationRef.current;
+        dispatchCompactionStatus({ type: "reset", sessionId: realId });
+        if (newSessionLocalOnlyRef.current) setLocalOnly((current) => ({ ...current, active: true, pending: false }));
         updateSessionControlScope(realId, selectedModel, true);
         if (smartSpawn) {
           pendingSmartSpawnRef.current = realId;
@@ -1781,6 +1809,36 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         ensuringNewSessionRef.current = null;
       }
     }, [advisorEnabled, isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, setSmartModelProvenance, thinkingLevel, toolPreset, updateSessionControlScope]);
+
+  const selectLocalOnly = useCallback(async (): Promise<boolean> => {
+    if (localOnly.pending || !localOnly.supported) return false;
+    const sid = sessionIdRef.current;
+    setLocalOnly((current) => ({ ...current, pending: true, error: undefined }));
+    try {
+      if (!sid) {
+        newSessionLocalOnlyRef.current = true;
+        const created = await ensureNewSession();
+        if (!created) throw new Error("Could not create a Local-only session.");
+        setLocalOnly((current) => ({ ...current, active: true, pending: false }));
+        return true;
+      }
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}/local-routing`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: true }),
+      });
+      const body = await response.json() as { active?: unknown; error?: unknown };
+      if (!response.ok || body.active !== true) throw new Error(typeof body.error === "string" ? body.error : "Local-only routing could not be applied.");
+      if (sessionIdRef.current === sid) setLocalOnly((current) => ({ ...current, active: true, pending: false, supported: true }));
+      return true;
+    } catch (error) {
+      if (sessionIdRef.current === sid || sid === null) {
+        setLocalOnly((current) => ({ ...current, active: false, pending: false, error: error instanceof Error ? error.message : String(error) }));
+      }
+      newSessionLocalOnlyRef.current = false;
+      return false;
+    }
+  }, [ensureNewSession, localOnly.pending, localOnly.supported]);
 
   const loadSlashCommands = useCallback(async () => {
     const sid = sessionIdRef.current ?? await ensureNewSession();
@@ -1858,6 +1916,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             if (shouldClearLostTurn(agentRunningRef.current && runConfirmedRef.current, event)) {
               lostTurnRecoveryRef.current?.(sid);
             }
+            // Reconnect can happen after a terminal compaction when no chat
+            // turn is believed running, so the normal turn-only reconcile is
+            // insufficient. Read only the engine's authoritative state.
+            const compactionStateReadStartedAt = Date.now();
+            const compactionStateReadGeneration = compactionGenerationRef.current;
+            void fetch(`/api/agent/${encodeURIComponent(sid)}`)
+              .then((response) => (response.ok ? response.json() as Promise<{ state?: AgentStateResponse }> : null))
+              .then((snapshot) => {
+                if (sessionIdRef.current !== sid || compactionGenerationRef.current !== compactionStateReadGeneration) return;
+                const active = snapshot?.state?.isCompacting === true;
+                isCompactingRef.current = active;
+                setIsCompacting(active);
+                dispatchCompactionStatus({ type: "reconcile", sessionId: sid, active, now: Date.now(), observedAt: compactionStateReadStartedAt, generation: compactionStateReadGeneration });
+              })
+              .catch(() => {});
           }
           // message_update frames arrive at network rate (often 30-100+/s);
           // the coalescer buffers the latest one and dispatches at display
@@ -2186,6 +2259,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const dispatchPendingModelSwitch = useCallback(async (): Promise<boolean> => {
     const pending = modelSwitchPendingRef.current;
     if (!pending) return false;
+    if (modelSwitchAwaitingIdleRef.current === pending.scope.sessionId) return false;
     const dispatchingSession = modelSwitchDispatchingSessionRef.current;
     if (dispatchingSession !== null && dispatchingSession === pending.scope.sessionId) return true;
     const released = releaseModelSwitchAtBoundary(pending, modelSwitchScopeRef.current, true);
@@ -2216,6 +2290,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return true;
     } catch (error) {
       const current = modelSwitchPendingRef.current;
+      if (error instanceof AgentCommandError && error.code === "session_busy") {
+        // The backend emits this code only when the chosen model crosses a
+        // prompt-profile boundary. Keep the explicit pick, but wait for an
+        // actual idle boundary: message_end and tool frames are still part of
+        // the provider operation that cannot be restarted safely.
+        if (current?.scope.sessionId === sid) {
+          modelSwitchAwaitingIdleRef.current = sid;
+          writeModelSwitchPending({ ...(current.phase === "waiting" ? current : applying), phase: "waiting" });
+        }
+        return false;
+      }
       if (current === applying && sameSessionControlScope(modelSwitchScopeRef.current, applying.scope)) {
         writeModelSwitchPending(null);
         addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
@@ -2232,7 +2317,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (modelSwitchDispatchingSessionRef.current === sid) modelSwitchDispatchingSessionRef.current = null;
       const next = modelSwitchPendingRef.current;
-      if (!assistantProviderCallRef.current && next?.phase === "waiting" && sameSessionControlScope(next.scope, modelSwitchScopeRef.current)) {
+      if (modelSwitchAwaitingIdleRef.current !== sid
+        && !assistantProviderCallRef.current
+        && next?.phase === "waiting"
+        && sameSessionControlScope(next.scope, modelSwitchScopeRef.current)) {
         dispatchPendingModelSwitchRef.current?.();
       }
     }
@@ -2373,6 +2461,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!agentRunningRef.current) return;
       agentRunningRef.current = false;
       assistantProviderCallRef.current = false;
+      if (modelSwitchAwaitingIdleRef.current === sid) modelSwitchAwaitingIdleRef.current = null;
       void dispatchPendingModelSwitch();
       setAgentRunning(false);
       setAgentPhase(null);
@@ -2484,6 +2573,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // (wrapper destroyed) means nothing is compacting.
       isCompactingRef.current = state?.isCompacting ?? false;
       setIsCompacting(state?.isCompacting ?? false);
+            dispatchCompactionStatus({ type: "reconcile", sessionId: sid, active: state?.isCompacting === true, now: Date.now() });
       // Also mid-run: this poll is the only todo-phase refresh while streaming.
       if (state?.todoPhases !== undefined) setTodoPhases(state.todoPhases ?? []);
       if (state?.planOverlay !== undefined) setPlanOverlay(readPlanOverlay(state.planOverlay) ?? null);
@@ -2738,6 +2828,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const endedRunId = promptRunIdRef.current;
         agentRunningRef.current = false;
         assistantProviderCallRef.current = false;
+        if (modelSwitchAwaitingIdleRef.current === endedSid) modelSwitchAwaitingIdleRef.current = null;
         void dispatchPendingModelSwitch();
         setAgentRunning(false);
         setAgentPhase(null);
@@ -3126,21 +3217,37 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }));
         break;
       }
-      case "auto_compaction_start":
+      case "auto_compaction_start": {
+        const sid = sessionIdRef.current;
+        if (!sid) break;
+        isCompactingRef.current = true;
         setIsCompacting(true);
         setCompactError(null);
         setCompactResult(null);
+        const compactionGeneration = ++compactionGenerationRef.current;
+        dispatchCompactionStatus({ type: "running", sessionId: sid, source: "automatic", now: Date.now(), generation: compactionGeneration });
         break;
-      case "auto_compaction_end":
+      }
+      case "auto_compaction_end": {
+        const sid = sessionIdRef.current;
+        isCompactingRef.current = false;
         setIsCompacting(false);
-        if (event.errorMessage) {
-          setCompactError(event.errorMessage as string);
+        if (!sid) break;
+        if (event.skipped === true) {
+          dispatchCompactionStatus({ type: "settle", sessionId: sid, outcome: "noop", source: "automatic", now: Date.now() });
+        } else if (event.aborted === true) {
+          dispatchCompactionStatus({ type: "settle", sessionId: sid, outcome: "cancelled", source: "automatic", now: Date.now() });
+        } else if (typeof event.errorMessage === "string" && event.errorMessage.length > 0) {
+          setCompactError(event.errorMessage);
           setCompactResult(null);
-        } else if (!event.aborted && !event.skipped) {
+          dispatchCompactionStatus({ type: "settle", sessionId: sid, outcome: "failed", source: "automatic", now: Date.now(), message: event.errorMessage });
+        } else {
           setCompactResult(readCompactResult(event.result, "auto"));
-          if (sessionIdRef.current) loadSession(sessionIdRef.current);
+          dispatchCompactionStatus({ type: "settle", sessionId: sid, outcome: "completed", source: "automatic", now: Date.now() });
+          void loadSession(sid);
         }
         break;
+      }
       case "subagent_lifecycle": {
         // Roster fed by omp's subagent_lifecycle frames. Payload mirrors
         // SubagentLifecyclePayload (oh-my-pi task/types.ts); defensive
@@ -3653,9 +3760,30 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   // An unspawned session delegates the default choice to the engine's role plan.
   const selectSmartModel = useCallback(() => {
+    const sid = sessionIdRef.current;
+    if (!sid) {
+      newSessionLocalOnlyRef.current = false;
+      setLocalOnly((current) => ({ ...current, active: false, pending: false, error: undefined }));
+    } else if (localOnly.active) {
+      setLocalOnly((current) => ({ ...current, pending: true, error: undefined }));
+      void (async () => {
+        try {
+          const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}/local-routing`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ enabled: false }),
+          });
+          const body = await response.json() as { active?: unknown; error?: unknown };
+          if (!response.ok || body.active !== false) throw new Error(typeof body.error === "string" ? body.error : "Smart routing could not be restored.");
+          if (sessionIdRef.current === sid) setLocalOnly((current) => ({ ...current, active: false, pending: false }));
+        } catch (error) {
+          if (sessionIdRef.current === sid) setLocalOnly((current) => ({ ...current, pending: false, error: error instanceof Error ? error.message : String(error) }));
+        }
+      })();
+    }
     setNewSessionModel(null);
-    pendingSmartSpawnRef.current = sessionIdRef.current;
-  }, [setNewSessionModel]);
+    pendingSmartSpawnRef.current = sid;
+  }, [localOnly.active, setNewSessionModel]);
 
   const handleFastModeChange = useCallback(async (enabled: boolean) => {
       if (fastModePendingLatchRef.current) return;
@@ -3819,17 +3947,27 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setIsCompacting(true);
     setCompactError(null);
     setCompactResult(null);
+    const compactionGeneration = ++compactionGenerationRef.current;
+    dispatchCompactionStatus({ type: "request", sessionId: sid, source: "manual", now: Date.now(), generation: compactionGeneration });
     try {
       const result = await sendAgentCommand<CompactCommandResult>(sid, { type: "compact" });
-      setCompactResult(readCompactResult(result, "manual"));
+      if (sessionIdRef.current !== sid) return;
+      const outcome = readCompactOutcome(result);
+      setCompactResult(outcome === "completed" ? readCompactResult(result, "manual") : null);
+      dispatchCompactionStatus({ type: "settle", sessionId: sid, outcome, now: Date.now() });
       await loadSession(sid, true);
       void refreshLiveModelState(sid);
-    } catch (e) {
-      setCompactError(e instanceof Error ? e.message : String(e));
+    } catch (error) {
+      if (sessionIdRef.current !== sid) return;
+      const outcome = compactionErrorOutcome(error);
+      if (outcome === "failed") setCompactError(error instanceof Error ? error.message : String(error));
       setCompactResult(null);
+      dispatchCompactionStatus({ type: "settle", sessionId: sid, outcome, now: Date.now(), message: outcome === "failed" ? (error instanceof Error ? error.message : String(error)) : undefined });
     } finally {
-      isCompactingRef.current = false;
-      setIsCompacting(false);
+      if (sessionIdRef.current === sid) {
+        isCompactingRef.current = false;
+        setIsCompacting(false);
+      }
     }
   }, [isCompacting, loadSession, refreshLiveModelState]);
 
@@ -3888,24 +4026,35 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       switch (commandName) {
         case "compact": {
-          if (!sid || isCompactingRef.current || isCompacting) return complete({ handled: true, error: translate("agentSession.noSessionToCompact") });
+          if (!sid) return complete({ handled: true, error: translate("agentSession.noSessionToCompact") });
+          if (isCompactingRef.current || isCompacting) return { handled: true };
           isCompactingRef.current = true;
           setIsCompacting(true);
           setCompactError(null);
           setCompactResult(null);
-          const result = await sendAgentCommand<CompactCommandResult>(sid, {
-            type: "compact",
-            ...(args ? { customInstructions: args } : {}),
-          });
-          setCompactResult(readCompactResult(result, "manual"));
-          await loadSession(sid, true);
-          isCompactingRef.current = false;
-          setIsCompacting(false);
-          // loadSession resolves to null unless state was requested, so promote
-          // unconditionally — promoteNewSession no-ops for existing sessions and
-          // is idempotent via newSessionPromotedRef.
-          promoteNewSession();
-          return complete({ handled: true, message: translate("agentSession.compactedContext") });
+          const compactionGeneration = ++compactionGenerationRef.current;
+          dispatchCompactionStatus({ type: "request", sessionId: sid, source: "manual", now: Date.now(), generation: compactionGeneration });
+          try {
+            const result = await sendAgentCommand<CompactCommandResult>(sid, {
+              type: "compact",
+              ...(args ? { customInstructions: args } : {}),
+            });
+            if (sessionIdRef.current !== sid) return { handled: true };
+            const outcome = readCompactOutcome(result);
+            setCompactResult(outcome === "completed" ? readCompactResult(result, "manual") : null);
+            dispatchCompactionStatus({ type: "settle", sessionId: sid, outcome, now: Date.now() });
+            await loadSession(sid, true);
+            promoteNewSession();
+            return complete({ handled: true, message: outcome === "noop" ? translate("compaction.nothingToCompact") : translate("agentSession.compactedContext") });
+          } catch (error) {
+            if (sessionIdRef.current !== sid) return { handled: true };
+            const outcome = compactionErrorOutcome(error);
+            const message = error instanceof Error ? error.message : String(error);
+            if (outcome === "failed") setCompactError(message);
+            setCompactResult(null);
+            dispatchCompactionStatus({ type: "settle", sessionId: sid, outcome, now: Date.now(), message: outcome === "failed" ? message : undefined });
+            return outcome === "failed" ? complete({ handled: true, error: message }) : complete({ handled: true, message: outcome === "noop" ? translate("compaction.nothingToCompact") : undefined });
+          }
         }
 
         case "reload": {
@@ -3983,7 +4132,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       return complete({ handled: true, error: e instanceof Error ? e.message : String(e) });
     } finally {
-      if (commandName === "compact") {
+      if (commandName === "compact" && sid && sessionIdRef.current === sid) {
         isCompactingRef.current = false;
         setIsCompacting(false);
       }
@@ -4075,8 +4224,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sid) return;
     try {
       await sendAgentCommand(sid, { type: "abort_compaction" });
-    } catch (e) {
-      console.error("Failed to abort compaction:", e);
+      if (sessionIdRef.current === sid) dispatchCompactionStatus({ type: "settle", sessionId: sid, outcome: "cancelled", now: Date.now() });
+    } catch (error) {
+      if (sessionIdRef.current !== sid) return;
+      const message = error instanceof Error ? error.message : String(error);
+      setCompactError(message);
+      dispatchCompactionStatus({ type: "settle", sessionId: sid, outcome: "failed", now: Date.now(), message });
     }
   }, []);
 
@@ -4175,6 +4328,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useEffect(() => {
     if (session) {
       sessionIdRef.current = session.id;
+      ++compactionGenerationRef.current;
+      dispatchCompactionStatus({ type: "reset", sessionId: session.id });
       updateSessionControlScope(session.id, null);
       loadSession(session.id, true, true).then((agentState) => {
         if (agentState?.running) {
@@ -4220,7 +4375,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // Model + thinking level are owned by loadSession (token-guarded);
           // re-applying this same snapshot here would mint a fresh token and
           // bypass the stale-response guard.
-          if (agentState.state.isCompacting !== undefined) setIsCompacting(agentState.state.isCompacting);
+          if (agentState.state.isCompacting !== undefined) {
+                      setIsCompacting(agentState.state.isCompacting);
+                      dispatchCompactionStatus({ type: "reconcile", sessionId: session.id, active: agentState.state.isCompacting, now: Date.now() });
+                    }
           if (agentState.state.contextUsage !== undefined) setLiveContextUsage(readLiveContextUsage(agentState.state.contextUsage));
           if (agentState.state.systemPrompt !== undefined) setSystemPrompt(agentState.state.systemPrompt || null);
           if (agentState.state.extensionStatuses !== undefined) setExtensionStatuses(agentState.state.extensionStatuses ?? []);
@@ -4409,6 +4567,35 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (followScrollFrameRef.current !== null) cancelAnimationFrame(followScrollFrameRef.current);
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    const sid = session?.id ?? null;
+    void (async () => {
+      try {
+        const configResponse = await fetch("/api/local-routing");
+        const config = await configResponse.json() as { supported?: unknown; error?: unknown };
+        if (cancelled) return;
+        const supported = config.supported === true;
+        if (!sid) {
+          setLocalOnly((current) => ({ ...current, supported, active: false, pending: false, ...(typeof config.error === "string" ? { error: config.error } : {}) }));
+          return;
+        }
+        const sessionResponse = await fetch(`/api/sessions/${encodeURIComponent(sid)}/local-routing`);
+        const sessionState = sessionResponse.ok ? await sessionResponse.json() as { active?: unknown; error?: unknown } : null;
+        if (cancelled || sessionIdRef.current !== sid) return;
+        setLocalOnly({
+          active: sessionState?.active === true,
+          pending: false,
+          supported,
+          ...(typeof sessionState?.error === "string" ? { error: sessionState.error } : typeof config.error === "string" ? { error: config.error } : {}),
+        });
+      } catch {
+        if (!cancelled) setLocalOnly({ active: false, pending: false, supported: false, error: "Local-only routing is unavailable." });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [session?.id]);
+
   // Load model list
   useEffect(() => {
     const controller = new AbortController();
@@ -4482,7 +4669,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     availableModes: sessionModes.forSession === (session?.id ?? sessionIdRef.current) ? sessionModes.options : NO_MODES,
     currentModeId: sessionModes.forSession === (session?.id ?? sessionIdRef.current) ? sessionModes.current : null,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
-    isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,
+    isCompacting, compactError, compactResult, compactionStatus, currentModel, displayModel, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
     notices: noticeState.visible, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     permissionRequests, respondToPermission,
@@ -4506,12 +4693,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     streamDegraded, streamAlert, dismissStreamAlert, retryEventStream,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases, planOverlay,
     activeGoal, activePlan,
+    localOnly,
     isNew,
     // Refs
     sessionIdRef, messagesEndRef, scrollContainerRef,
     pendingScrollToUserRef, initialScrollDoneRef,
     // Actions
-    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, selectSmartModel, handleFastModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply,
+    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, selectSmartModel, selectLocalOnly, handleFastModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply,
     handleCompact, handleHandoff, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     removeQueuedMessage, promoteQueuedToSteer,
     handleBuiltinSlashCommand,

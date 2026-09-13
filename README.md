@@ -26,6 +26,18 @@ Cody is a fork of [kahme247/ompweb](https://github.com/kahme247/ompweb) — see 
 
 </details>
 
+## Direct Chat and local sessions
+
+**Chat** is the first workspace panel, before Files. It is an independent direct conversation with a configured endpoint: API-key authentication where required, or a keyless `auth:none` local endpoint. It does not start an engine, harness, or tool execution. Its history is browser-local and scoped to the account and workspace; **New Chat** clears only that direct history. OAuth-only subscription credentials remain unavailable.
+
+You may explicitly attach a bounded selection of context, skills, text or source files, images, and installed prompt-only assets from the Extensions inventory. Assets are inventory content, never executed. Reasoning and Fast controls appear only for models that support them.
+
+**Local only** sits below Smart and stores separate primary, fallback, and role assignments in each session snapshot. Changes affect new snapshots; existing sessions keep their choices. Local only disables model-written session naming and Distill.
+
+Automatic prompt profiles keep configured private or loopback models usable. Windows at or below 8k use the minimal read-and-bash profile. The measured 16k and 24k windows use the compact four-tool profile with bounded compaction tuning; the compact profile remains available for local windows through 64k, where 32–64k retains OMP's native compaction. Cloud, unknown, and full-profile models are unchanged. This is not a lossless or unbounded context guarantee, so oversized input can still exceed a provider window and 8k sessions may compact frequently.
+
+Manual and automatic compaction report observed lifecycle with elapsed status and progress when an engine provides it. When it cannot, Cody shows progress as indeterminate rather than inventing a percentage; no-op, error, cancellation, and unsupported outcomes are labelled honestly.
+
 ## Getting started (Docker, recommended)
 
 The container is the primary way to run Cody. It ships **engine-free** and

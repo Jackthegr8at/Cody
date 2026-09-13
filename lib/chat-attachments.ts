@@ -1,13 +1,11 @@
 export const MAX_ATTACHED_TEXT_BYTES = 256 * 1024;
 export const MAX_ATTACHED_TEXT_FILES = 10;
 
-const TEXT_FILE_EXTENSIONS: Record<string, true> = {
-  txt: true,
-  text: true,
-  md: true,
-  markdown: true,
-  mdx: true,
-};
+const TEXT_FILE_EXTENSIONS: Record<string, true> = Object.fromEntries(
+  "txt text md markdown mdx js mjs cjs jsx ts tsx json jsonc yaml yml toml py rb go rs java c cc cpp h hpp cs sh bash zsh fish sql html css scss xml svg vue svelte php swift kt kts lua r pl ps1 ini conf env log csv".split(" ").map((extension) => [extension, true]),
+);
+
+const TEXT_FILE_MIME_TYPES = new Set(["application/json", "application/javascript", "application/typescript", "application/x-javascript", "application/x-typescript", "application/xml", "application/yaml", "application/x-yaml", "application/toml", "application/sql"]);
 
 export interface AttachedTextFileData {
   name: string;
@@ -21,9 +19,9 @@ function getFileExtension(name: string): string {
 }
 
 export function isTextAttachmentFile(file: Pick<File, "name" | "type">): boolean {
-  return file.type === "text/plain"
-    || file.type === "text/markdown"
-    || TEXT_FILE_EXTENSIONS[getFileExtension(file.name)] === true;
+  return file.type.startsWith("text/")
+      || TEXT_FILE_MIME_TYPES.has(file.type)
+      || TEXT_FILE_EXTENSIONS[getFileExtension(file.name)] === true;
 }
 
 function languageForFile(name: string): string {

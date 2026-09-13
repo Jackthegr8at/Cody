@@ -1,6 +1,7 @@
 import { existsSync } from "fs";
 import { homedir } from "os";
-import { renameSessionOwner } from "./auth/session-owners";
+import path from "path";
+import { getSessionOwner, renameSessionOwner, setSessionOwner } from "./auth/session-owners";
 import { aliasDisplaySession, publishDisplayRequest } from "./display/bus";
 import { isLoopbackHost } from "./display/ladder";
 import { ForgeError } from "./forge/client";
@@ -21,6 +22,9 @@ import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
 import { assistantReplyText, replyAsksUser } from "./reply-question";
 import { PlanKeeper } from "./plan-keeper/keeper";
 import { readPlanOverlay } from "./plan-keeper/overlay";
+import { materializeLocalModelProfile, resolveLocalModelPromptProfile, type LocalModelProfileLaunch, type ModelProfileTarget, type ResolvedLocalModelProfile } from "./local-model-profile-runtime";
+import { copySessionLocalRouting, materializeLocalRoutingOverlay, readLocalRoutingIntent, renameSessionLocalRouting, validateLocalRoutingModelSelection } from "./local-model-routing";
+import { selectPromptProfileId, type PromptProfileId } from "./local-model-profile";
 import { PRESET_FULL } from "./tool-presets";
 import { isRecord } from "./type-guards";
 import type {
@@ -284,14 +288,17 @@ export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[],
   return args;
 }
 
-/**
- * Complete launch (binary + argv + readiness) for an rpc-dialect engine
- * session — the harness's RpcUiSpawn descriptor decides the CLI surface.
- * `sessionFile: ""` means a brand-new session.
- */
+/** Complete launch for an rpc-dialect session. A local profile is launch-only:
+ * it changes no live OMP configuration and applies on both new and resumed sessions. */
 export function buildEngineRpcLaunch(
   harness: HarnessAdapter,
-  opts: { cwd: string; sessionFile: string; toolNames?: string[]; advisor?: boolean },
+  opts: {
+    cwd: string;
+    sessionFile: string;
+    toolNames?: string[];
+    advisor?: boolean;
+    profile?: LocalModelProfileLaunch;
+  },
 ): RpcProcessLaunch {
   const spec = harness.rpcUi;
   if (!spec) {
@@ -305,11 +312,25 @@ export function buildEngineRpcLaunch(
     );
   }
   const args = ["--mode", spec.mode];
-  // Engines without a --cwd flag (pi) inherit the spawn cwd, which RpcProcess
-  // always sets; passing the flag anyway would be silently swallowed.
   if (spec.supportsCwdFlag) args.push("--cwd", opts.cwd);
-  args.push(...buildSessionSpawnArgs(opts.sessionFile, opts.toolNames, opts.advisor === true, spec));
-  return { bin, label: harness.binaryName, args, readiness: spec.readiness };
+  const newSessionTools = opts.profile?.toolNames ?? opts.toolNames;
+  // `--tools` alone is additive in OMP. The 8k profile must be a real
+  // read+bash whitelist, while larger profiles retain OMP’s normal tool surface.
+  if (opts.profile?.profileId === "minimal") args.push("--no-tools");
+  args.push(...buildSessionSpawnArgs(opts.sessionFile, newSessionTools, opts.advisor === true, spec));
+  // OMP accepts these flags with --resume. Existing session tool presets are
+  // intentionally untouched unless a local profile explicitly replaces them.
+  if (opts.sessionFile && opts.profile?.toolNames?.length) {
+    args.push("--tools", opts.profile.toolNames.join(","));
+  }
+  if (opts.profile?.systemPromptPath) args.push("--system-prompt", opts.profile.systemPromptPath);
+  return {
+    bin,
+    label: harness.binaryName,
+    args,
+    ...(opts.profile?.env ? { env: opts.profile.env } : {}),
+    readiness: spec.readiness,
+  };
 }
 
 /**
@@ -391,22 +412,57 @@ function patchEstimatedTokensAfter(result: unknown): void {
   }
 }
 
+/** Append a session-owned Local-only overlay after the prompt overlay. The
+ * routing overlay owns model selection; the profile overlay owns compaction
+ * and context-file suppression, so neither can overwrite the other. */
+export function launchWithLocalRouting(profile: LocalModelProfileLaunch | undefined, sessionId: string): LocalModelProfileLaunch | undefined {
+  const intent = readLocalRoutingIntent(sessionId);
+  if (!intent.enabled && intent.error) {
+    throw new WebRpcError(`Local-only routing cannot start safely: ${intent.error}`, "local_routing_unavailable");
+  }
+  const routing = materializeLocalRoutingOverlay(intent);
+  if (!routing) return profile;
+  // OMP retries a fallback in the same process, so the prompt and compaction
+  // budget must fit every frozen destination—not merely the initial primary.
+  const envelopeProfile = materializeLocalModelProfile(resolveLocalModelPromptProfile({
+    provider: intent.primary!.provider,
+    modelId: intent.primary!.modelId,
+    contextWindow: intent.envelope!.contextWindow,
+    maxTokens: intent.envelope!.maxTokens,
+  }));
+  const safestProfileId = selectPromptProfileId({ contextWindow: intent.envelope!.contextWindow });
+  const profileBreadth: Record<PromptProfileId, number> = { minimal: 0, compact: 1, full: 2 };
+  if (profileBreadth[envelopeProfile.profileId] > profileBreadth[safestProfileId]) {
+    throw new WebRpcError(`This Local-only fallback set requires the ${safestProfileId} prompt profile or a more restrictive override; change the profile override or remove the smaller fallback.`, "local_routing_unsafe_profile");
+  }
+  const profileConfig = envelopeProfile.env?.PI_CONFIG_FILES;
+  return {
+    profileId: envelopeProfile.profileId,
+    ...(envelopeProfile.systemPromptPath ? { systemPromptPath: envelopeProfile.systemPromptPath } : {}),
+    ...(envelopeProfile.toolNames ? { toolNames: envelopeProfile.toolNames } : {}),
+    env: {
+      ...envelopeProfile.env,
+      PI_CONFIG_FILES: [profileConfig, routing.env.PI_CONFIG_FILES].filter((value): value is string => typeof value === "string" && value.length > 0).join(path.delimiter),
+    },
+  };
+}
+
 // ============================================================================
 // AgentSessionWrapper
 // Wraps one spawned rpc-dialect engine process (`omp --mode rpc-ui`,
 // `pi --mode rpc`) with the interface the rest of the app expects (same
 // command surface pi-web's in-process wrapper offered).
 // ============================================================================
-
-/** Engine facts a wrapper needs beyond the live process: the CLI descriptor
- * (command gating, host-tool/subagent availability) and how to rebuild the
- * launch for an in-place restart (`reload`). */
+/** Engine facts a wrapper needs beyond the live process. */
 export interface WrapperEngineContext {
   rpcUi: RpcUiSpawn;
   /** Engine name for user-facing messages ("omp", "pi"). */
   label: string;
-  /** Rebuilds the launch for a restart; "" means start a fresh session. */
-  relaunch: (sessionFile: string) => RpcProcessLaunch;
+  /** Profile already used to create this process, if any. */
+  initialProfile?: LocalModelProfileLaunch;
+  initialResolution?: ResolvedLocalModelProfile;
+  /** Rebuilds a launch. A profile is applied only to this child process. */
+  relaunch: (sessionFile: string, profile?: LocalModelProfileLaunch) => RpcProcessLaunch;
 }
 
 export class AgentSessionWrapper {
@@ -429,14 +485,16 @@ export class AgentSessionWrapper {
   private unsubscribeFrames: (() => void) | null = null;
   private initPromise: Promise<void> | null = null;
   private restarting = false;
-  private mcpListWaiter: { resolve: (text: string) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   private _alive = true;
+  private mcpListWaiter: { resolve: (text: string) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   /** Host tools the web UI registered via set_host_tools (agent-callable). */
   private hostToolNames: Set<string> = new Set();
+  private hostTools: Array<Record<string, unknown>> = [];
   /** host_tool_call ids awaiting a host_tool_result from the browser. */
   private pendingHostTools: Map<string, AgentEvent> = new Map();
   /** URI schemes the web UI registered via set_host_uri_schemes. */
   private hostUriSchemes: Map<string, { writable?: boolean }> = new Map();
+  private hostUriSchemeEntries: Array<Record<string, unknown>> = [];
   /** host_uri_request ids awaiting a host_uri_result from the browser. */
   private pendingHostUris: Map<string, AgentEvent> = new Map();
   /** Watches this session's activity and keeps the composer-attached plan
@@ -445,10 +503,13 @@ export class AgentSessionWrapper {
   private planKeeper: PlanKeeper | null = null;
   /** Resolves once an in-flight destroyAndWait finishes; null when idle. Read
    * by startRpcSession so a replacement spawn awaits the old child's exit. */
+  /** Resolves once an in-flight destroy finishes; null when idle. */
   destroyPromise: Promise<void> | null = null;
   private _sessionId = "";
   private _sessionFile = "";
   private _sessionName: string | undefined;
+  private localProfileLaunch: LocalModelProfileLaunch | undefined;
+  private localProfileResolution: ResolvedLocalModelProfile | undefined;
   private proc: RpcProcess;
   readonly cwd: string;
 
@@ -460,6 +521,13 @@ export class AgentSessionWrapper {
     this.proc = proc;
     this.cwd = cwd;
     this.engine = engine;
+    this.localProfileLaunch = engine.initialProfile;
+    this.localProfileResolution = engine.initialResolution;
+  }
+
+  /** The smallest local profile is deliberately limited to its two OMP tools. */
+  private hostToolsForCurrentProfile() {
+    return this.localProfileLaunch?.profileId === "minimal" ? [] : [...this.hostTools, ...SERVER_HOST_TOOLS];
   }
 
   get sessionId(): string {
@@ -500,6 +568,55 @@ export class AgentSessionWrapper {
     return this.isAlive() && (this.promptRunning || this.streaming || this.compacting || this.bashRunning);
   }
 
+  /** The profile actually launched for this live wrapper, for the settings API.
+   * Undefined means the session predates profile tracking or is non-local. */
+  localModelProfileApplication(): { provider: string; modelId: string; profileId: PromptProfileId } | undefined {
+    const resolution = this.localProfileResolution;
+    return resolution ? { provider: resolution.provider, modelId: resolution.modelId, profileId: resolution.profile.id } : undefined;
+  }
+
+  private localProfileNeedsRestart(next: LocalModelProfileLaunch): boolean {
+    const current = this.localProfileLaunch;
+    if ((current?.profileId ?? "full") !== next.profileId) return true;
+    if (next.profileId === "full") return false;
+    return current?.systemPromptPath !== next.systemPromptPath || current?.env?.PI_CONFIG_FILES !== next.env?.PI_CONFIG_FILES;
+  }
+
+  /** Resolve a model-specific profile and, while idle, restart this same wrapper
+   * before another provider call. An active provider/tool operation is never killed. */
+  async synchronizeLocalModelProfile(model?: OmpModel): Promise<void> {
+    // Automatic Local-only retries stay in one OMP process; its frozen envelope
+    // profile must not widen when the active primary/fallback changes.
+    if (readLocalRoutingIntent(this._sessionId).enabled) return;
+    const activeModel = model ?? (await this.proc.sendCommand<RpcSessionState>({ type: "get_state" })).model;
+    if (!activeModel) return;
+    const resolution = resolveLocalModelPromptProfile({
+      provider: activeModel.provider,
+      modelId: activeModel.id,
+      contextWindow: activeModel.contextWindow,
+      maxTokens: activeModel.maxTokens,
+    });
+    const next = materializeLocalModelProfile(resolution);
+    if (!this.localProfileNeedsRestart(next)) {
+      this.localProfileLaunch = next;
+      this.localProfileResolution = resolution;
+      return;
+    }
+    if (this.isRunning()) {
+      throw new WebRpcError("Wait for the current provider or tool operation to finish before changing its prompt profile.", "session_busy");
+    }
+    await this.restart(next);
+    this.localProfileLaunch = next;
+    this.localProfileResolution = resolution;
+  }
+
+  /** Apply a persisted routing-overlay change only when this wrapper is idle. */
+  async restartForRouting(): Promise<boolean> {
+    if (this.isRunning()) return false;
+    await this.restart();
+    return true;
+  }
+
   start(): void {
     this.unsubscribeFrames = this.proc.onFrame((frame) => this.handleFrame(frame));
     this.resetIdleTimer();
@@ -523,12 +640,11 @@ export class AgentSessionWrapper {
     if (this.engine.rpcUi.subagentEvents) {
       await this.proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
     }
-    // Server-implemented host tools are available from the first turn, no
-    // browser needed; a later UI set_host_tools re-sends them merged. Older
-    // omp builds without host tools degrade silently; engines without the
-    // host-tool surface (pi) are never asked.
+    // Publish host tools before the first turn. Minimal profiles publish an
+    // empty set to clear registrations retained by a resumed engine session;
+    // engines without this surface are never asked.
     if (this.engine.rpcUi.hostTools) {
-      await this.proc.sendCommand({ type: "set_host_tools", tools: [...SERVER_HOST_TOOLS] }).catch(() => {});
+      await this.proc.sendCommand({ type: "set_host_tools", tools: this.hostToolsForCurrentProfile() }).catch(() => {});
     }
     const state = await this.proc.sendCommand<RpcSessionState>({ type: "get_state" });
     this.applyIdentity(state);
@@ -1284,16 +1400,12 @@ export class AgentSessionWrapper {
     return this._sessionId;
   }
 
-  /** Full restart of the child process against the same session file. This is
-   * Cody's `reload`: extensions, skills, prompts, and tools are rediscovered
-   * on boot, matching a fresh CLI launch. */
-  private async restart(): Promise<void> {
+  /** Full restart of the child process against the same session file. */
+  private async restart(profile: LocalModelProfileLaunch | undefined = this.localProfileLaunch): Promise<void> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     const sessionFile = this._sessionFile;
     const resumable = !!sessionFile && existsSync(sessionFile);
     const old = this.proc;
-    // Stays true for the whole restart so send() rejects commands that would
-    // otherwise hit the disposed or half-built child.
     this.restarting = true;
     this.unsubscribeFrames?.();
     try {
@@ -1310,7 +1422,7 @@ export class AgentSessionWrapper {
 
       const proc = new RpcProcess({
         cwd: this.cwd,
-        launch: this.engine.relaunch(resumable ? sessionFile : ""),
+        launch: this.engine.relaunch(resumable ? sessionFile : "", profile),
         onExit: ({ stderrTail }) => {
           if (this.proc === proc) this.handleProcessExit(stderrTail);
         },
@@ -1320,21 +1432,21 @@ export class AgentSessionWrapper {
       try {
         const ready = await proc.waitReady(READY_TIMEOUT_MS);
         await proc.negotiateProtocol(ready);
-        // The replacement process starts with subscriptions disabled; restore
-        // the live roster/transcript event stream before reading its state.
-        // Engines without the subagent surface (pi) are never asked.
         if (this.engine.rpcUi.subagentEvents) {
           await proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
+        }
+        if (this.engine.rpcUi.hostTools) {
+          await proc.sendCommand({ type: "set_host_tools", tools: this.hostToolsForCurrentProfile() }).catch(() => {});
+          if (this.hostUriSchemeEntries.length) {
+            await proc.sendCommand({ type: "set_host_uri_schemes", schemes: this.hostUriSchemeEntries }).catch(() => {});
+          }
         }
         const state = await proc.sendCommand<RpcSessionState>({ type: "get_state" });
         this.applyIdentity(state);
       } catch (error) {
-        // Never leave the replacement running with nobody reading its frames.
         this.unsubscribeFrames?.();
         this.unsubscribeFrames = null;
         void proc.dispose();
-        // The wrapper has no usable child left; drop it from the registry so the
-        // next request starts a fresh session instead of reusing a corpse.
         this.destroy();
         throw error;
       }
@@ -1429,7 +1541,15 @@ export class AgentSessionWrapper {
 
       case "set_model": {
         const { provider, modelId } = command as { provider: string; modelId: string };
+        const localSelection = validateLocalRoutingModelSelection(this._sessionId, provider, modelId);
+        if (!localSelection.allowed) throw new WebRpcError(localSelection.reason, "local_routing_forbidden");
+        const targetResolution = resolveLocalModelPromptProfile({ provider, modelId });
+        const targetProfile = materializeLocalModelProfile(targetResolution);
+        if (this.localProfileNeedsRestart(targetProfile) && this.isRunning()) {
+          throw new WebRpcError("Wait for the current provider or tool operation to finish before changing its prompt profile.", "session_busy");
+        }
         const model = await this.proc.sendCommand<OmpModel>({ type: "set_model", provider, modelId });
+        await this.synchronizeLocalModelProfile(model);
         invalidateModelsCache();
         invalidateSessionListCache();
         return { id: model.id, provider: model.provider };
@@ -1449,12 +1569,18 @@ export class AgentSessionWrapper {
         if (this.bashRunning) {
           throw new Error("Cannot fork while a shell command is running");
         }
+        const parentSessionId = this._sessionId;
         const result = await this.proc.sendCommand<{ text: string; cancelled: boolean }>({
           type: "branch",
           entryId: command.entryId as string,
         });
         if (result.cancelled) return { cancelled: true };
         const newSessionId = await this.refreshIdentityAfterSessionChange();
+        // A branch keeps its parent resumable, so clone rather than move the
+        // frozen Local-only snapshot and account ownership sidecars.
+        copySessionLocalRouting(parentSessionId, newSessionId);
+        const owner = getSessionOwner(parentSessionId);
+        if (owner) setSessionOwner(newSessionId, owner);
         return { cancelled: false, newSessionId };
       }
 
@@ -1558,26 +1684,17 @@ export class AgentSessionWrapper {
 
       case "set_host_tools": {
         const tools = Array.isArray(command.tools) ? command.tools as Array<{ name?: unknown; [key: string]: unknown }> : [];
-        // A server tool name in the UI's list would shadow the server
-        // implementation — the server one wins.
         const valid = tools.filter((t) => typeof t.name === "string" && t.name && !SERVER_HOST_TOOL_NAMES.has(t.name as string));
         this.hostToolNames = new Set(valid.map((t) => t.name as string));
-        // Server-implemented tools ride every registration: omp replaces the
-        // whole roster per set_host_tools, so a UI re-register (SSE
-        // reconnect) must never drop them. Engines without the host-tool
-        // surface (pi) accept the registration locally but are never told —
-        // they could not call the tools anyway.
+        this.hostTools = valid;
         if (this.engine.rpcUi.hostTools) {
-          await this.proc.sendCommand({ type: "set_host_tools", tools: [...valid, ...SERVER_HOST_TOOLS] });
+          await this.proc.sendCommand({ type: "set_host_tools", tools: this.hostToolsForCurrentProfile() });
         }
         return null;
       }
 
       case "host_tool_result": {
         if (typeof command.id === "string") this.pendingHostTools.delete(command.id);
-        // Browser-answered host tools can carry big payloads too (a UI
-        // screenshot, a file read): guard the same way, keeping the id, so an
-        // undeliverable answer still settles the call.
         this.sendHostToolResult(command as RpcFrame);
         return null;
       }
@@ -1590,6 +1707,7 @@ export class AgentSessionWrapper {
             this.hostUriSchemes.set(entry.scheme, { writable: entry.writable === true });
           }
         }
+        this.hostUriSchemeEntries = schemes;
         if (this.engine.rpcUi.hostTools) {
           await this.proc.sendCommand({ type: "set_host_uri_schemes", schemes });
         }
@@ -1693,6 +1811,20 @@ function getLocks(): Map<string, Promise<{ session: EngineSession; realSessionId
 
 export function getRpcSession(sessionId: string): EngineSession | undefined {
   return getRegistry().get(sessionId);
+}
+
+export function getLocalModelProfileApplication(sessionId: string): { provider: string; modelId: string; profileId: PromptProfileId } | undefined {
+  const session = getRegistry().get(sessionId);
+  return session instanceof AgentSessionWrapper ? session.localModelProfileApplication() : undefined;
+}
+
+/** Restart after a routing preference change only if no provider/tool work runs. */
+export async function restartSessionForRouting(sessionId: string): Promise<{ restarted: boolean; active: boolean }> {
+  const session = getRegistry().get(sessionId);
+  if (!(session instanceof AgentSessionWrapper)) return { restarted: false, active: false };
+  if (session.isRunning()) return { restarted: false, active: true };
+  await session.restartForRouting();
+  return { restarted: true, active: false };
 }
 
 export function getRunningRpcSessionIds(): string[] {
@@ -1820,16 +1952,8 @@ async function startEngineSession(
 
 /**
  * Get or create the omp RPC process for the given session.
- * For new sessions (sessionFile === ""), omp generates its own id.
- * Pass toolNames to pre-configure the builtin toolset of a NEW session
- * (empty array = all tools disabled); ignored when resuming.
- *
- * When the active engine is not omp (it supplies `createSession`), the spawn
- * branches to that engine's own session implementation: `sessionFile`,
- * `toolNames` and `advisor` are omp-only and ignored, and `engineSessionId`
- * carries the Cody session id to resume ("" mints a brand-new one, the way
- * `sessionFile: ""` does for omp). It defaults to `sessionId`, which is right
- * for every caller that resumes an existing session by id.
+ * For a new session (`sessionFile === ""`), omp generates its own id.
+ * `profileTarget` is applied before its first provider request.
  */
 export async function startRpcSession(
   sessionId: string,
@@ -1838,15 +1962,13 @@ export async function startRpcSession(
   toolNames?: string[],
   advisor = false,
   engineSessionId?: string,
+  profileTarget?: ModelProfileTarget,
 ): Promise<{ session: EngineSession; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
 
   const existing = registry.get(sessionId);
   if (existing?.isAlive()) return { session: existing, realSessionId: sessionId };
-  // A wrapper whose omp child is still flushing/exiting must fully dispose
-  // before a replacement spawns — two children touching the same .jsonl would
-  // race on resume/delete/archive.
   if (existing?.destroyPromise) await existing.destroyPromise;
 
   const inflight = locks.get(sessionId);
@@ -1860,28 +1982,31 @@ export async function startRpcSession(
     if (createEngineSession) {
       return startEngineSession(createEngineSession, engineSessionId ?? sessionId, cwd);
     }
-    // The wrapper needs the process and the process's onExit needs the wrapper;
-    // the holder breaks that cycle (onExit only fires once the child dies).
+    const initialResolution = profileTarget ? resolveLocalModelPromptProfile(profileTarget) : undefined;
+    const initialProfile = initialResolution ? materializeLocalModelProfile(initialResolution) : undefined;
+    const launchProfile = launchWithLocalRouting(initialProfile, sessionId);
     const holder: { wrapper?: AgentSessionWrapper } = {};
     const proc = new RpcProcess({
       cwd,
-      launch: buildEngineRpcLaunch(harness, { cwd, sessionFile, toolNames, advisor }),
+      launch: buildEngineRpcLaunch(harness, { cwd, sessionFile, toolNames, advisor, profile: launchProfile }),
       onExit: ({ stderrTail }) => holder.wrapper?.handleProcessExit(stderrTail),
     });
     const created = new AgentSessionWrapper(proc, cwd, {
-      // Non-null: buildEngineRpcLaunch above already threw for descriptor-less
-      // engines, so this wrapper only exists for rpc-dialect harnesses.
       rpcUi: harness.rpcUi!,
       label: harness.binaryName,
-      // Restart (`reload`) re-resolves the binary so an engine updated
-      // mid-session restarts onto the new install; presets/advisor are
-      // resume-only concerns and never apply to a restart.
-      relaunch: (file) => buildEngineRpcLaunch(harness, { cwd, sessionFile: file }),
+      initialProfile: launchProfile,
+      initialResolution,
+      relaunch: (file, profile) => buildEngineRpcLaunch(harness, {
+        cwd,
+        sessionFile: file,
+        profile: launchWithLocalRouting(profile, holder.wrapper?.sessionId || sessionId),
+      }),
     });
     holder.wrapper = created;
     created.start();
     try {
       await created.waitUntilReady();
+      if (!profileTarget) await created.synchronizeLocalModelProfile();
     } catch (error) {
       // Await the child's full exit before the `finally` releases the startup
       // lock: a fire-and-forget destroy() would let a retry spawn a second
@@ -1905,6 +2030,13 @@ export async function startRpcSession(
     }
 
     const realSessionId = created.sessionId;
+    if (sessionId !== realSessionId) {
+      // New OMP sessions receive their durable id only after launch. This is a
+      // rename, unlike a fork: the temporary id has no resumable parent.
+      renameSessionOwner(sessionId, realSessionId);
+      renameSessionLocalRouting(sessionId, realSessionId);
+      aliasDisplaySession(sessionId, realSessionId);
+    }
     created.onDestroy(() => {
       if (registry.get(created.sessionId) === created) registry.delete(created.sessionId);
       if (registry.get(realSessionId) === created) registry.delete(realSessionId);

@@ -12,6 +12,7 @@ import { setSessionOwner } from "@/lib/auth/session-owners";
 import { getHarness } from "@/lib/harness";
 import { engineSessionTitle, getEngineSession, upsertEngineSession } from "@/lib/harness/engine-sessions";
 import { EngineCommandError } from "@/lib/harness/errors";
+import { configuredLocalRoutingModels, renameSessionLocalRouting, setSessionLocalOnly } from "@/lib/local-model-routing";
 
 function newSessionErrorResponse(error: unknown) {
   if (error instanceof SyntaxError) {
@@ -48,9 +49,13 @@ export async function POST(req: Request) {
     }
 
     // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
-    const { provider, modelId, toolNames, thinkingLevel, advisor, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: string; advisor?: boolean; [key: string]: unknown };
+    const { provider, modelId, toolNames, thinkingLevel, advisor, localOnly, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: string; advisor?: boolean; localOnly?: boolean; [key: string]: unknown };
     if (typeof promptCommand.type !== "string" || !promptCommand.type.trim()) {
       return NextResponse.json({ error: "command type is required", code: "command_type_required" }, { status: 400 });
+    }
+
+    if (localOnly !== undefined && typeof localOnly !== "boolean") {
+      return NextResponse.json({ error: "localOnly must be a boolean", code: "invalid_local_routing" }, { status: 400 });
     }
 
     // Must be unique per request: startRpcSession coalesces concurrent callers
@@ -66,6 +71,24 @@ export async function POST(req: Request) {
     // the engine mints one, exactly as `sessionFile: ""` means "new" for omp.
     const harness = getHarness();
     const engineMode = typeof harness.createSession === "function";
+    if (localOnly === true && harness.id !== "omp") {
+      return NextResponse.json({ error: "Local-only routing is available only for omp sessions.", code: "local_routing_unsupported" }, { status: 400 });
+    }
+    const localIntent = localOnly === true ? setSessionLocalOnly(tempKey, true) : null;
+    const localEnvelope = localIntent?.envelope;
+    if (localIntent && !localEnvelope) throw new Error("Local-only routing did not produce a safe context envelope.");
+    const selectedForLaunch = localIntent?.primary ?? (provider && modelId ? { provider, modelId } : undefined);
+    const configuredTarget = selectedForLaunch
+      ? configuredLocalRoutingModels().models.find((model) => model.provider === selectedForLaunch.provider && model.modelId === selectedForLaunch.modelId)
+      : undefined;
+    const profileTarget = selectedForLaunch
+      ? {
+        ...selectedForLaunch,
+        ...(localEnvelope
+          ? { contextWindow: localEnvelope.contextWindow, maxTokens: localEnvelope.maxTokens }
+          : configuredTarget ? { contextWindow: configuredTarget.contextWindow, maxTokens: configuredTarget.maxTokens } : {}),
+      }
+      : undefined;
     const { session, realSessionId } = await startRpcSession(
       tempKey,
       "",
@@ -73,7 +96,9 @@ export async function POST(req: Request) {
       toolNames,
       advisor === true,
       engineMode ? "" : undefined,
+      profileTarget,
     );
+    if (localIntent) renameSessionLocalRouting(tempKey, realSessionId);
 
     // Keep the files-route allowed-roots cache (see app/api/files/[...path]/route.ts)
     // in sync so the new cwd is immediately readable via /api/files. Without this,
@@ -108,8 +133,8 @@ export async function POST(req: Request) {
       // Apply pre-selected model before sending the prompt. Both commands are
       // omp-only (chatExtras); a turn-based engine answers them "unsupported",
       // so never send them there.
-      if (provider && modelId) {
-        await session.send({ type: "set_model", provider, modelId });
+      if (selectedForLaunch) {
+        await session.send({ type: "set_model", provider: selectedForLaunch.provider, modelId: selectedForLaunch.modelId });
       }
 
       // Apply pre-selected thinking level before sending the prompt

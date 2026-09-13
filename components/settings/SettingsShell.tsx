@@ -341,22 +341,25 @@ export function SettingsShell({ request, cwd, sessionId, capabilities = ALL_CAPA
 
   const leaveReasons = busy.reasons();
   const signingIn = leaveReasons.some((reason) => /sign[- ]?in|log[- ]?in/i.test(reason));
+    const unsavedChanges = leaveReasons.includes("Unsaved changes");
   const busyGuard = (
     <ConfirmDialog
-      open={pendingLeave !== null}
-      onOpenChange={(open) => { if (!open) setPendingLeave(null); }}
-      title={signingIn ? "Leave while sign-in is in progress?" : "Leave while work is in progress?"}
-      description={`${leaveReasons.join(", ") || "Something"} is still running. ${pendingLeave === "pop" ? "Going back" : "Closing Settings"} now interrupts it.`}
-      confirmLabel="Leave"
-      cancelLabel="Stay"
-      danger
-      onConfirm={() => {
-        const leaving = pendingLeave;
-        setPendingLeave(null);
-        if (leaving === "pop") popOneLevel();
-        else callbacks.onClose();
-      }}
-    />
+          open={pendingLeave !== null}
+          onOpenChange={(open) => { if (!open) setPendingLeave(null); }}
+          title={unsavedChanges ? "Discard unsaved changes?" : signingIn ? "Leave while sign-in is in progress?" : "Leave while work is in progress?"}
+          description={unsavedChanges
+            ? `You have unsaved changes. ${pendingLeave === "pop" ? "Going back" : "Closing Settings"} now discards them.`
+            : `${leaveReasons.join(", ") || "Something"} is still running. ${pendingLeave === "pop" ? "Going back" : "Closing Settings"} now interrupts it.`}
+          confirmLabel="Leave"
+          cancelLabel="Stay"
+          danger
+          onConfirm={() => {
+            const leaving = pendingLeave;
+            setPendingLeave(null);
+            if (leaving === "pop") popOneLevel();
+            else callbacks.onClose();
+          }}
+        />
   );
 
   if (isMobile) {

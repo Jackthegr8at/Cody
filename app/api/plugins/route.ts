@@ -12,6 +12,7 @@ import type {
   PluginScope,
   PluginsResponse,
 } from "@/lib/api-types";
+import { refreshPromptAssetInventory } from "@/lib/prompt-asset-index";
 
 export const dynamic = "force-dynamic";
 
@@ -187,15 +188,15 @@ async function readPlugins(cwd: string): Promise<PluginsResponse> {
         packages.push(await toNpmPackageInfo(plugin));
       }
       for (const plugin of list.marketplace ?? []) {
-        const info = await toMarketplacePackageInfo(plugin);
         if (plugin.shadowedBy) {
           diagnostics.push({
             type: "warning",
             source: plugin.id,
             message: `Shadowed by a ${plugin.shadowedBy}-scoped install of the same plugin.`,
           });
+          continue;
         }
-        packages.push(info);
+        packages.push(await toMarketplacePackageInfo(plugin));
       }
       for (const pkg of packages) {
         totals.extensions += pkg.counts.extensions;
@@ -211,6 +212,7 @@ async function readPlugins(cwd: string): Promise<PluginsResponse> {
     });
   }
 
+  if (diagnostics.length === 0) refreshPromptAssetInventory(cwd, packages);
   return { packages, totals, diagnostics };
 }
 

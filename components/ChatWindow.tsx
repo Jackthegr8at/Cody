@@ -1,5 +1,6 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
+import { CompactionProgress } from "@/components/CompactionProgress";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ChevronDown, TriangleAlert, X } from "lucide-react";
 import type { ActivityDisplayMode, AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, ImageContent, SessionInfo, SessionTreeNode, TextContent, ToolCallContent, ToolResultMessage } from "@/lib/types";
@@ -739,11 +740,11 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelSelectable, modelsLoading, modelError, modelThinkingLevels, thinkingLevel, thinkingLevelPending, thinkingLevelTarget, fastModeEnabled, fastModeActive, fastModePending, fastModeUnavailable, promptCapabilities, steeringSupported,
     liveModelMeta, smartPinnedModel, availableModes, currentModeId,
     retryInfo, contextUsage, forkingEntryId,
-    isCompacting, compactResult, displayModel: displayModelValue, sessionStats,
+    isCompacting, compactResult, compactionStatus, displayModel: displayModelValue, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
     notices, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     permissionRequests, respondToPermission,
-    isAutoModelSelection, autoModelSwitch, modelSwitchPending,
+    isAutoModelSelection, autoModelSwitch, modelSwitchPending, localOnly, selectLocalOnly,
     agentPhase, streamDegraded, streamAlert, dismissStreamAlert, retryEventStream, activeGoal, activePlan,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases, planOverlay,
     isNew,
@@ -1133,6 +1134,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       capabilities={capabilities}
       engine={engine}
       model={displayModelValue}
+      sessionId={session?.id ?? null}
       activeModels={activeModels}
       isAutoModelSelection={smartModelCapable && isAutoModelSelection}
       modelNames={modelNames}
@@ -1142,6 +1144,8 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       modelsRefreshKey={modelsRefreshKey}
       onModelChange={canChangeModel ? handleModelChange : undefined}
       onSelectSmartModel={smartModelCapable && isNew ? selectSmartModel : undefined}
+      localOnly={localOnly}
+      onSelectLocalOnly={selectLocalOnly}
       autoModelSwitch={autoModelSwitch}
       modelSwitchPending={modelSwitchPending}
       modelChangeWhileStreaming={modelChangeWhileStreaming}
@@ -1548,6 +1552,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
           }}
         >
           <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
+            <CompactionProgress status={compactionStatus} />
             <ComposerPanels
               todoPhases={todoPhases}
               planOverlay={planOverlay}

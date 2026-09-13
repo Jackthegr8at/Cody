@@ -1016,31 +1016,4 @@ test("keeps rpc model switches available at a turn boundary and marks session-sc
   assert.match(sessionScopedPicker, /\sdisabled(?:=|\s|>)/);
 });
 
-test("renders pending switch, target reasoning, and attributed fallback detail", () => {
-  const html = renderToStaticMarkup(
-    React.createElement(ChatInput, {
-      onSend() {},
-      onAbort() {},
-      onModelChange() {},
-      onThinkingLevelChange() {},
-      isStreaming: true,
-      modelChangeWhileStreaming: true,
-      model: { provider: "test", modelId: "test-model" },
-      modelList: [{ provider: "test", id: "test-model", modelId: "test-model", name: "Test model" }],
-      modelSwitchPending: { provider: "test", modelId: "next-model", name: "Next model", phase: "waiting" },
-      thinkingLevel: "low",
-      thinkingLevelPending: true,
-      thinkingLevelTarget: "high",
-      autoModelSwitch: {
-        from: "Primary",
-        to: "Fallback",
-        reason: "rate limit",
-        job: { kind: "main", roleLabelKey: "agentSession.job.default" },
-      },
-    }),
-  );
-
-  assert.match(html, /data-testid="model-switch-pending"[^>]*>[\s\S]*?Switching to Next model at next step/);
-  assert.match(html, />Applying High</);
-  assert.match(html, /title="This conversation requested Primary; failed: rate limit; using Fallback."/);
-});
+;

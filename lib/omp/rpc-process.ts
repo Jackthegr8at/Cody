@@ -58,13 +58,9 @@ export interface RpcProcessLaunch {
   label?: string;
   /** Complete argv (mode flag included) — replaces the omp default. */
   args: string[];
-  /**
-   * "ready-frame": the child prints `{type:"ready"}` before accepting
-   * commands (omp). "first-response": the child prints nothing at startup
-   * and readiness is the response to an immediately-sent `get_state` — the
-   * command waits in the pipe buffer until the child attaches its stdin
-   * reader (pi).
-   */
+  /** Per-child additions, such as a content-addressed prompt overlay. */
+  env?: Record<string, string>;
+  /** How this engine signals readiness. */
   readiness: "ready-frame" | "first-response";
 }
 
@@ -133,11 +129,9 @@ export class RpcProcess {
 
     this.child = this.spawnProcess(bin, args, {
       cwd: options.cwd,
-      // Cody's environment plus the provider keys saved in Settings, then the
-      // caller's own additions (the adapter's engineEnv). The same merge every
-      // engine child gets, so a key typed into the panel works here exactly
-      // as it does over ACP or in a Cody terminal.
-      env: engineChildEnv(options.env),
+      // Cody provider credentials, then launch-specific profile/routing data,
+      // then an explicit process override supplied by the caller.
+      env: engineChildEnv({ ...(options.launch?.env ?? {}), ...(options.env ?? {}) }),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       // On POSIX, omp launches grandchildren (LSP servers, extension subprocesses). Run the

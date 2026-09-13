@@ -12,6 +12,7 @@ import {
   withDistillSlot,
 } from "@/lib/distill/runner";
 import { isRecord } from "@/lib/type-guards";
+import { isSessionLocalOnly } from "@/lib/local-model-routing";
 
 /**
  * POST /api/distill — one summary, streamed.
@@ -119,6 +120,10 @@ export async function POST(request: Request) {
 
   if (!canAccessSession(body.sessionId, user)) {
     return jsonError("Session not found", 404, "session_not_found");
+  }
+
+  if (isSessionLocalOnly(body.sessionId)) {
+    return errorEvent("unsupported", "Distill is disabled for Local-only sessions; no cloud fallback will be used.");
   }
 
   const engine = distillEngine();

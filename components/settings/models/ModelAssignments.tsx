@@ -15,17 +15,24 @@
  * an engine with no roles surface can still have a Distill view and
  * nothing else.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSettingsShell } from "../shell-context";
+import { useI18n } from "@/lib/i18n";
+import { setSettingsRouteData, useSettingsRoute } from "@/hooks/useSettingsData";
+import { OMP_ENGINE_ID } from "@/components/SettingsTabs";
+import { LocalModelProfileCard, type LocalModelProfileBody, type PromptProfileOverride } from "@/components/LocalModelProfile";
+import { toast } from "@/components/ui/toast";
 import type { ModelCatalogHandle } from "@/hooks/useModelCatalog";
 import { ModelPlanPanel } from "../ModelPlanPanel";
 import { RetryFallbackPanel, type RuntimeModelEntry } from "../RetryFallbackPanel";
 import { DistillAssignment } from "./DistillAssignment";
 import { ModelRoles, type RoleModelOption } from "./ModelRoles";
+import { LocalRoutingAssignment, useLocalRoutingConfig } from "./LocalRoutingAssignment";
 
-type View = "roles" | "retry" | "plan" | "distill";
+type View = "local" | "roles" | "retry" | "plan" | "distill";
 
-const VIEWS: { id: View; label: string }[] = [
+const VIEWS: { id: View; label?: string }[] = [
+  { id: "local" },
   { id: "roles", label: "Roles" },
   { id: "retry", label: "Retry & fallback" },
   { id: "plan", label: "Plan" },
@@ -38,14 +45,16 @@ const VIEWS: { id: View; label: string }[] = [
 function viewForHighlight(highlight: string | null): View | null {
   if (highlight === null) return null;
   if (highlight.startsWith("schema-retry.") || highlight === "retry-transient-errors") return "retry";
+  if (highlight === "local-model-prompt-profile") return "local";
   if (highlight === "distill-chain") return "distill";
   return null;
 }
 
 export function ModelAssignments({ catalog, panelId, engineViews, distillView }: { catalog: ModelCatalogHandle; panelId: string; engineViews: boolean; distillView: boolean }) {
-  const { highlight } = useSettingsShell();
+  const { highlight, engine } = useSettingsShell();
+    const { t } = useI18n();
   const [view, setView] = useState<View>(viewForHighlight(highlight) ?? "roles");
-  // A jump to a setting (search result, "Also under" chip) must land on the
+  const { available: localRoutingAvailable } = useLocalRoutingConfig(engine?.id === OMP_ENGINE_ID);
   // view that renders it, whichever view was open before.
   useEffect(() => {
     const target = viewForHighlight(highlight);
@@ -54,7 +63,7 @@ export function ModelAssignments({ catalog, panelId, engineViews, distillView }:
 
   // Distill appears the moment its route says the engine supports it, so
   // the segmented control can be a single tab on an engine with no roles.
-  const views = VIEWS.filter((entry) => (entry.id === "distill" ? distillView : engineViews));
+  const views = VIEWS.filter((entry) => entry.id === "local" ? localRoutingAvailable : entry.id === "distill" ? distillView : engineViews);
   const active = views.some((entry) => entry.id === view) ? view : views[0]?.id ?? null;
 
   const roleOptions: RoleModelOption[] = catalog.rows
@@ -67,6 +76,32 @@ export function ModelAssignments({ catalog, panelId, engineViews, distillView }:
       ...(row.state === "instanceHidden" || row.state === "myHidden" ? { hidden: true } : {}),
     }));
   const visibleModels: RuntimeModelEntry[] = roleOptions.filter((model) => !model.hidden);
+    const profileModels = useMemo(() => roleOptions.filter((model) => !model.hidden).map(({ provider, id, name }) => ({ provider, id, name })), [roleOptions]);
+    const [profileModelKey, setProfileModelKey] = useState("");
+    useEffect(() => {
+      if (profileModels.some((model) => `${model.provider}/${model.id}` === profileModelKey)) return;
+      setProfileModelKey(profileModels[0] ? `${profileModels[0].provider}/${profileModels[0].id}` : "");
+    }, [profileModels, profileModelKey]);
+  const profileRouteUrl = engine?.id === OMP_ENGINE_ID
+    ? profileModelKey
+      ? `/api/local-model-profile?provider=${encodeURIComponent(profileModelKey.slice(0, profileModelKey.indexOf("/")))}&modelId=${encodeURIComponent(profileModelKey.slice(profileModelKey.indexOf("/") + 1))}`
+      : "/api/local-model-profile"
+    : null;
+  const profileRoute = useSettingsRoute<LocalModelProfileBody>(profileRouteUrl, { enabled: engine?.id === OMP_ENGINE_ID, ttlMs: 60_000 });
+  const [profileSaving, setProfileSaving] = useState(false);
+    const saveProfile = (scope: "global" | "model", value: PromptProfileOverride, selected?: { provider: string; modelId: string }) => {
+      setProfileSaving(true);
+      void (async () => {
+        const payload = scope === "global" ? { scope, value } : { scope, value, provider: selected?.provider, modelId: selected?.modelId };
+        const response = await fetch("/api/local-model-profile", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+        const data = await response.json().catch(() => ({})) as LocalModelProfileBody & { error?: string };
+        if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+        const nextData = data.selection ? data : { ...data, ...(profileRoute.data?.selection ? { selection: profileRoute.data.selection } : {}) };
+              if (profileRouteUrl) setSettingsRouteData(profileRouteUrl, nextData);
+        toast.success(t("localModelProfile.saved"));
+      })().catch((error: unknown) => toast.error(t("localModelProfile.saveFailed"), error instanceof Error ? error.message : String(error)))
+        .finally(() => setProfileSaving(false));
+    };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
@@ -85,13 +120,32 @@ export function ModelAssignments({ catalog, panelId, engineViews, distillView }:
                 className="ui-focus-ring"
                 style={{ padding: "5px 12px", minHeight: 30, border: "none", borderRadius: "calc(var(--radius-control) - 2px)", background: selected ? "var(--bg-selected)" : "transparent", color: selected ? "var(--text)" : "var(--text-muted)", fontSize: 12, fontWeight: selected ? 600 : 500, cursor: "pointer", whiteSpace: "nowrap" }}
               >
-                {entry.label}
+                {entry.id === "local" ? t("localRouting.title") : entry.label}
               </button>
             );
           })}
         </div>
       )}
-      {active === "roles" && <ModelRoles models={roleOptions} panelId={panelId} />}
+      {active === "local" && <LocalRoutingAssignment panelId={panelId} />}
+      {profileRoute.data && active === "local" && (
+        <details style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", padding: "10px 12px" }}>
+          <summary style={{ cursor: "pointer", color: "var(--text)", fontSize: 12.5, fontWeight: 600 }}>
+            {t("localModelProfile.advanced")}
+          </summary>
+          <p style={{ margin: "8px 0 10px", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>
+            {t("localModelProfile.advancedHint")}
+          </p>
+          <LocalModelProfileCard
+            body={profileRoute.data}
+            models={profileModels}
+            selectedModelKey={profileModelKey}
+            onSelectedModelKeyChange={setProfileModelKey}
+            saving={profileSaving}
+            onChange={saveProfile}
+          />
+        </details>
+      )}
+            {active === "roles" && <ModelRoles models={roleOptions} panelId={panelId} />}
       {active === "retry" && <RetryFallbackPanel models={visibleModels} panelId={panelId} onOpenModelPlan={() => setView("plan")} />}
       {active === "plan" && <ModelPlanPanel />}
       {active === "distill" && <DistillAssignment models={roleOptions} panelId={panelId} />}

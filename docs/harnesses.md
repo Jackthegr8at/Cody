@@ -10,6 +10,10 @@ Protocol) or [Hermes](https://github.com/NousResearch/hermes-agent) as
 experimental engines today. New engines are added by implementing one adapter — the UI, accounts,
 terminals, git surface, files, checkpoints and themes all stay.
 
+## Direct Chat
+
+The first workspace panel, **Chat**, is a separate direct conversation rather than an agent engine: it uses a configured API-key endpoint where required or a keyless `auth:none` local endpoint, and does not start a harness or execute tools. Its browser-local history is scoped to the selected account and workspace, and optional context, skills, text or source files, and images are explicitly bounded. OAuth-only subscription credentials remain unavailable; capability controls such as reasoning and Fast appear only where supported.
+
 ## Picking an engine
 
 - **Onboarding**: on a fresh instance, the first admin sees a full-screen

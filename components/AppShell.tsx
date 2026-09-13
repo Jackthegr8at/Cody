@@ -14,7 +14,7 @@ import { BranchNavigator } from "./BranchNavigator";
 import { ThemePicker } from "./ThemePicker";
 import { TitleBar } from "./TitleBar";
 import { useDesktopShell } from "@/hooks/useDesktopShell";
-import { AppWindow, Check, Copy, ExternalLink, Files, GitBranch, History, Info, ListTodo, Menu, PanelLeft, ScrollText, Settings, Terminal, TriangleAlert } from "lucide-react";
+import { AppWindow, Check, Copy, ExternalLink, Files, GitBranch, History, Info, ListTodo, Menu, MessageCircle, PanelLeft, ScrollText, Settings, Terminal, TriangleAlert } from "lucide-react";
 import { formatApiCost, formatCompactNumber, formatPercent, usageToneColor } from "@/lib/format";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
@@ -51,6 +51,10 @@ const FileViewer = dynamic(() => import("./FileViewer").then((m) => m.FileViewer
   ssr: false,
   loading: () => <PanelLoadingFallback />,
 });
+const DirectChatPanel = dynamic(() => import("./DirectChatPanel").then((m) => m.DirectChatPanel), {
+  ssr: false,
+  loading: () => <PanelLoadingFallback />,
+});
 const TerminalPanel = dynamic(() => import("./TerminalPanel").then((module) => module.TerminalPanel), {
   ssr: false,
   loading: () => <PanelLoadingFallback />,
@@ -75,8 +79,8 @@ const PreviewPanel = dynamic(() => import("./PreviewPanel").then((module) => mod
 /** The tools of the right workspace panel, in tab order (pi-web parity:
  * Files | Git | Terminal | Tasks | Info). Update status lives in Settings ›
  * System, not in a panel. */
-type WorkspacePanelId = "file" | "git" | "terminal" | "preview" | "tasks" | "info";
-const WORKSPACE_PANEL_IDS: readonly WorkspacePanelId[] = ["file", "git", "terminal", "preview", "tasks", "info"];
+type WorkspacePanelId = "chat" | "file" | "git" | "terminal" | "preview" | "tasks" | "info";
+const WORKSPACE_PANEL_IDS: readonly WorkspacePanelId[] = ["chat", "file", "git", "terminal", "preview", "tasks", "info"];
 
 function isWorkspacePanelId(value: string | null): value is WorkspacePanelId {
   return (WORKSPACE_PANEL_IDS as readonly string[]).includes(value ?? "");
@@ -2036,6 +2040,7 @@ export function AppShell() {
         >
           {(() => {
             const panels: Array<{ id: WorkspacePanelId; icon: React.ReactNode; label: string; badge?: string | null }> = [
+              { id: "chat", icon: <MessageCircle size={15} aria-hidden="true" />, label: t("workspace.chat") },
               { id: "file", icon: <Files size={15} aria-hidden="true" />, label: t("workspace.files") },
               {
                 id: "git",
@@ -2114,6 +2119,14 @@ export function AppShell() {
           {/* Scrollable spacer: the panel toggle is position:fixed above the
               strip, so the last tab needs in-flow room to scroll clear of it. */}
           <div aria-hidden="true" style={{ flexShrink: 0, width: isMobile || isCoarsePointer ? 44 : 32 }} />
+        </div>
+        <div
+          id="workspace-chat-tool"
+          role="tabpanel"
+          aria-labelledby="workspace-chat-tab"
+          style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "chat" ? "flex" : "none", flexDirection: "column" }}
+        >
+          {mountedPanels.has("chat") && <DirectChatPanel cwd={activeCwd} active={rightPanelMode === "chat" && rightPanelOpen} onOpenProviders={() => openSettings("providers")} onOpenExtensions={() => openSettings("extensions")} />}
         </div>
 
         <div
