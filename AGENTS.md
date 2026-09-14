@@ -1687,6 +1687,23 @@ handled or safely ignored.
   "hit a usage limit or error" rather than borrowing another job's error.
   The echo of Cody's own `set_model` (`recentUserModelPicksRef`, 15s
   window) is never dressed up as an engine switch.
+- **A refusal is not a limit, and the switch message says which**
+  (`classifyFallbackReason`, hooks/session-control-scope.ts). The remembered
+  `auto_retry_start` error is classified into `refusal` (the model declined on
+  content-policy grounds: omp's stop detail is `refusal`/`sensitive`) or
+  `usage` (quota, rate limit, out of credits), and the notice, toast and
+  composer detail each use their own sentence. The two need opposite actions,
+  which is why one generic "hit a usage limit or error" was wrong: a quota
+  clears itself at the reset, while a refusal is PINNED for the rest of the
+  run — omp passes `pinFallback: classifierRefusal` and
+  `#maybeRestoreRetryFallbackPrimary` returns early on a pinned chain, so
+  `retry.fallbackRevertPolicy: cooldown-expiry` never reverts it and only a
+  manual re-pick returns to the original model. Refusal is matched FIRST
+  because a wrapped message can carry both, and mislabelling a refusal sends
+  the user to inspect a perfectly healthy quota. Unrecognized text stays
+  unclassified and the provider's own words are shown.
+  `hooks/fallback-reason.test.mjs` pins the precedence and the real Anthropic
+  refusal string.
 - **Live model and reasoning switches apply at the step boundary steering
   uses, never mid-stream.** omp's `steer` does not abort an in-flight
   provider stream either: it is delivered after the current assistant

@@ -134,6 +134,8 @@ interface Props {
     to: string;
     role?: string;
     reason?: string;
+    /** Classified reason; decides which sentence the detail toast uses. */
+    reasonKind?: "refusal" | "usage" | null;
     job?: { kind: "main" | "subagent"; subagentId?: string; agent?: string; roleLabelKey: string };
   } | null;
   /** RPC-dialect engines can queue a safe model switch while a turn is running. */
@@ -2857,14 +2859,21 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const autoSwitchJob = autoSwitchJobLabel === autoSwitchJobKey
     ? t("agentSession.job.default")
     : autoSwitchJobLabel;
-  const autoSwitchDetail = autoModelSwitch
-    ? t("chatInput.autoSwitchDetail", {
-        job: autoSwitchJob,
-        from: autoModelSwitch.from,
-        reason: autoModelSwitch.reason ?? t("chatInput.autoSwitchUnknownReason"),
-        to: autoModelSwitch.to,
-      })
-    : null;
+  // A refusal is not a limit: nothing is exhausted, waiting changes nothing,
+  // and the engine pins the session to the fallback — so the detail says to
+  // re-pick the model by hand instead of pointing at a healthy quota.
+  const autoSwitchDetail = autoModelSwitch == null
+    ? null
+    : autoModelSwitch.reasonKind === "refusal"
+      ? t("chatInput.autoSwitchDetailRefusal", { job: autoSwitchJob, from: autoModelSwitch.from, to: autoModelSwitch.to })
+      : autoModelSwitch.reasonKind === "usage"
+        ? t("chatInput.autoSwitchDetailUsage", { job: autoSwitchJob, from: autoModelSwitch.from, to: autoModelSwitch.to })
+        : t("chatInput.autoSwitchDetail", {
+            job: autoSwitchJob,
+            from: autoModelSwitch.from,
+            reason: autoModelSwitch.reason ?? t("chatInput.autoSwitchUnknownReason"),
+            to: autoModelSwitch.to,
+          });
 
   // Smart row on a LIVE session: there is no "auto" runtime state to fall
   // back into (the session already has a resolved model), so this reaches

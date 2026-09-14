@@ -167,3 +167,51 @@ export function fallbackAttributionForSubagentEvent(
     job: subagentJob(wrapper.id, subagents),
   };
 }
+
+/**
+ * Why the engine switched models, derived from the provider error the retry
+ * saga remembered (`auto_retry_start.errorMessage`).
+ *
+ * `retry_fallback_applied` carries only `{from, to, role}`, so every switch
+ * used to read as the same generic "hit a usage limit or error" — which
+ * conflates two situations a user acts on differently:
+ *
+ * - `refusal`: the model itself declined on content-policy grounds. Nothing is
+ *   exhausted, waiting changes nothing, and omp PINS the session to the
+ *   fallback for the rest of the run (a refusal is the model's decision, not a
+ *   route failure), so re-picking the original model by hand is the only way
+ *   back. Saying "usage limit" here sends the user to look at a quota that is
+ *   perfectly healthy.
+ * - `usage`: a quota or rate limit. It resolves on its own at the reset.
+ *
+ * Unrecognized text returns null and the raw provider message is shown, which
+ * is strictly better than guessing.
+ */
+export type FallbackReasonKind = "refusal" | "usage";
+
+const REFUSAL_PATTERNS = [
+  /\brefusal\b/i,
+  /reasoning_extraction/i,
+  /\bsensitive\b/i,
+  /terms of service/i,
+  /content polic/i,
+];
+
+const USAGE_PATTERNS = [
+  /usage limit/i,
+  /rate.?limit/i,
+  /\bquota\b/i,
+  /\b429\b/i,
+  /too many requests/i,
+  /out of credits/i,
+];
+
+export function classifyFallbackReason(reason: string | undefined): FallbackReasonKind | null {
+  if (!reason) return null;
+  // Refusal is checked first: a refusal message may also mention limits
+  // (provider blurb, "learn more" links), and misreading a refusal as a quota
+  // is the error that wastes the user's time.
+  if (REFUSAL_PATTERNS.some((pattern) => pattern.test(reason))) return "refusal";
+  if (USAGE_PATTERNS.some((pattern) => pattern.test(reason))) return "usage";
+  return null;
+}

@@ -42,6 +42,7 @@ import {
   type SmartModelProvenance,
 } from "@/hooks/session-model-provenance";
 import {
+  classifyFallbackReason,
   fallbackAttributionForRole,
   fallbackAttributionForSubagentEvent,
   isFastModeUnavailableError,
@@ -51,6 +52,7 @@ import {
   sameSessionControlScope,
   sessionControlScope,
   resolveThinkingSelector,
+  type FallbackReasonKind,
   type ModelFallbackAttribution,
   type ModelFallbackJob,
   type PendingModelSwitch,
@@ -457,6 +459,9 @@ export interface AutoModelSwitchInfo {
   to: string;
   role?: string;
   reason?: string;
+  /** Classified `reason`: a refusal needs a manual re-pick, a usage limit
+   * resolves itself at the reset. Null when the text is unrecognized. */
+  reasonKind?: FallbackReasonKind | null;
   job: AutoModelSwitchJob;
 }
 
@@ -484,9 +489,18 @@ function fallbackJobLabel(attribution: ModelFallbackAttribution): string {
 
 function fallbackAppliedMessage(attribution: ModelFallbackAttribution, from: string, to: string, reason: string | undefined): string {
   const job = fallbackJobLabel(attribution);
-  return reason
-    ? translate("agentSession.fallbackApplied", { job, from, to, reason })
-    : translate("agentSession.fallbackAppliedUnknownReason", { job, from, to });
+  // A refusal and a quota limit call for different actions, so they are said
+  // differently; anything unrecognized still shows the provider's own words.
+  switch (classifyFallbackReason(reason)) {
+    case "refusal":
+      return translate("agentSession.fallbackAppliedRefusal", { job, from, to });
+    case "usage":
+      return translate("agentSession.fallbackAppliedUsage", { job, from, to });
+    default:
+      return reason
+        ? translate("agentSession.fallbackApplied", { job, from, to, reason })
+        : translate("agentSession.fallbackAppliedUnknownReason", { job, from, to });
+  }
 }
 
 function fallbackSucceededMessage(attribution: ModelFallbackAttribution, model: string): string {
@@ -2395,7 +2409,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const reason = retryErrorByJobRef.current.get(fallbackJobKey(attribution.job));
     const message = fallbackAppliedMessage(attribution, from, to, reason);
     if (attribution.job.kind === "main" && sessionIdRef.current) {
-      setAutoModelSwitch({ from, to, role: attribution.role, reason, job: attribution.job, forSession: sessionIdRef.current });
+      setAutoModelSwitch({ from, to, role: attribution.role, reason, reasonKind: classifyFallbackReason(reason), job: attribution.job, forSession: sessionIdRef.current });
       setSmartPinnedModel(null);
     }
     // A subagent's switch already has a home in the subagent panel; it is
