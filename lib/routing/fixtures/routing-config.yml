@@ -1,0 +1,18 @@
+# Fixture for routing.test.mjs: a config shaped like a real one, with role
+# assignments on an exhausted provider and chains that offer a live
+# alternative. Kept minimal — only the keys the reconciler reads.
+retry:
+  modelFallback: true
+  fallbackChains:
+    task:
+      - openai-codex/gpt-5.6-terra
+      - llama-swap/qwen3.8-27b
+    smol:
+      - openai-codex/gpt-5.6-luna
+      - llama-swap/gemma4-e4b
+modelRoles:
+  default: openai-codex/gpt-6-astra:medium
+  smol: openai-codex/gpt-5.6-luna
+  task: openai-codex/gpt-5.6-terra
+task:
+  eager: preferred

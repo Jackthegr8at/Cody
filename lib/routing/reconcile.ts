@@ -26,7 +26,7 @@ import { readNativeSettings } from "../omp/settings-config";
 import { applyBlackouts, deriveBlackouts } from "./blackouts";
 import { planAgentRoleOverrides, type AgentRoleChange } from "./agent-roles";
 import { reconcileRoleBindings, type RoleBindingChange } from "./role-binding";
-import { readRouteMemory, recordBlackouts, type ProviderBlackout } from "./route-memory";
+import { autoBindEnabled, readRouteMemory, recordBlackouts, type ProviderBlackout } from "./route-memory";
 import type { OpenRouterAccountSnapshot } from "../openrouter/account";
 import type { UsageSnapshot } from "../usage/types";
 
@@ -34,6 +34,9 @@ export interface RoutingReconciliation {
 	blackouts: ProviderBlackout[];
 	roleChanges: RoleBindingChange[];
 	agentChanges: AgentRoleChange[];
+	/** False when Cody is observing only: blackouts are recorded and reported,
+	 * but no role or agent override is written. This is the default. */
+	autoBind: boolean;
 	/** The snapshot with remembered exhaustion folded in — what callers
 	 * should hand to availability and to the UI. */
 	snapshot: UsageSnapshot;
@@ -52,12 +55,17 @@ export interface ReconcileDeps {
  * usage read.
  */
 export function reconcileRouting(snapshot: UsageSnapshot, deps: ReconcileDeps = {}): RoutingReconciliation {
-	const empty: RoutingReconciliation = { blackouts: [], roleChanges: [], agentChanges: [], snapshot };
+	const empty: RoutingReconciliation = { blackouts: [], roleChanges: [], agentChanges: [], autoBind: false, snapshot };
 	if (getHarness().id !== "omp") return empty;
 	try {
+		// Observation is unconditional and writes nothing to the engine's
+		// config: blackouts are Cody's own state, and folding them into the
+		// snapshot only makes the ring and availability honest.
 		const blackouts = deriveBlackouts(snapshot, deps.openRouter);
 		const remembered = recordBlackouts(blackouts);
 		const effective = applyBlackouts(snapshot, { blackouts: remembered, bindings: readRouteMemory().bindings });
+		const autoBind = autoBindEnabled();
+		if (!autoBind) return { blackouts: remembered, roleChanges: [], agentChanges: [], autoBind, snapshot: effective };
 
 		const chains = readNativeSettings().settings.retry?.fallbackChains ?? {};
 		const { changes: roleChanges } = reconcileRoleBindings({ snapshot: effective, chains });
@@ -76,7 +84,7 @@ export function reconcileRouting(snapshot: UsageSnapshot, deps: ReconcileDeps = 
 				agentChanges = planned.changes;
 			}
 		}
-		return { blackouts: remembered, roleChanges, agentChanges, snapshot: effective };
+		return { blackouts: remembered, roleChanges, agentChanges, autoBind, snapshot: effective };
 	} catch {
 		return empty;
 	}

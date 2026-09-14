@@ -50,7 +50,7 @@ export async function GET(request: Request) {
     // depend on. It never throws and writes nothing when nothing moved.
     const routing = await reconcileRoutingForRequest(snapshot);
     return NextResponse.json(
-      { ...routing.snapshot, routing: { blackouts: routing.blackouts, roleChanges: routing.roleChanges, agentChanges: routing.agentChanges } },
+      { ...routing.snapshot, routing: { autoBind: routing.autoBind, blackouts: routing.blackouts, roleChanges: routing.roleChanges, agentChanges: routing.agentChanges } },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {

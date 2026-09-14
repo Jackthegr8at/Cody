@@ -76,6 +76,31 @@ interface RouteMemoryFile extends RouteMemory {
 
 const EMPTY: RouteMemory = { blackouts: [], bindings: {} };
 
+
+/**
+ * Whether Cody may WRITE routing decisions into omp's config.yml
+ * (`modelRoles`, `task.agentModelOverrides`).
+ *
+ * Default OFF, deliberately. Observing quota, remembering blackouts and
+ * reporting them costs nothing and cannot surprise anyone; re-pointing a
+ * role is a change to the user's own configuration, and it must never
+ * happen merely because they installed a new version. An instance that
+ * updates and finds its roles rewritten on the first usage poll is exactly
+ * the failure this guard exists to prevent.
+ *
+ * `CODY_ROUTE_AUTOBIND=1` enables it for a deployment; the persisted flag
+ * is what a future settings toggle writes.
+ */
+export function autoBindEnabled(): boolean {
+  if (process.env.CODY_ROUTE_AUTOBIND === "1") return true;
+  const file = readFile();
+  return file.autoBind === true;
+}
+
+export function setAutoBind(enabled: boolean): void {
+  const file = readFile();
+  writeFile({ ...file, autoBind: enabled });
+}
 export function getRouteMemoryPath(): string {
 	return path.join(getAgentDir(), ROUTE_MEMORY_FILE);
 }

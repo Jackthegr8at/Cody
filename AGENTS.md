@@ -1944,6 +1944,16 @@ surface reads that answer. The order is the design:
 from `app/api/usage/route.ts` (`lib/routing/request.ts` gathers only what is
 already cheap; `reconcileRouting` is omp-gated and never throws).
 
+**Observation is unconditional; WRITING is opt-in and off by default**
+(`autoBindEnabled()`, `CODY_ROUTE_AUTOBIND=1` or the persisted `autoBind`
+flag). Recording blackouts and folding them into the snapshot is Cody's own
+state and only makes the ring honest. Re-pointing a role edits the user's
+configuration, and that must never happen merely because they installed a
+new version — an instance that updates and finds its roles rewritten on the
+first usage poll is the exact failure this guard prevents. Pinned by
+`lib/routing/routing.test.mjs` ("observation never writes to the engine's
+config").
+
 - **`lib/usage/availability.ts` is the single verdict.** Built on
   `select.ts`'s primitives, never a second matching dialect. Two rules are
   load-bearing: **unknown is usable** (a provider reporting no quota — an
