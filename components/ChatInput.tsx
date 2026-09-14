@@ -111,6 +111,8 @@ interface Props {
   modelNames?: Record<string, string>;
   modelList?: { id: string; name: string; provider: string; supportsFastMode?: boolean }[];
   modelError?: string | null;
+  /** Classified `modelError`: see ModelErrorBanner. */
+  modelErrorCode?: "no_credentials" | null;
   modelsLoading?: boolean;
   /** Bumped when models.yml or the curation changed: the picker re-reads
    * the new-models line and its visibility mirror. */
@@ -1451,7 +1453,13 @@ function QueuedActionButton({
   );
 }
 
-export function ModelErrorBanner({ error }: { error?: string | null }) {
+export function ModelErrorBanner({ error, code }: {
+  error?: string | null;
+  /** "no_credentials": the engine has nothing signed in. Its own text says to
+   * use a slash command or hand-write models.yml, neither of which is how a
+   * Cody user fixes it, so Cody answers in its own words instead. */
+  code?: "no_credentials" | null;
+}) {
   const { t } = useI18n();
   if (!error) return null;
   return (
@@ -1490,8 +1498,10 @@ export function ModelErrorBanner({ error }: { error?: string | null }) {
         <line x1="12" y1="17" x2="12.01" y2="17" />
       </svg>
       <div style={{ minWidth: 0 }}>
-        <div style={{ fontWeight: 600 }}>{t("chatInput.modelError")}</div>
-        <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{error}</div>
+        <div style={{ fontWeight: 600 }}>{code === "no_credentials" ? t("chatInput.modelErrorNoCredentialsTitle") : t("chatInput.modelError")}</div>
+        <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+          {code === "no_credentials" ? t("chatInput.modelErrorNoCredentials") : error}
+        </div>
       </div>
     </div>
   );
@@ -1550,7 +1560,7 @@ function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; plan?: A
 }
 
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, canAttachWhileStreaming = false, canAttachImagesWhileStreaming = false, capabilities = ALL_CAPABILITIES, engine = null, model, sessionId, activeModels = NO_ACTIVE_MODELS, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, localOnly, onSelectLocalOnly, autoModelSwitch, modelSwitchPending, modelChangeWhileStreaming = false, fastModeEnabled, fastModeActive, fastModeCapable, fastModeSupported, fastModePending, fastModeUnavailable, onFastModeChange,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, canAttachWhileStreaming = false, canAttachImagesWhileStreaming = false, capabilities = ALL_CAPABILITIES, engine = null, model, sessionId, activeModels = NO_ACTIVE_MODELS, isAutoModelSelection, modelNames, modelList, modelError, modelErrorCode, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, localOnly, onSelectLocalOnly, autoModelSwitch, modelSwitchPending, modelChangeWhileStreaming = false, fastModeEnabled, fastModeActive, fastModeCapable, fastModeSupported, fastModePending, fastModeUnavailable, onFastModeChange,
   onAbortCompaction, isCompacting, compactResult,
   thinkingLevel, onThinkingLevelChange, thinkingLevelPending, thinkingLevelTarget, availableModes = NO_MODES, currentModeId = null, onModeChange, availableThinkingLevels, modelNameOverride,
   retryInfo, queuedMessages, inputHistory = [], onAbortRetry,
@@ -3083,7 +3093,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             act on it. An engine whose models live on the session reports no
             catalog error at all — an empty global list is the honest answer
             there, not a failure — so what survives this gate is a real one. */}
-        <ModelErrorBanner error={onModelChange ? modelError : null} />
+        <ModelErrorBanner error={onModelChange ? modelError : null} code={onModelChange ? modelErrorCode : null} />
         <ComposerModeStatus goal={activeGoal} plan={activePlan} />
         {/* Retry banner */}
         {retryInfo && (

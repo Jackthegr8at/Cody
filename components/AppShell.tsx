@@ -19,6 +19,7 @@ import { formatApiCost, formatCompactNumber, formatPercent, usageToneColor } fro
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useSetupStatus } from "@/hooks/useSetupStatus";
 import { useVisualViewportHeight } from "@/hooks/useVisualViewportHeight";
 import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useDisplayRequests } from "@/hooks/useDisplayRequests";
@@ -39,7 +40,7 @@ import { ALL_CAPABILITIES, normalizeCapabilities, type ActiveEngineInfo, type En
 import type { SettingsRequest } from "./SettingsConfig";
 import { SettingsOpenerContext, type SettingsOpenOptions } from "./settings/shell-context";
 import { loadEngineInfo } from "@/lib/engine-capabilities";
-import type { EnginesPayload } from "./EnginePicker";
+import type { EnginesPayload } from "./settings/EngineRoster";
 import { STORAGE_KEYS } from "@/lib/storage-keys";
 import { createPreviewAutoOpener, type PreviewAutoOpener } from "@/lib/preview-autoopen";
 import { normalizePreviewUrl, probeLoopbackUrl } from "@/lib/preview-url";
@@ -136,12 +137,14 @@ const SettingsConfig = dynamic(() => import("./SettingsConfig").then((m) => m.Se
 const CommandPalette = dynamic(() => import("./CommandPalette").then((m) => m.CommandPalette), {
   ssr: false,
 });
-// Onboarding-only: the picker ships in its own chunk so the shell never pays
-// for a screen that renders once per instance.
+// Onboarding-only: the flow ships in its own chunk so the shell never pays
+// for a screen that renders once per instance. The resume bar is tiny but
+// lives beside it for the same reason — it only renders while setup is
+// genuinely incomplete.
 const SetupWizard = dynamic(() => import("./SetupWizard").then((m) => m.SetupWizard), {
   ssr: false,
 });
-const EnginePicker = dynamic(() => import("./EnginePicker").then((m) => m.EnginePicker), {
+const SetupResumeBar = dynamic(() => import("./SetupResumeBar").then((m) => m.SetupResumeBar), {
   ssr: false,
 });
 
@@ -283,11 +286,13 @@ export function AppShell() {
   const [capabilities, setCapabilities] = useState<EngineCapabilities>(ALL_CAPABILITIES);
   const [activeEngine, setActiveEngine] = useState<ActiveEngineInfo | null>(null);
   const [capabilitiesLoaded, setCapabilitiesLoaded] = useState(false);
-  // The onboarding engine step: mounted only when the roster says this account
-  // may choose (admin) and nobody has chosen yet.
+  // Onboarding is ONE flow driven by readiness (lib/setup-status.ts), not a
+  // picker overlay followed by an unrelated dialog. `setupDone` only stops
+  // Cody opening it unprompted; whether the instance actually works is
+  // derived from facts, so a skipped setup still surfaces a resume offer.
   const [engineRoster, setEngineRoster] = useState<EnginesPayload | null>(null);
-  const [enginePickerOpen, setEnginePickerOpen] = useState(false);
   const [setupWizardOpen, setSetupWizardOpen] = useState(false);
+  const { readiness: setupReadiness, refresh: refreshSetupStatus, engines: setupEngines } = useSetupStatus();
   useEffect(() => {
     let cancelled = false;
     // One memoized /api/info read for the whole page (lib/engine-capabilities):
@@ -306,49 +311,29 @@ export function AppShell() {
     };
   }, []);
   useEffect(() => {
-    const controller = new AbortController();
-    // 401 here just means an open instance or a signed-out tab; either way
-    // there is no onboarding step to run.
-    void fetch("/api/engines", { cache: "no-store", signal: controller.signal })
-      .then((response) => (response.ok ? response.json() : null))
-      .then((data: EnginesPayload | null) => {
-        if (!data || controller.signal.aborted) return;
-        setEngineRoster(data);
-        if (data.canManage && !data.onboarded) setEnginePickerOpen(true);
-      })
-      .catch(() => { /* the picker simply does not run */ });
-    return () => controller.abort();
-  }, []);
-  const handleEnginePickerDone = useCallback((engineChanged: boolean) => {
-    setEnginePickerOpen(false);
-    // A different engine invalidates everything the shell loaded from the old
-    // one (models, capabilities, live sessions), so start from a clean page —
-    // the fresh load re-derives setupDone from the roster and opens the setup
-    // wizard itself. Same engine: chain straight into the wizard.
-    if (engineChanged) {
-      // assign("/") rather than reload(): a reload preserves `?session=<id>`
-      // from the previous engine, which the new engine's session list will
-      // never contain — the restore retries for eight seconds behind a blank
-      // pane and the dead id persists in the address bar.
-      window.location.assign("/");
-      return;
-    }
-    setSetupWizardOpen(true);
-  }, []);
-  // The setup wizard runs once per instance, right after engine onboarding
-  // (and on upgraded instances that predate it — skipping persists). A
-  // dismissed dialog stays closed for this page load only.
+    // The roster the wizard's engine step reuses. `useSetupStatus` already
+    // read it; this mirrors it into shell state so the existing consumers
+    // (Settings, the update notice) keep the shape they expect. 401 on an open
+    // or signed-out instance just means no onboarding runs.
+    if (setupEngines) setEngineRoster(setupEngines as EnginesPayload);
+  }, [setupEngines]);
+  // Open the flow unprompted only for an admin who has not finished it. Once
+  // dismissed it stays closed for this page load; the resume offer below is
+  // how it comes back, so a dismissal never hides a broken instance.
   const setupWizardDismissedRef = useRef(false);
   useEffect(() => {
     if (!engineRoster || setupWizardDismissedRef.current) return;
-    if (engineRoster.canManage && engineRoster.onboarded && !engineRoster.setupDone) {
+    if (engineRoster.canManage && !(engineRoster.onboarded && engineRoster.setupDone)) {
       setSetupWizardOpen(true);
     }
   }, [engineRoster]);
   const handleSetupWizardDone = useCallback(() => {
     setSetupWizardOpen(false);
-    setEngineRoster((current) => (current ? { ...current, setupDone: true } : current));
-  }, []);
+    setEngineRoster((current) => (current ? { ...current, onboarded: true, setupDone: true } : current));
+    // Skipping does not make the instance ready: re-read so the resume offer
+    // tells the truth about what is still missing.
+    refreshSetupStatus();
+  }, [refreshSetupStatus]);
   const handleSetupWizardDismiss = useCallback(() => {
     setupWizardDismissedRef.current = true;
     setSetupWizardOpen(false);
@@ -2282,13 +2267,21 @@ export function AppShell() {
         callbacks={settingsCallbacks}
       />
     )}
-    {enginePickerOpen && <EnginePicker initial={engineRoster} onDone={handleEnginePickerDone} />}
-    {setupWizardOpen && !enginePickerOpen && (
+    {setupWizardOpen && (
       <SetupWizard
         engine={engineRoster?.engines.find((item) => item.id === engineRoster.active) ?? null}
         hasModelsUi={capabilities.models}
+        readiness={setupReadiness}
+        engines={engineRoster}
+        onReadinessChange={refreshSetupStatus}
         onDone={handleSetupWizardDone}
         onDismiss={handleSetupWizardDismiss}
+      />
+    )}
+    {!setupWizardOpen && engineRoster?.canManage === true && (
+      <SetupResumeBar
+        readiness={setupReadiness}
+        onResume={() => { setupWizardDismissedRef.current = false; setSetupWizardOpen(true); }}
       />
     )}
     </ToastProvider>

@@ -78,17 +78,24 @@ function existingCost(config: ModelsFileConfig, provider: string, modelId: strin
 }
 
 /**
- * Write any MISSING price into models.yml. Idempotent, and it never touches
- * a cost the user already set — a rate they corrected by hand must survive
- * every later run.
+ * Write any MISSING price into models.yml, for the named providers ONLY.
+ * Idempotent, and it never touches a cost the user already set — a rate they
+ * corrected by hand must survive every later run.
+ *
+ * `present` is the set of providers this instance actually reaches. Seeding
+ * unconditionally created a models.yml naming a provider the user had never
+ * heard of, on a brand-new install, which the Providers hub then listed as a
+ * configured endpoint. A price is only an improvement for someone who can
+ * spend it.
  */
-export function ensurePayAsYouGoPrices(): PricingSeedResult {
+export function ensurePayAsYouGoPrices(present: ReadonlySet<string>): PricingSeedResult {
 	const file = readModelsConfigFile();
 	if (file.parseError) return { written: [], reason: file.parseError };
 	const providers: Record<string, Record<string, unknown>> = { ...(file.config.providers ?? {}) };
 	const written: string[] = [];
 
 	for (const [provider, models] of Object.entries(PAY_AS_YOU_GO_PRICES)) {
+		if (!present.has(provider)) continue;
 		for (const [modelId, cost] of Object.entries(models)) {
 			if (existingCost(file.config, provider, modelId) !== undefined) continue;
 			const providerConfig = isRecord(providers[provider]) ? { ...providers[provider] } : {};
@@ -108,15 +115,21 @@ export function ensurePayAsYouGoPrices(): PricingSeedResult {
 let seeded = false;
 
 /**
- * Seed once per server process, for omp only (models.yml is omp's file).
+ * Seed once per server process, for omp only (models.yml is omp's file) and
+ * only for providers this instance actually reaches. Nothing is written —
+ * models.yml is not even created — for an install that has none of them, so
+ * a fresh setup stays free of a file naming a plan it never signed into.
  * Swallows every failure: a missing agent dir, a read-only mount or a
  * models.yml the user is mid-edit must never cost a caller its catalog.
  */
-export function seedPayAsYouGoPricesOnce(engineId: string): void {
+export function seedPayAsYouGoPricesOnce(engineId: string, present: ReadonlySet<string>): void {
 	if (seeded || engineId !== "omp") return;
+	// Nothing to do yet is not "done": an empty catalog means the user has no
+	// credentials configured, and the seed must still run once they do.
+	if (present.size === 0) return;
 	seeded = true;
 	try {
-		ensurePayAsYouGoPrices();
+		ensurePayAsYouGoPrices(present);
 	} catch {
 		// Prices are an improvement on zero, not a requirement.
 	}

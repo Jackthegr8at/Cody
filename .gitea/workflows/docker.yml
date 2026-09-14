@@ -37,6 +37,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Registry and username: forks using a different registry should set
+  # repository variables REGISTRY and USERNAME; otherwise uses the owner's
+  # self-hosted forge (git.nateshome.net, nphilip89). See Gitea docs on
+  # creating variables in Settings › Actions › Variables.
   publish:
     runs-on: ubuntu-latest
     permissions:
@@ -75,8 +79,8 @@ jobs:
 
       - uses: docker/login-action@v3
         with:
-          registry: git.nateshome.net
-          username: nphilip89
+          registry: ${{ vars.REGISTRY || 'git.nateshome.net' }}
+          username: ${{ vars.USERNAME || 'nphilip89' }}
           password: ${{ secrets.FORGE_REGISTRY_TOKEN }}
 
       # Build once into the local daemon and prove the image actually runs

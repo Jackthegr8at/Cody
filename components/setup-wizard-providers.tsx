@@ -1,7 +1,7 @@
 "use client";
 
 import { AlertCircle, ArrowLeft, Check, KeyRound, Loader2, Plus, Server } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useI18n } from "@/lib/i18n";
 import { loadEngineInfo } from "@/lib/engine-capabilities";
 import { sortConnectedRows, type ProviderRow, type ProvidersResponse } from "@/lib/provider-directory";
@@ -28,20 +28,31 @@ type View =
   | { kind: "key"; id: string }
   | { kind: "custom" };
 
-export function WizardProvidersStep() {
+export function WizardProvidersStep({ onChanged }: {
+  /** A provider was linked or removed here: the shell re-reads readiness so
+   * the later steps (default model, plan) stop reporting a missing
+   * prerequisite the user just satisfied. */
+  onChanged?: () => void;
+}) {
   const { t } = useI18n();
   const [view, setView] = useState<View>({ kind: "list" });
   const [directory, setDirectory] = useState<ProvidersResponse | null>(null);
   const [canAddCustom, setCanAddCustom] = useState(false);
   const [loading, setLoading] = useState(true);
+  // The mount read is not a change; only a re-read after an add/remove is.
+  const loadedOnce = useRef(false);
 
   const reload = useCallback(() => {
     void fetch("/api/providers", { cache: "no-store" })
       .then((response) => (response.ok ? response.json() : null))
-      .then((body: ProvidersResponse | null) => { if (body) setDirectory(body); })
+      .then((body: ProvidersResponse | null) => {
+        if (body) setDirectory(body);
+        if (loadedOnce.current) onChanged?.();
+        loadedOnce.current = true;
+      })
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, []);
+  }, [onChanged]);
 
   useEffect(() => {
     reload();

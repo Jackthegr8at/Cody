@@ -491,46 +491,6 @@ export function EngineRoster({ mode, capabilities: capabilitiesProp, checkSeq = 
     return () => { mountedRef.current = false; };
   }, []);
 
-  const onInstallSettled = useCallback((id: string, ok: boolean) => {
-    const current = payloadRef.current;
-    const engine = current?.engines.find((entry) => entry.id === id);
-    const name = engine?.name ?? id;
-    const wasInstalled = engine?.installed === true;
-    if (ok) toast.success(translate(wasInstalled ? "updates.engines.updated" : "updates.engines.installed", { name }));
-    // The row keeps the detailed npm failure inline; the toast is the alert.
-    else toast.error(translate(wasInstalled ? "updates.engines.updateFailed" : "updates.engines.installFailed", { name }));
-    // An omp install also invalidates the cached changelog (its "new" marks
-    // compared against the version just replaced). Only omp's — another
-    // engine's install must not collapse a changelog someone is reading.
-    if (id === "omp") setChangelog(CLOSED_CHANGELOG);
-    // Re-read after a failure too: an install that ran but left an unusable
-    // binary still recorded the version it replaced, and offering that revert
-    // target is what gets the row out of a dead end. The prefix covers the
-    // roster and the registry statuses in one sweep.
-    invalidateSettingsRoutes(ENGINES_ROUTE);
-    if (ok && wasInstalled && current?.active === id) void announceNewModels(openModelsRef.current);
-  }, []);
-
-  const { installing: installingIds, progress: installProgress, errors: installErrors, start: startInstall, watch: watchInstall } = useEngineInstalls(onInstallSettled);
-
-  // Reattach to installs already running server-side (page reload, the
-  // onboarding picker, another admin) so the row shows live progress.
-  useEffect(() => {
-    for (const engine of payload?.engines ?? []) {
-      if (engine.installing) watchInstall(engine.id);
-    }
-  }, [payload, watchInstall]);
-
-  // A running install holds the shell's busy register: closing Settings
-  // would only lose the progress view (the server owns the npm run), but the
-  // shell asks before it does.
-  const busyRegister = shell?.busy ?? null;
-  useEffect(() => {
-    if (!busyRegister || installingIds.size === 0) return;
-    const names = [...installingIds].map((id) => payloadRef.current?.engines.find((engine) => engine.id === id)?.name ?? id);
-    return busyRegister.hold(t("updates.engines.busyInstalling", { name: names.join(", ") }));
-  }, [busyRegister, installingIds, t]);
-
   const select = useCallback((engine: EngineSummary) => {
     setActionError(null);
     setSelecting(engine.id);
@@ -558,6 +518,51 @@ export function EngineRoster({ mode, capabilities: capabilitiesProp, checkSeq = 
         setSelecting(null);
       });
   }, [onSelected]);
+
+  const onInstallSettled = useCallback((id: string, ok: boolean) => {
+    const current = payloadRef.current;
+    const engine = current?.engines.find((entry) => entry.id === id);
+    const name = engine?.name ?? id;
+    const wasInstalled = engine?.installed === true;
+    if (ok) toast.success(translate(wasInstalled ? "updates.engines.updated" : "updates.engines.installed", { name }));
+    // The row keeps the detailed npm failure inline; the toast is the alert.
+    else toast.error(translate(wasInstalled ? "updates.engines.updateFailed" : "updates.engines.installFailed", { name }));
+    // An omp install also invalidates the cached changelog (its "new" marks
+    // compared against the version just replaced). Only omp's — another
+    // engine's install must not collapse a changelog someone is reading.
+    if (id === "omp") setChangelog(CLOSED_CHANGELOG);
+    // Re-read after a failure too: an install that ran but left an unusable
+    // binary still recorded the version it replaced, and offering that revert
+    // target is what gets the row out of a dead end. The prefix covers the
+    // roster and the registry statuses in one sweep.
+    invalidateSettingsRoutes(ENGINES_ROUTE);
+    if (ok && wasInstalled && current?.active === id) void announceNewModels(openModelsRef.current);
+    // Pick mode: installing an engine IS the choice — call onSelected
+    // the moment install succeeds, without a second click.
+    // Settings (mode "manage") never auto-switches on an install.
+    if (ok && mode === "pick" && !wasInstalled && engine) select({ ...engine, installed: true });
+  }, [mode, select]);
+
+  const { installing: installingIds, progress: installProgress, errors: installErrors, start: startInstall, watch: watchInstall } = useEngineInstalls(onInstallSettled);
+
+  // Reattach to installs already running server-side (page reload, the
+  // onboarding picker, another admin) so the row shows live progress.
+  useEffect(() => {
+    for (const engine of payload?.engines ?? []) {
+      if (engine.installing) watchInstall(engine.id);
+    }
+  }, [payload, watchInstall]);
+
+  // A running install holds the shell's busy register: closing Settings
+  // would only lose the progress view (the server owns the npm run), but the
+  // shell asks before it does.
+  const busyRegister = shell?.busy ?? null;
+  useEffect(() => {
+    if (!busyRegister || installingIds.size === 0) return;
+    const names = [...installingIds].map((id) => payloadRef.current?.engines.find((engine) => engine.id === id)?.name ?? id);
+    return busyRegister.hold(t("updates.engines.busyInstalling", { name: names.join(", ") }));
+  }, [busyRegister, installingIds, t]);
+
 
   // The active omp runtime updates through its dedicated route rather than
   // the generic install route: the server restarts live sessions, runs a
@@ -732,6 +737,14 @@ export function EngineRoster({ mode, capabilities: capabilitiesProp, checkSeq = 
     />
   );
 
+  // Only an engine that is ACTUALLY INSTALLED can be the "decide later"
+  // target: selecting an uninstalled engine as active is exactly the dead
+  // end this footer must never create. Falls back to any installed engine
+  // when the active one is not (yet) installed; null when none are.
+  const decideLaterEngine = activeEngine?.installed
+    ? activeEngine
+    : rows.find((row) => row.engine.installed)?.engine ?? null;
+
   if (mode === "pick") {
     return (
       <>
@@ -760,8 +773,23 @@ export function EngineRoster({ mode, capabilities: capabilitiesProp, checkSeq = 
               const installBusy = installingIds.has(engine.id);
               const selectBusy = selecting === engine.id;
               const installError = installErrors[engine.id];
+              const activeInstalled = active && engine.installed;
+              const selectedPending = active && !engine.installed;
               return (
-                <section key={engine.id} className="engine-card" data-active={active ? "true" : undefined} style={{ animationDelay: `${index * 70}ms` }}>
+                <section
+                  key={engine.id}
+                  className="engine-card"
+                  data-active={activeInstalled ? "true" : undefined}
+                  style={{
+                    animationDelay: `${index * 70}ms`,
+                    ...(selectedPending
+                      ? {
+                          borderColor: "color-mix(in srgb, var(--status-warning) 55%, var(--border))",
+                          boxShadow: "0 0 0 1px color-mix(in srgb, var(--status-warning) 26%, transparent)",
+                        }
+                      : {}),
+                  }}
+                >
                   <header className="engine-card-head">
                     <h2 className="engine-name">{engine.name}</h2>
                     <div className="engine-chips">
@@ -807,13 +835,23 @@ export function EngineRoster({ mode, capabilities: capabilitiesProp, checkSeq = 
                   </dl>
 
                   <div className="engine-actions">
-                    {active && (
+                    {activeInstalled && (
                       <span className="engine-active-note">
                         <Check size={13} aria-hidden /> {t("engines.activeNow")}
                       </span>
                     )}
+                    {selectedPending && (
+                      <span className="engine-active-note" style={{ color: "var(--status-warning)" }}>
+                        <Download size={13} aria-hidden /> {t("engines.selectedNotInstalled")}
+                      </span>
+                    )}
                     {!engine.installed && engine.installable && (
-                      <button type="button" className="login-ghost engine-button" onClick={() => startInstall(engine.id)} disabled={selectionBusy || installBusy}>
+                      <button
+                        type="button"
+                        className={selectedPending ? "login-primary engine-button" : "login-ghost engine-button"}
+                        onClick={() => startInstall(engine.id)}
+                        disabled={selectionBusy || installBusy}
+                      >
                         {installBusy
                           ? <Loader2 size={14} aria-hidden style={{ animation: "spin 0.9s linear infinite" }} />
                           : <Download size={14} aria-hidden />}
@@ -826,7 +864,7 @@ export function EngineRoster({ mode, capabilities: capabilitiesProp, checkSeq = 
                     {engine.installed && (
                       <button type="button" className="login-primary engine-button" onClick={() => select(engine)} disabled={selectionBusy}>
                         {selectBusy && <Loader2 size={14} aria-hidden style={{ animation: "spin 0.9s linear infinite" }} />}
-                        {active
+                        {activeInstalled
                           ? t("engines.continueWith", { name: engine.shortName })
                           : selectBusy ? t("engines.switching") : t("engines.use", { name: engine.shortName })}
                       </button>
@@ -853,9 +891,9 @@ export function EngineRoster({ mode, capabilities: capabilitiesProp, checkSeq = 
 
         <div className="engine-footer">
           <span>{t("engines.switchNote")}</span>
-          {activeEngine && (
-            <button type="button" className="engine-link" onClick={() => select(activeEngine)} disabled={selectionBusy}>
-              {t("engines.decideLater", { name: activeEngine.shortName })}
+          {decideLaterEngine && (
+            <button type="button" className="engine-link" onClick={() => select(decideLaterEngine)} disabled={selectionBusy}>
+              {t("engines.decideLater", { name: decideLaterEngine.shortName })}
             </button>
           )}
         </div>
@@ -1033,6 +1071,9 @@ function EngineRow({ row, canManage, checking, statusesChecked, npmBusy, ompUpda
   const busy = npmBusy || (selfUpdate && ompUpdating) || selectionBusy;
   const compatWarning = compat ? t("updates.engines.aheadNote", { name: compat.subject, version: compat.version }) : null;
   const selectBusy = selecting === engine.id;
+  const activeInstalled = active && engine.installed;
+  const selectedPending = active && !engine.installed;
+
   return (
     <div
       ref={anchor.ref}
@@ -1043,14 +1084,28 @@ function EngineRow({ row, canManage, checking, statusesChecked, npmBusy, ompUpda
         gap: 8,
         padding: "12px 14px",
         borderTop: "1px solid var(--border)",
-        background: active ? "color-mix(in srgb, var(--accent) 6%, transparent)" : "transparent",
-        boxShadow: anchor.highlighted ? "inset 0 0 0 2px var(--accent)" : undefined,
+        background: activeInstalled
+          ? "color-mix(in srgb, var(--accent) 6%, transparent)"
+          : selectedPending
+            ? "color-mix(in srgb, var(--status-warning) 6%, transparent)"
+            : "transparent",
+        boxShadow: anchor.highlighted
+          ? "inset 0 0 0 2px var(--accent)"
+          : selectedPending
+            ? "inset 0 0 0 1px color-mix(in srgb, var(--status-warning) 45%, transparent)"
+            : undefined,
         transition: "box-shadow var(--dur-fast)",
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>{engine.name}</span>
-        {active && <span style={{ ...chipStyle, color: "var(--accent)" }}>{t("updates.engines.active")}</span>}
+        {activeInstalled && <span style={{ ...chipStyle, color: "var(--accent)" }}>{t("updates.engines.active")}</span>}
+        {selectedPending && (
+          <span style={{ ...chipStyle, color: "var(--status-warning)" }}>
+            <TriangleAlert size={10} aria-hidden="true" style={{ flexShrink: 0, marginRight: 3, verticalAlign: "-1px" }} />
+            {t("updates.engines.selectedNotInstalled")}
+          </span>
+        )}
         {engine.experimental && <span style={{ ...chipStyle, color: "var(--status-warning)" }}>{t("engines.experimental")}</span>}
         <span style={{ ...chipStyle, fontFamily: "var(--font-mono)" }}>
           {engine.installed

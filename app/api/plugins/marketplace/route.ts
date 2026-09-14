@@ -8,6 +8,7 @@ import {
   readMarketplaces,
 } from "@/lib/omp/marketplace";
 import { parseJsonLoose, runOmpCli } from "@/lib/omp/plugin-cli";
+import { isOmpBinMissing } from "@/lib/omp/omp-cli";
 import type {
   MarketplaceBrowseResponse,
   MarketplaceListEntry,
@@ -154,7 +155,7 @@ function scopeArgs(scope: unknown): string[] {
  * /api/plugins's error shape. */
 function marketplaceErrorResponse(error: unknown): NextResponse {
   const message = error instanceof Error ? error.message : String(error);
-  if (message.includes("omp binary not found")) {
+  if (isOmpBinMissing(message)) {
     return NextResponse.json({ error: message, code: "omp_not_found" }, { status: 500 });
   }
   return NextResponse.json({ error: message }, { status: 500 });

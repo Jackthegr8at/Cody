@@ -1,5 +1,5 @@
 import { execFile } from "child_process";
-import { resolveOmpBin } from "../omp/omp-cli";
+import { OMP_BIN_MISSING, resolveOmpBin } from "../omp/omp-cli";
 import type { UsageAccount, UsageProviderCapacity, UsageSnapshot, UsageWindow, UsageWindowState } from "./types";
 
 /**
@@ -55,7 +55,7 @@ export function deriveUsageWindowState(utilization: number, status?: unknown): U
  */
 export function fetchOmpUsageSnapshot(options: { timeoutMs?: number } = {}): Promise<UsageSnapshot> {
   const bin = resolveOmpBin();
-  if (!bin) return Promise.resolve(unavailableUsageSnapshot("omp binary not found"));
+  if (!bin) return Promise.resolve(unavailableUsageSnapshot(OMP_BIN_MISSING));
   const { promise, resolve } = Promise.withResolvers<UsageSnapshot>();
   try {
     // Fixed argv, no shell: nothing user-controlled reaches the command line.

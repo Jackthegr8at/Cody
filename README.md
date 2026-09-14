@@ -64,6 +64,16 @@ For Unraid there is a ready-made template and a full walkthrough in
 (git, `gh`, python3 with pip/venv, ripgrep, jq) and optional **SSH access**
 that lands directly in the active engine's CLI — exit the engine and you are
 in a plain shell (see [SSH](#ssh-into-the-container)).
+### Before you start
+
+**No engine ships in the image.** After creating the first account, the onboarding picker presents engine choices. Select one and it installs from npm into the persistent `/data/agent/tools` prefix, survives image updates, and updates independently from Settings › System › Engines. Installation needs outbound access to `registry.npmjs.org` and ~300–500 MB of disk per engine.
+
+**Provider credentials are bring-your-own.** Anthropic, OpenAI, OpenRouter, Gemini, Bedrock, and other providers require a subscription sign-in (e.g., Claude Pro, ChatGPT) or an API key. Enter them once in Settings › Providers; every engine reads them from the same place — switching engines never means re-entering credentials.
+
+**What persists.** The two mounts matter: `/data` holds accounts, installed engines, settings, and session history; `/workspace` is your repositories. Back up `/data` before a major image update — Cody's database, engine binaries, and state all live there.
+
+**How to update.** Cody itself updates with the container image (pull the latest tag, or `npm run build && npm start` for source installs). Engines update independently from Settings › System › Engines, and a new version restarts active sessions so nothing runs stale code.
+
 
 ### Running from source (bare metal / development)
 

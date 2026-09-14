@@ -1,5 +1,5 @@
 import { execFile } from "child_process";
-import { resolveOmpBin } from "./omp-cli";
+import { OMP_BIN_MISSING, resolveOmpBin } from "./omp-cli";
 
 /**
  * Small shared helpers for shelling out to `omp plugin ...` (Cody never
@@ -16,7 +16,7 @@ export function runOmpCli(
 ): Promise<{ stdout: string; stderr: string }> {
   const bin = resolveOmpBin();
   if (!bin) {
-    return Promise.reject(new Error("omp binary not found. Install oh-my-pi or set CODY_OMP_BIN."));
+    return Promise.reject(new Error(OMP_BIN_MISSING));
   }
   return new Promise((resolve, reject) => {
     execFile(

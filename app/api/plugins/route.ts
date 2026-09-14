@@ -3,6 +3,7 @@ import { requireCapability } from "@/lib/engine-guard";
 import { existsSync, promises as fs } from "fs";
 import { basename, extname, join } from "path";
 import { parseJsonLoose, runOmpCli } from "@/lib/omp/plugin-cli";
+import { isOmpBinMissing } from "@/lib/omp/omp-cli";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import type {
   PluginDiagnostic,
@@ -224,7 +225,7 @@ function readScope(scope: unknown): PluginScope {
  * known cause worth a stable code for client-side localization. */
 function pluginErrorResponse(error: unknown): NextResponse {
   const message = error instanceof Error ? error.message : String(error);
-  if (message.includes("omp binary not found")) {
+  if (isOmpBinMissing(message)) {
     return NextResponse.json({ error: message, code: "omp_not_found" }, { status: 500 });
   }
   return NextResponse.json({ error: message }, { status: 500 });

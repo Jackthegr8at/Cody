@@ -6,6 +6,16 @@ export interface ModelsData {
   connectedProviders?: { id: string; name: string; disabled: boolean }[];
   modelError?: string;
   /**
+   * Set when `modelError` is the engine saying it has no credentials, rather
+   * than something breaking. The engine answers in its own CLI's terms — omp
+   * says "Use /login or set an API key environment variable … Or create
+   * <agent dir>/models.yml" — and none of those are how a Cody user fixes
+   * it: there is no slash command to type, and hand-writing models.yml is
+   * the last resort, not the first step. The client renders its OWN sentence
+   * for this code, pointing at Settings › Providers.
+   */
+  modelErrorCode?: "no_credentials";
+  /**
    * Where the ACTIVE engine's pickable models actually come from.
    *
    * "global" — a sessionless catalog, which is what `modelList` here IS
@@ -59,8 +69,25 @@ export function invalidateModelsCache(): void {
   state.inFlight.clear();
 }
 
+/**
+ * "No models" because nothing is signed in is not a fault — it is the state
+ * every fresh install starts in, and the only useful reply names the panel
+ * that fixes it. Matched on what the engine actually says (omp: "No models
+ * available. Use /login or set an API key environment variable"), loosely
+ * enough to survive a rewording: a miss simply shows the engine's text, as
+ * before.
+ */
+export function classifyModelError(message: string): ModelsData["modelErrorCode"] {
+	const text = message.toLowerCase();
+	if (text.includes("no models available")) return "no_credentials";
+	if (text.includes("set an api key") || text.includes("api key environment variable")) return "no_credentials";
+	return undefined;
+}
+
 export function withModelRuntimeError(data: ModelsData, modelError: string | undefined): ModelsData {
-  return modelError ? { ...data, modelError } : data;
+	if (!modelError) return data;
+	const modelErrorCode = classifyModelError(modelError);
+	return modelErrorCode ? { ...data, modelError, modelErrorCode } : { ...data, modelError };
 }
 
 export interface CatalogCacheOptions {

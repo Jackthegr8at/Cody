@@ -21,11 +21,20 @@ function readOmpProviderDirectory(): ProviderDirectoryInfo {
     const file = readModelsConfigFile();
     if (!file.parseError) {
       for (const [name, provider] of Object.entries(file.config.providers ?? {})) {
+        // An entry that declares NO endpoint and NO models is not a provider
+        // the user configured — it is an override-only entry (a `cost` or
+        // `modelOverrides` block against a provider the engine already
+        // knows, e.g. Cody's own pay-as-you-go price seed). Reporting it as
+        // a custom endpoint invented a "connected" provider row on installs
+        // that had never signed into it.
+        const hasEndpoint = typeof provider?.api === "string" || typeof provider?.baseUrl === "string";
+        const models = Array.isArray(provider?.models) ? provider.models.length : 0;
+        if (!hasEndpoint && models === 0) continue;
         info.modelsYmlProviders.push({
           name,
           ...(typeof provider?.api === "string" ? { api: provider.api } : {}),
           ...(typeof provider?.baseUrl === "string" ? { baseUrl: provider.baseUrl } : {}),
-          modelCount: Array.isArray(provider?.models) ? provider.models.length : 0,
+          modelCount: models,
         });
       }
     }

@@ -1,6 +1,6 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "child_process";
 import { createInterface } from "readline";
-import { resolveOmpBin } from "./omp-cli";
+import { OMP_BIN_MISSING, resolveOmpBin } from "./omp-cli";
 import { encodeOutboundRpcFrame, RpcFrameDecoder, RpcFrameTooLargeError, type RpcFrameRecord, type RpcProtocolVersion } from "./rpc-frame";
 import { engineChildEnv } from "../harness/provider-keys";
 
@@ -131,7 +131,7 @@ export class RpcProcess {
       const resolveBin = options.dependencies?.resolveOmpBin ?? resolveOmpBin;
       const resolved = resolveBin();
       if (!resolved) {
-        throw new Error("omp binary not found. Install oh-my-pi or set CODY_OMP_BIN.");
+        throw new Error(OMP_BIN_MISSING);
       }
       bin = resolved;
       args = ["--mode", "rpc-ui", "--cwd", options.cwd, ...(options.extraArgs ?? [])];

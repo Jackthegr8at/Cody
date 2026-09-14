@@ -1,19 +1,25 @@
 services:
   cody:
+    # Build from source. To use a pre-built image instead, comment out build:
+    # and the image: cody:latest line below, then uncomment the published image.
     build:
       context: ..
       dockerfile: docker/Dockerfile
     image: cody:latest
+    # Alternative: uncomment this to use the published image instead of building locally
+    # image: ghcr.io/nphil/cody:latest
     ports:
       # Loopback-only by default: terminals in this container run real shells,
       # so do not publish on every interface until auth is deliberately set.
       - "127.0.0.1:30177:30177"
     environment:
-      # Required — the container refuses to start without it. Generate one:
-      #   openssl rand -base64 24
-      CODY_PASSWORD: ${CODY_PASSWORD:?set CODY_PASSWORD before starting}
+      # Optional. Only required if you want to add a built-in HTTP Basic Auth
+      # account named `cody` (for scripts/API access). The first visit to the web UI
+      # creates an administrator account through account setup with no password.
+      # To enable Basic Auth, set this to a strong password: openssl rand -base64 24
+      CODY_PASSWORD: ${CODY_PASSWORD:-}
       # TZ: America/New_York
     volumes:
-      - ./appdata:/data          # agent state, checkpoints, shell home
-      - ~/projects:/workspace    # your repositories
+      - ./appdata:/data              # agent state, sessions, shell home
+      - ~/projects:/workspace        # your repositories (directory must already exist)
     restart: unless-stopped

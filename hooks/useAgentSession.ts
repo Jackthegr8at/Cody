@@ -826,6 +826,7 @@ type ModelsResponse = {
   defaultModel?: SelectedModel | null;
   thinkingLevels?: Record<string, string[]>;
   modelError?: string;
+  modelErrorCode?: "no_credentials";
   /** "global" — the sessionless registry this response carries. "session" —
    * the engine publishes its models on the session instead, so `modelList` is
    * legitimately empty here and the composer reads get_state. Deliberately
@@ -883,6 +884,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [modelList, setModelList] = useState<ModelEntry[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
+  // Set when the engine's "no models" is really "nothing is signed in": the
+  // composer then shows Cody's own pointer at Settings › Providers instead of
+  // the engine CLI's `/login` advice, which a web user cannot act on.
+  const [modelErrorCode, setModelErrorCode] = useState<"no_credentials" | null>(null);
   // Where this engine's models live. "global" is the sessionless registry
   // /api/models reads (omp, pi); "session" means the engine publishes them on
   // the session itself and the route hands back an honest empty list. The
@@ -4035,6 +4040,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const d = await res.json() as ModelsResponse;
       setModelNames(d.models);
       setModelError(d.modelError ?? null);
+      setModelErrorCode(d.modelErrorCode ?? null);
       setModelCatalogSource(d.catalogSource === "session" ? "session" : "global");
       setModelThinkingLevels(d.thinkingLevels ?? {});
       const nextModelList = d.modelList ?? [];
@@ -4721,7 +4727,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   return {
     // State
     data, loading, error, activeLeafId, messages, entryIds, streamState,
-    agentRunning, modelNames: effectiveModelNames, modelList: effectiveModelList, modelSelectable, modelsLoading, modelError, modelThinkingLevels, newSessionModel, toolPreset, thinkingLevel, thinkingLevelPending, thinkingLevelTarget, fastModeEnabled, fastModeActive, fastModePending, fastModeUnavailable, promptCapabilities, steeringSupported, autoRetryEnabled, interruptMode, autoCompactionEnabled, steeringMode, followUpMode,
+    agentRunning, modelNames: effectiveModelNames, modelList: effectiveModelList, modelSelectable, modelsLoading, modelError, modelErrorCode, modelThinkingLevels, newSessionModel, toolPreset, thinkingLevel, thinkingLevelPending, thinkingLevelTarget, fastModeEnabled, fastModeActive, fastModePending, fastModeUnavailable, promptCapabilities, steeringSupported, autoRetryEnabled, interruptMode, autoCompactionEnabled, steeringMode, followUpMode,
     liveModelMeta,
     // Keep provenance session-scoped at the public boundary too: consumers
     // must never infer this conversation's routing from a prior session's pin.

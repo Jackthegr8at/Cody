@@ -22,6 +22,24 @@ const BIN_NAME = process.platform === "win32" ? "omp.exe" : "omp";
 // keep the UI reporting a missing binary until restart.
 const MISS_TTL_MS = 30_000;
 
+/**
+ * What every caller says when the binary is absent. The remedy has to be the
+ * one Cody actually offers: engines install from the onboarding picker and
+ * Settings › System › Engines into the tools prefix. Telling a new user to
+ * "install oh-my-pi or set CODY_OMP_BIN" sent them to a package manager and
+ * an environment variable for a button that is two clicks away — it surfaced
+ * verbatim in the setup wizard's last step on a fresh install.
+ */
+export const OMP_BIN_MISSING = "OMP is not installed. Install it from Settings → System → Engines (or point CODY_OMP_BIN at an existing binary).";
+
+/** True when an Error's message is Cody's own missing-omp-binary state
+ * (`OMP_BIN_MISSING`), regardless of any prefix/suffix a caller added.
+ * Callers match on this instead of a hardcoded string so the check can
+ * never drift from the constant it is testing for. */
+export function isOmpBinMissing(message: string): boolean {
+  return message.includes(OMP_BIN_MISSING);
+}
+
 /** Clear probes after an explicit `omp update` so the next request rechecks it. */
 export function invalidateOmpCliCache(): void {
   cachedBin = null;

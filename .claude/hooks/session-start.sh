@@ -4,7 +4,7 @@ set -uo pipefail
 # Cloud-session bootstrap. The Claude environment's own hook
 # (/usr/local/bin/tailscale-connect) joins the tailnet; what it does NOT do
 # is install the system ssh client that `tailscale ssh` shells out to, so
-# every `tailscale ssh root@beastnas` fails with "no system 'ssh' command
+# every `tailscale ssh root@your-host` fails with "no system 'ssh' command
 # found" until someone installs it by hand. Do it here, every session.
 
 [ "${CLAUDE_CODE_REMOTE:-}" = "true" ] || exit 0

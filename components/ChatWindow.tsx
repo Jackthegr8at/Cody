@@ -742,7 +742,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
 
   const {
     loading, error, messages, entryIds, streamState,
-    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelSelectable, modelsLoading, modelError, modelThinkingLevels, thinkingLevel, thinkingLevelPending, thinkingLevelTarget, fastModeEnabled, fastModeActive, fastModePending, fastModeUnavailable, promptCapabilities, steeringSupported,
+    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelSelectable, modelsLoading, modelError, modelErrorCode, modelThinkingLevels, thinkingLevel, thinkingLevelPending, thinkingLevelTarget, fastModeEnabled, fastModeActive, fastModePending, fastModeUnavailable, promptCapabilities, steeringSupported,
     liveModelMeta, smartPinnedModel, availableModes, currentModeId,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactResult, compactionStatus, displayModel: displayModelValue, sessionStats,
@@ -1146,6 +1146,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       modelList={modelList}
       modelsLoading={modelsLoading}
       modelError={modelError}
+      modelErrorCode={modelErrorCode}
       modelsRefreshKey={modelsRefreshKey}
       onModelChange={canChangeModel ? handleModelChange : undefined}
       onSelectSmartModel={smartModelCapable && isNew ? selectSmartModel : undefined}

@@ -1,4 +1,4 @@
-import { resolveOmpBin } from "../omp/omp-cli";
+import { OMP_BIN_MISSING, resolveOmpBin } from "../omp/omp-cli";
 import { isRecord } from "../type-guards";
 import { ROLE_NAMES, type PlanDraft, type PlanRationale } from "./derive";
 import { runOneShotModel } from "./one-shot";
@@ -138,7 +138,7 @@ function readDraft(raw: unknown): PlanDraft | null {
 /** Plan with a model. `model` is a roster selector; the caller picks it. */
 export async function planWithModel(model: string, roster: Roster): Promise<PlannerOutcome> {
   const bin = resolveOmpBin();
-  if (!bin) return { ok: false, reason: "omp binary not found" };
+  if (!bin) return { ok: false, reason: OMP_BIN_MISSING };
 
   const answer = await runOneShotModel({
     bin,

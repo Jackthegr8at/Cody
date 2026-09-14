@@ -13,6 +13,17 @@ export const dynamic = "force-dynamic";
 // itself lives in lib/models-effective.ts, shared with /api/providers, which
 // counts the same catalog per provider.
 
+/** The providers this catalog actually reaches — what the price seed is
+ * allowed to write about. A model's own `provider` is the authority: a
+ * prepaid plan appears here only once the user can really call it. */
+function providersIn(payload: { modelList?: ReadonlyArray<{ provider?: string }> }): ReadonlySet<string> {
+  const set = new Set<string>();
+  for (const model of payload.modelList ?? []) {
+    if (typeof model.provider === "string" && model.provider !== "") set.add(model.provider);
+  }
+  return set;
+}
+
 export async function GET(req: Request) {
   try {
     // Curation asks for the full catalog explicitly. Nothing else does: the
@@ -35,18 +46,22 @@ export async function GET(req: Request) {
     // engine that does not speak the rpc dialect has no global catalog: it
     // gets an honest empty one, never a neighbour's.
     if (!harness.rpcUi) return Response.json(SESSION_SCOPED_MODELS);
-    // omp prices a prepaid plan's models at zero, so every Qwen turn reads
-    // as free. Seeding the published pay-as-you-go rates into models.yml
-    // makes omp itself report a real cost, with the real token split. Once
-    // per process, never over a rate the user set, and a failure here must
-    // not cost the caller its catalog.
-    seedPayAsYouGoPricesOnce(harness.id);
     // No allow-list filtering here on purpose: OMP already applied
     // `enabledModels` to this response, using glob semantics Cody must not
     // reimplement (see lib/model-allow-list.ts). What arrives IS the effective
     // set, so the Composer picker, model roles, and fallback chains all shrink
     // to the user's selection with no client-side work.
-    return Response.json(await loadEffectiveModelsCached(harness));
+    const payload = await loadEffectiveModelsCached(harness);
+    // omp prices a prepaid plan's models at zero, so every Qwen turn reads
+    // as free. Seeding the published pay-as-you-go rates into models.yml
+    // makes omp itself report a real cost, with the real token split. Scoped
+    // to the providers THIS catalog actually contains — seeding blind wrote a
+    // models.yml naming a provider a new install had never connected, which
+    // then showed up as a configured endpoint in the Providers hub. Once per
+    // process, never over a rate the user set, and a failure here must not
+    // cost the caller its catalog.
+    seedPayAsYouGoPricesOnce(harness.id, providersIn(payload));
+    return Response.json(payload);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return Response.json(withModelRuntimeError(EMPTY_MODELS, message));

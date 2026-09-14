@@ -6,8 +6,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/lib/i18n";
 import { THEMES } from "@/lib/theme-catalog";
+import type { SetupRequirement } from "@/lib/setup-status";
 import { ModelPlanPanel } from "./settings/ModelPlanPanel";
-import type { EngineSummary } from "./EnginePicker";
+import { EngineRoster } from "./settings/EngineRoster";
+import type { EnginesPayload, EngineSummary } from "./settings/EngineRoster";
 
 /**
  * The setup wizard's per-engine step framework, mirroring omp's own TUI
@@ -20,18 +22,80 @@ import type { EngineSummary } from "./EnginePicker";
  * Settings uses, so manual setup stays a first-class alternative to the wizard.
  */
 
-export type WizardStepId = "providers" | "webSearch" | "model" | "signIn" | "theme" | "modelPlan";
+export type WizardStepId = "engine" | "providers" | "webSearch" | "model" | "signIn" | "theme" | "modelPlan";
+
+/**
+ * What each step needs before it can say anything true. A step whose
+ * prerequisite is unmet renders a notice naming the step that satisfies it,
+ * never an empty list or the engine's own error: asking for a default model
+ * before a provider exists produced "No models discovered yet" with nothing
+ * to click, and the plan step printed a raw binary-not-found.
+ *
+ * `null` means the step stands alone (choose an engine, pick a theme).
+ */
+export const STEP_REQUIREMENTS: Record<WizardStepId, SetupRequirement | null> = {
+  engine: null,
+  providers: "engine",
+  signIn: "engine",
+  webSearch: "engine",
+  model: "provider",
+  modelPlan: "models",
+  theme: null,
+};
 
 /** Future engines: name an explicit step list here when the capability-driven
  * default doesn't fit (keyed by engine id). */
 const ENGINE_STEP_OVERRIDES: Record<string, WizardStepId[]> = {};
 
-export function getWizardSteps(engineId: string | null, hasModelsUi: boolean): WizardStepId[] {
+/**
+ * The steps for this engine, in dependency order. The engine step leads
+ * whenever no engine is installed — it is the one requirement nothing else
+ * works without, so onboarding must not be able to start past it.
+ */
+export function getWizardSteps(engineId: string | null, hasModelsUi: boolean, needsEngine: boolean): WizardStepId[] {
   const override = engineId ? ENGINE_STEP_OVERRIDES[engineId] : undefined;
-  if (override) return override;
   // modelPlan runs last: it reasons over the accounts linked earlier in this
   // same run. Engines without the models surface have nothing to plan.
-  return hasModelsUi ? ["providers", "webSearch", "model", "theme", "modelPlan"] : ["signIn", "theme"];
+  const rest = override ?? (hasModelsUi ? ["providers", "webSearch", "model", "theme", "modelPlan"] : ["signIn", "theme"]);
+  return needsEngine ? ["engine", ...rest] : [...rest];
+}
+
+/**
+ * Step 1 when no engine is installed: the same roster Settings › System uses,
+ * in "pick" mode. The install IS the choice, so the roster advances the
+ * wizard itself once one succeeds.
+ */
+export function EngineStep({ initial, onInstalled }: {
+  initial?: EnginesPayload | null;
+  /** An engine became active. `engineChanged` is true when it is not the one
+   * the page booted with, so the shell can reload rather than run on stale
+   * capabilities. */
+  onInstalled: (engineChanged: boolean) => void;
+}) {
+  return <EngineRoster mode="pick" initial={initial} onSelected={(_engine, engineChanged) => onInstalled(engineChanged)} />;
+}
+
+/**
+ * Shown in place of a step whose prerequisite is missing. It names what is
+ * needed and offers the jump — the alternative, which shipped, was a step
+ * that told the user to "connect a provider in the previous step" with no
+ * way to get there.
+ */
+export function PrerequisiteNotice({ requirement, onJump }: { requirement: SetupRequirement; onJump: (() => void) | null }) {
+  const { t } = useI18n();
+  return (
+    <div className="setup-wizard-card" role="status" style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text-muted)" }}>
+        <AlertCircle size={15} aria-hidden style={{ color: "var(--status-warning)", flexShrink: 0 }} />
+        <span>{t(`setupWizard.needs.${requirement}`)}</span>
+      </div>
+      {onJump && (
+        <button type="button" className="login-primary engine-button setup-wizard-btn" onClick={onJump}>
+          {t(`setupWizard.needsAction.${requirement}`)}
+        </button>
+      )}
+    </div>
+  );
 }
 
 const WizardProvidersStep = dynamic(() => import("./setup-wizard-providers").then((module) => module.WizardProvidersStep), {
@@ -44,8 +108,8 @@ const WizardProvidersStep = dynamic(() => import("./setup-wizard-providers").the
 
 /** Empty-first provider list + Add flow (see setup-wizard-providers.tsx);
  * deliberately NOT the full Settings editor. */
-export function ProvidersStep() {
-  return <WizardProvidersStep />;
+export function ProvidersStep({ onChanged }: { onChanged?: () => void }) {
+  return <WizardProvidersStep onChanged={onChanged} />;
 }
 
 export function SignInStep({ engine }: { engine: EngineSummary | null }) {

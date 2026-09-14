@@ -452,7 +452,11 @@ components/
     primitives.tsx      NativeSetting row, chip styles, SettingsHighlightContext
     EngineRoster.tsx    install/switch/update/reinstall/revert/uninstall for
                         every known engine; shared by Settings › System ›
-                        Engines and the onboarding EnginePicker
+                        Engines and the setup flow's engine step
+                        (`mode="pick"`). An engine that is SELECTED but not
+                        installed reads as exactly that — never "active", in
+                        either mode — and pick mode auto-advances on a
+                        successful install
     AccountSettings.tsx / AccessTokensSection.tsx / account-controls.tsx
                         Settings › Account: profile, password, tokens, roster
     SystemUpdates.tsx    Settings › System: the Cody update card over the
@@ -877,10 +881,40 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   `CODY_<NAME>_BIN` override → tools prefix → PATH
   (`lib/harness/engine-bin.ts`; omp's probe in `lib/omp/omp-cli.ts` checks
   the tools prefix too). Selecting the already-active engine is the
-  "decide later" no-op and must never require the binary.
-- The onboarding picker (`components/EnginePicker.tsx`) mounts post-auth for
-  admins while `cody-engine.json` is absent/un-onboarded; `/api/engines` is
-  deliberately unreachable before the first account exists.
+  "decide later" no-op — but it is offered ONLY once some engine is actually
+  installed, because with none installed it is the one action that strands a
+  new user in an app where every turn fails.
+- **Onboarding is one dependency-ordered flow driven by READINESS, not a flag**
+  (`lib/setup-status.ts`, `hooks/useSetupStatus.ts`,
+  `components/SetupWizard.tsx`, `components/SetupResumeBar.tsx`). Readiness is
+  three facts — an engine installed AND active, a provider connected, a
+  non-empty catalog — read from the two CHEAP routes that carry them
+  (`/api/engines`, `/api/providers?cached=1`; never `/api/models`, which
+  spawns the utility child). Four rules, each one a defect observed on a
+  genuinely fresh instance:
+  - **The engine is step 1, not a separate screen.** The old
+    `components/EnginePicker.tsx` overlay ran before an unrelated wizard and
+    offered "Decide later and keep using OMP" with nothing installed; taking
+    it produced a working-looking app where every turn failed. The engine step
+    now leads the flow, `Next` is disabled until an engine exists, and a
+    successful install auto-advances (the install IS the choice). The picker
+    module is gone — `EngineRoster` in `mode="pick"` is the step.
+  - **Every step declares its prerequisite** (`STEP_REQUIREMENTS`), and a step
+    whose requirement is unmet renders `PrerequisiteNotice` — the missing
+    thing plus a button that jumps to the step that fixes it. Before this, the
+    default-model step said "connect a provider in the previous step" with no
+    way there, and the plan step printed the engine's own
+    `omp binary not found. Install oh-my-pi or set CODY_OMP_BIN`.
+  - **It resumes.** The flow opens on the first INCOMPLETE requirement, and
+    `SetupResumeBar` (bottom-right; the left gutter is the sidebar, which
+    clips a fixed element anchored there) names the nearest missing one and
+    reopens the flow there. `setupDone` stops Cody NAGGING; it never decides
+    whether the instance works, so skipping cannot hide a broken install.
+  - **An unread fact is `pending`, never "missing"** (`UNKNOWN_READINESS`).
+    Announcing a missing provider because the answer had not arrived yet is
+    how a working instance gets told it is broken;
+    `lib/setup-status.test.mjs` pins both directions.
+  `/api/engines` is deliberately unreachable before the first account exists.
 - **Engine release notes come from the version an update would install**
   (`lib/harness/package-changelog.ts`, `/api/engines/changelog`): while the
   registry knows a newer version than the installed binary, the changelog is
@@ -1139,6 +1173,44 @@ setting added upstream appears without a Cody change.
   preferences, "Workspace", and "Terminal only" above.
 
 ## Key Design Decisions & Traps
+
+### Cody is meant to be SHARED — never ship the owner's environment
+
+Cody is published for other people to install fresh, with their own accounts,
+engines and provider credentials. That is a standing constraint on every
+change, not a one-off audit: a stranger with an empty data dir, no engine on
+PATH and no credentials must reach a working first chat, and every failure
+must name the panel that fixes it.
+
+- **Never hardcode this deployment**: the owner's forge/registry, hostnames,
+  LAN addresses, `/data/agent`, his MCP servers or his provider plans. A value
+  that varies per install is an env var with a sane default, or a first-run
+  step. Anything CI-only that genuinely cannot be portable (a self-hosted
+  forge login) is driven from repository variables with the current value as
+  the fallback, so a fork works and the owner's release path is untouched.
+- **Never seed a stranger's config with a provider they do not have.** The
+  pay-as-you-go price overlay (`lib/model-pricing-overlay.ts`) used to write
+  `alibaba-token-plan` rates into `models.yml` on EVERY first run: a brand-new
+  instance grew a file naming a prepaid plan the user had never heard of, and
+  the Providers hub then listed it as connected. `seedPayAsYouGoPricesOnce`
+  now takes the set of providers the catalog actually reaches and writes
+  nothing — not even the file — for an install that has none of them.
+- **A `models.yml` entry with no endpoint and no models is an OVERRIDE, not a
+  provider.** `readOmpProviderDirectory` (lib/harness/omp.ts) skips entries
+  carrying only `cost`/`modelOverrides`; treating them as custom endpoints is
+  what turned the price seed into a phantom "connected" row. Pinned by
+  `lib/provider-directory.test.mjs`.
+- **An engine's own CLI advice is not Cody's advice.** `OMP_BIN_MISSING`
+  (lib/omp/omp-cli.ts) is the one missing-binary string, and it names Settings
+  › System › Engines — not "install oh-my-pi or set CODY_OMP_BIN", which is
+  what the setup wizard showed a new user verbatim. Same rule for a catalog
+  with no credentials: `classifyModelError` tags it `no_credentials` and the
+  composer prints Cody's own sentence pointing at Settings › Providers,
+  instead of omp's "Use /login … or create models.yml". Match on the shared
+  constant (`isOmpBinMissing`), never on a copied substring.
+- **Verify shareability the way everything else here is verified**: a live run
+  against an EMPTY agent dir with no engine on PATH and no credentials — not
+  just a green test suite. Both of the traps above passed every test.
 
 ### Human terminal engine launch is entrypoint-scoped
 - `TerminalManager.create()` launches the active engine once, then drops into
