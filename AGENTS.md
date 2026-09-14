@@ -316,11 +316,19 @@ lib/
                        the composer repaints without a round trip, and the
                        store of record on an open instance (no accounts)
   rpc-manager.ts       session registry + Cody-owned host tools + startRpcSession over RpcProcess;
-                       sidebar chats: `kind:"sidebar"` launch adds --no-tools --no-skills
-                       --no-extensions --no-rules --no-prewalk --no-title,
-                       --session-dir <agentDir>/cody-sidebar-chats/<workspace-slug>,
-                       --system-prompt (assistant reminder, no file editing); buildSessionSpawnArgs()
-                       handles flag composition; set_host_tools omitted for sidebar
+                       sidebar chats (`kind:"sidebar"`) are ISOLATED and carry no
+                       preloaded context — see "Sidebar chat" below: a bare
+                       `--cwd` (sidebarBareCwd), an own agent dir with an empty
+                       mcp.json and symlinked credentials (sidebarAgentDir), the
+                       --no-* flags, an overlay, and SIDEBAR_CONTEXT_TOOLS
+                       registered through set_host_tools
+  sidebar-context-tools.ts  the sidebar's five read-only, bounded, pageable
+                       tools: list_workspace_files, read_workspace_file,
+                       read_project_context, list_sessions, read_session
+                       (ownership-gated, condensed, tool NAMES only)
+  sidebar-context-budget.ts  how much of a small model's window one tool result
+                       may take; an unknown window is assumed to be the
+                       SMALLEST supported (8,192), never unlimited
   session-active-models.ts  every model in use in the CURRENT run (live model,
                        Smart resolution, subagents' resolvedModel, fallback
                        targets, this run's assistant turns) with what uses
@@ -1173,6 +1181,77 @@ setting added upstream appears without a Cody change.
   preferences, "Workspace", and "Terminal only" above.
 
 ## Key Design Decisions & Traps
+
+### Sidebar chat: a tiny baseline, context on demand, sized for a local GPU
+
+The sidebar is meant to run on small LOCAL models (the owner's llama-swap P40:
+8,192–24,576 windows, 2k–8k reserved for output — so the smallest leaves
+~6,100 tokens for everything). Measured against a fake OpenAI endpoint, a
+sidebar "hi" was sending **133,559 tokens** before this: 43,438 of verbatim
+`AGENTS.md` inside a `<project><instructions><file>` block, and 89,303 of
+user-scope MCP tool schemas (111 tools). It now sends **~726** (310 prompt +
+416 schemas).
+
+Neither source has an omp flag or setting. `--no-rules` covers `.omp/rules`,
+NOT `AGENTS.md`/`CLAUDE.md`; `--no-tools`/`--no-extensions` cover omp's own
+builtins and extension discovery, NOT `<agent dir>/mcp.json`. The two levers
+that do work, each measured in isolation:
+
+| configuration | tokens |
+|---|---|
+| baseline | 133,559 |
+| bare `--cwd` (no context file to discover) | 90,105 |
+| agent dir with an empty user `mcp.json` | 43,602 |
+| **both** | **144** |
+
+- `sidebarBareCwd()` — an empty Cody-owned directory the child runs from, so
+  context-file discovery finds nothing. The workspace is carried separately as
+  `WrapperEngineContext.contextCwd`, because `this.cwd` is now that bare dir
+  and every tool read would otherwise resolve against it.
+- `sidebarAgentDir()` — a sidebar-only agent dir whose `mcp.json` is
+  `{"mcpServers":{}}`, with `agent.db`/`models.yml`/`config.yml`/`blobs`
+  SYMLINKED to the real ones so credentials, providers (including the local
+  endpoints) and image blobs still work. Safe because SQLite puts `-wal`/`-shm`
+  beside the symlink TARGET (verified), and omp already opens that database
+  from concurrent processes. A missing target is skipped, not linked dangling.
+- **Every tool result is budgeted** (`lib/sidebar-context-budget.ts`). An
+  unknown context window is assumed to be the SMALLEST supported, never
+  unlimited: guessing large is how a 4B model receives a result it cannot fit,
+  and the cost of guessing small is one extra page. One result may take ~25% of
+  what remains after the output reserve, so several reads plus the conversation
+  still fit; truncation always reports a `nextOffset`, and slices cut on line
+  boundaries so a paged read never splits a line.
+- The system prompt's job is to say the model has NO context yet and must ask.
+  A model that assumes it was handed the project answers from training-set
+  guesses about a codebase it has never seen, which is worse than saying it
+  cannot help. `lib/rpc-manager.test.mjs` asserts that contract (starts without
+  context, names a context tool, still cannot edit) rather than the sentence —
+  the previous assertion pinned "cannot read or edit files", which this design
+  made false.
+
+### Never reproduce a provider's safety text
+
+Anything written into long-term memory, or into a file that is injected as
+context (this file, `CLAUDE.md`, omp's `RULES.md`), comes back in LATER
+prompts — every workspace, every model, every subagent. A provider's own
+refusal wording is therefore self-propagating: quote it once and later
+sessions carry it as context, where the same classifier reads it and refuses
+the turn before any work begins.
+
+That is not hypothetical. Diagnosing one refusal in a Cody session was
+auto-retained as a transcript memory (`mnemopi.autoRetain`, recalled
+globally), and unrelated sessions in other projects were then redirected to a
+fallback model on their first turn, on unrelated topics. A test fixture in
+this repo had pinned the same wording verbatim "so the test uses the real
+string" — the fixture now asserts the SHAPE (stop reason plus classifier tag)
+and never the blurb.
+
+So: paraphrase, or name only the machine-readable stop reason / error code.
+Describe a refusal structurally — which stop reason, which code path, what the
+harness did next — which is what makes it fixable anyway. If such text is
+already stored, DELETE the memory rather than superseding it, and de-quote the
+file. The standing rule lives in omp's user `RULES.md` so it reaches every
+agent and subagent, not just whoever reads this file.
 
 ### Cody is meant to be SHARED — never ship the owner's environment
 

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import path from "path";
 import { getSessionOwner, renameSessionOwner, setSessionOwner } from "./auth/session-owners";
@@ -15,7 +15,7 @@ import { invalidateModelsCache } from "./models-cache";
 import { MAX_RPC_FRAME_BYTES } from "./omp/rpc-frame";
 import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame, type RpcProcessLaunch } from "./omp/rpc-process";
 import { readNativeSettings } from "./omp/settings-config";
-import { getSidebarChatsDir, getSessionDirNameForCwd } from "./omp/paths";
+import { getAgentDir, getSidebarChatsDir, getSessionDirNameForCwd } from "./omp/paths";
 import { captureLoopbackScreenshot, ScreenshotError } from "./preview-screenshot";
 import { ProjectTodoError, type TodoDocument, formatTodoForAgent, mutateProjectTodo, parseTodoAgentAction, readProjectTodo, todoAgentActionOperation } from "./project-todo";
 import { resolveProject } from "./worktree";
@@ -28,6 +28,8 @@ import { copySessionLocalRouting, materializeLocalRoutingOverlay, readLocalRouti
 import { selectPromptProfileId, type PromptProfileId } from "./local-model-profile";
 import { PRESET_FULL } from "./tool-presets";
 import { isRecord } from "./type-guards";
+import { SIDEBAR_CONTEXT_TOOLS } from "./sidebar-context-tools";
+import type { UserRecord } from "./auth/users";
 import type {
   BashResultInfo,
   HostToolDefinition,
@@ -59,18 +61,36 @@ interface CompactionResultLike {
 const IDLE_DESTROY_MS = 10 * 60 * 1000;
 const READY_TIMEOUT_MS = 120_000;
 
-/** System prompt for sidebar chat sessions: short, no tools/file-editing, directs
- * users to the main chat for capabilities. Sidebar chats run on omp with
- * --no-tools --no-skills --no-extensions and this fixed prompt. */
-const SIDEBAR_CHAT_SYSTEM_PROMPT = "You are a concise, knowledgeable assistant in a side panel of Cody, a coding workspace. Answer in Markdown. You have no tools: you cannot read or edit files, run commands, or browse. When a request needs those, say so briefly and point the user to the main chat, which can.";
+/**
+ * System prompt for sidebar chat sessions.
+ *
+ * The sidebar preloads NO project context — measured, a sidebar "hi" was
+ * sending 133,559 tokens (43,438 of verbatim AGENTS.md, 89,303 of user-scope
+ * MCP tool schemas) before this. It now starts near 144 and reads what it
+ * needs through its bounded context tools. So the prompt's job is to tell the
+ * model it has no context YET and must ask: a model that assumes it was given
+ * the project answers from training-set guesses about a codebase it has never
+ * seen, which is worse than saying it cannot help.
+ *
+ * Written for a 4B local model as much as a hosted one: short sentences,
+ * explicit tool names, an explicit instruction to page.
+ */
+const SIDEBAR_CHAT_SYSTEM_PROMPT = [
+  "You are a concise assistant in a side panel of Cody, a coding workspace. Answer in Markdown.",
+  "You start with NO project context. Do not guess about this workspace, its files or its sessions from memory.",
+  "Look things up on demand with your tools: list_workspace_files, read_workspace_file, read_project_context (this workspace's AGENTS.md/CLAUDE.md), list_sessions and read_session (a main chat's transcript).",
+  "Results are truncated to fit your context. When one says more remains, call the same tool again with the offset it gives you, and read only as much as the question needs.",
+  "You cannot edit files, run commands or browse. For those, point the user to the main chat.",
+].join(" ");
 
 /** The config overlay every sidebar session loads: no memory recall, no
  * autolearn, no advisor, no prewalk — the same four switches the one-shot
  * runner uses (lib/model-plan/one-shot.ts), for the same reason: with the
  * operator's ambient config a single turn pulled 14k tokens of injected
- * context. Written once into the sidebar-chats dir; rewritten if its
- * content ever changes. */
-const SIDEBAR_OVERLAY_YAML = "memory.backend: off\nautolearn.enabled: false\nadvisor.enabled: false\nprewalk.enabled: false\n";
+ * context. `mcp.enableProjectConfig` joins them so a workspace's own
+ * mcp.json cannot add tools either. Written once into the sidebar-chats dir;
+ * rewritten if its content ever changes. */
+const SIDEBAR_OVERLAY_YAML = "memory.backend: off\nautolearn.enabled: false\nadvisor.enabled: false\nprewalk.enabled: false\nmcp.enableProjectConfig: false\n";
 function sidebarOverlayPath(): string {
   const dir = getSidebarChatsDir();
   const file = path.join(dir, "overlay.yml");
@@ -81,6 +101,62 @@ function sidebarOverlayPath(): string {
     writeFileSync(file, SIDEBAR_OVERLAY_YAML, { mode: 0o600 });
   }
   return file;
+}
+
+/** The empty directory every sidebar child runs from, so omp's context-file
+ * discovery finds nothing to inject. `--no-rules` does NOT cover
+ * `AGENTS.md`/`CLAUDE.md`, and omp has no flag that does; starting somewhere
+ * with none is the lever that works. Kept inside the sidebar-chats dir so it
+ * is obviously Cody-owned state and never a user workspace. */
+export function sidebarBareCwd(): string {
+  const dir = path.join(getSidebarChatsDir(), "cwd");
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/**
+ * A sidebar-only agent dir, so the sidebar sees no user-scope MCP servers.
+ *
+ * omp reads them from `<agent dir>/mcp.json` and has NO flag or setting to
+ * suppress it — `--no-tools`/`--no-extensions` cover its own builtins and
+ * extension discovery, not this. Measured on the owner's install that file
+ * contributed 111 tool schemas, 89,303 tokens, to every sidebar turn. So the
+ * sidebar child runs against its own agent dir whose `mcp.json` is explicitly
+ * empty, with what it genuinely needs SYMLINKED to the real ones:
+ *
+ *   agent.db   — credentials; omp already opens it from concurrent processes,
+ *                and SQLite puts `-wal`/`-shm` beside the symlink TARGET, so
+ *                the live database is untouched (verified).
+ *   models.yml — providers and custom endpoints, including the local
+ *                llama-swap models the sidebar is meant to run on.
+ *   config.yml — model roles and provider order; the overlay applies on top.
+ *   blobs      — externalized image payloads, so attachments still resolve.
+ *
+ * A target that does not exist yet is skipped rather than linked dangling: a
+ * fresh install has no agent.db until its first credential.
+ */
+const SIDEBAR_AGENT_LINKS = ["agent.db", "models.yml", "models.yaml", "config.yml", "config.yaml", "blobs"] as const;
+const SIDEBAR_EMPTY_MCP = '{"mcpServers":{}}\n';
+
+export function sidebarAgentDir(): string {
+  const dir = path.join(getSidebarChatsDir(), "agent");
+  mkdirSync(dir, { recursive: true });
+  const mcpPath = path.join(dir, "mcp.json");
+  let currentMcp: string | null = null;
+  try { currentMcp = readFileSync(mcpPath, "utf8"); } catch { /* absent */ }
+  if (currentMcp !== SIDEBAR_EMPTY_MCP) writeFileSync(mcpPath, SIDEBAR_EMPTY_MCP, { mode: 0o600 });
+  const real = getAgentDir();
+  for (const name of SIDEBAR_AGENT_LINKS) {
+    const target = path.join(real, name);
+    const link = path.join(dir, name);
+    if (!existsSync(target)) continue;
+    try {
+      if (readlinkSync(link) === target) continue;
+      rmSync(link);
+    } catch { /* not a link, or absent */ }
+    try { symlinkSync(target, link); } catch { /* raced with another spawn */ }
+  }
+  return dir;
 }
 
 /**
@@ -150,7 +226,14 @@ const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
     required: ["action"],
   },
 }, FORGE_HOST_TOOL];
-const SERVER_HOST_TOOL_NAMES = new Set(SERVER_HOST_TOOLS.map((tool) => tool.name));
+/** Every tool the SERVER settles itself, so `handleFrame` routes its calls
+ * here instead of to a browser. The sidebar's context tools are server-side
+ * for the same reason the rest are: they read the filesystem and the session
+ * store, which no browser can do. */
+const SERVER_HOST_TOOL_NAMES = new Set([
+  ...SERVER_HOST_TOOLS.map((tool) => tool.name),
+  ...SIDEBAR_CONTEXT_TOOLS.map((tool) => tool.name),
+]);
 const MCP_LIST_TIMEOUT_MS = 15_000;
 /** Cap on the *acknowledgement* of a prompt frame — not on model execution.
  * omp acks a prompt as soon as it accepts it and the run then reports through
@@ -374,7 +457,13 @@ export function buildEngineRpcLaunch(
     );
   }
   const args = ["--mode", spec.mode];
-  if (spec.supportsCwdFlag) args.push("--cwd", opts.cwd);
+  // A sidebar child runs from a BARE directory, not the workspace: omp
+  // discovers `AGENTS.md`/`CLAUDE.md` from its cwd and injects them verbatim
+  // (43,438 tokens on this repo, measured), and `--no-rules` does not cover
+  // that. Its context tools read the real workspace on demand instead, so it
+  // must not start somewhere with context files to find.
+  const sidebarCwd = opts.kind === "sidebar" ? sidebarBareCwd() : undefined;
+  if (spec.supportsCwdFlag) args.push("--cwd", sidebarCwd ?? opts.cwd);
   const newSessionTools = opts.profile?.toolNames ?? opts.toolNames;
   const sidebarSessionDir = opts.kind === "sidebar" ? path.join(getSidebarChatsDir(), getSessionDirNameForCwd(opts.cwd)) : undefined;
   // `--tools` alone is additive in OMP. The 8k profile must be a real
@@ -387,11 +476,16 @@ export function buildEngineRpcLaunch(
     args.push("--tools", opts.profile.toolNames.join(","));
   }
   if (opts.profile?.systemPromptPath) args.push("--system-prompt", opts.profile.systemPromptPath);
+  // A sidebar child gets its own agent dir, whose `mcp.json` is empty, so the
+  // user-scope MCP servers (111 tool schemas / 89,303 tokens on the owner's
+  // install) never reach it. Credentials, providers and blobs are symlinked
+  // in, so sign-ins and the local llama-swap models keep working.
+  const sidebarEnv = opts.kind === "sidebar" ? { PI_CODING_AGENT_DIR: sidebarAgentDir() } : undefined;
   return {
     bin,
     label: harness.binaryName,
     args,
-    ...(opts.profile?.env ? { env: opts.profile.env } : {}),
+    ...(opts.profile?.env || sidebarEnv ? { env: { ...opts.profile?.env, ...sidebarEnv } } : {}),
     readiness: spec.readiness,
   };
 }
@@ -528,6 +622,16 @@ export interface WrapperEngineContext {
   relaunch: (sessionFile: string, profile?: LocalModelProfileLaunch) => RpcProcessLaunch;
   /** Session kind: "sidebar" for sidebar chats, undefined for main/normal sessions. */
   kind?: "sidebar";
+  /**
+   * Sidebar only. The child runs from a BARE cwd so omp discovers no context
+   * files, so the workspace its context tools read is carried separately —
+   * `this.cwd` would be the bare directory and every read would find nothing.
+   */
+  contextCwd?: string;
+  /** Sidebar only: the main chat session `read_session` defaults to. */
+  contextSessionId?: string | null;
+  /** Acting account, for the ownership gate on session reads. */
+  user?: UserRecord | null;
 }
 
 export class AgentSessionWrapper {
@@ -591,9 +695,15 @@ export class AgentSessionWrapper {
   }
 
   /** The smallest local profile is deliberately limited to its two OMP tools.
-   * Sidebar chats also skip all host tools (--no-tools/--no-skills). */
+   *
+   * A sidebar chat gets NEITHER omp's builtins (`--no-tools`) nor the
+   * browser's host tools — but it does get the read-only context tools, which
+   * are the whole point of the redesign: it launches with no project context
+   * at all (measured: 133,559 tokens of preloaded AGENTS.md and MCP schemas
+   * before, ~144 after) and fetches what it needs on demand instead. Their
+   * schemas cost 416 tokens, which even an 8k local model can afford. */
   private hostToolsForCurrentProfile() {
-    if (this.engine.kind === "sidebar") return [];
+    if (this.engine.kind === "sidebar") return SIDEBAR_CONTEXT_TOOLS.map(({ handler: _handler, ...tool }) => tool);
     return this.localProfileLaunch?.profileId === "minimal" ? [] : [...this.hostTools, ...SERVER_HOST_TOOLS];
   }
 
@@ -1056,6 +1166,20 @@ export class AgentSessionWrapper {
    * reject paths, never routed to a browser.
    */
   private async handleServerHostTool(id: string, toolName: string, event: AgentEvent): Promise<void> {
+    const sidebarTool = SIDEBAR_CONTEXT_TOOLS.find((tool) => tool.name === toolName);
+    if (sidebarTool) {
+      // Handlers always resolve to plain text, success or failure, so there is
+      // nothing to catch here: a bounded, human-readable answer is the
+      // contract (lib/sidebar-context-tools.ts). `user` is what gates every
+      // session read, so it must be the account that owns this session.
+      const text = await sidebarTool.handler(isRecord(event.arguments) ? event.arguments : {}, {
+        cwd: this.engine.contextCwd ?? this.cwd,
+        user: this.engine.user ?? null,
+        defaultSessionId: this.engine.contextSessionId ?? null,
+      });
+      this.sendHostToolResult({ type: "host_tool_result", id, result: { content: [{ type: "text", text }] } });
+      return;
+    }
     if (toolName === "forge") {
       try {
         const text = await runForgeTool(event.arguments, { cwd: this.cwd });
@@ -2051,6 +2175,11 @@ export async function startRpcSession(
   engineSessionId?: string,
   profileTarget?: ModelProfileTarget,
   kind?: "sidebar",
+  /** Sidebar only. Its context tools read the workspace and, by default, the
+   * main chat session named here, gated by this account's ownership. Passed
+   * as an object rather than two more positional arguments: this signature is
+   * already eight deep. */
+  sidebar?: { contextSessionId?: string | null; user?: UserRecord | null },
 ): Promise<{ session: EngineSession; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
@@ -2091,6 +2220,10 @@ export async function startRpcSession(
         kind,
       }),
       kind,
+      // The sidebar's child runs from a bare cwd, so its context tools need
+      // the real workspace separately, plus the main session `read_session`
+      // defaults to and the account whose sessions it may read.
+      ...(kind === "sidebar" ? { contextCwd: cwd, contextSessionId: sidebar?.contextSessionId ?? null, user: sidebar?.user ?? null } : {}),
     });
     holder.wrapper = created;
     created.start();

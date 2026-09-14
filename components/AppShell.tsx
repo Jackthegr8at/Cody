@@ -2111,7 +2111,10 @@ export function AppShell() {
           aria-labelledby="workspace-chat-tab"
           style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "chat" ? "flex" : "none", flexDirection: "column" }}
         >
-          {mountedPanels.has("chat") && <SidebarChatPanel cwd={activeCwd || "."} active={rightPanelMode === "chat"} />}
+          {/* The sidebar reads context on demand, so it needs to know which
+              main chat "this session" means: its picker follows this id until
+              the user points it somewhere else. */}
+          {mountedPanels.has("chat") && <SidebarChatPanel cwd={activeCwd || "."} active={rightPanelMode === "chat"} mainSessionId={selectedSession?.id ?? null} />}
         </div>
 
         <div

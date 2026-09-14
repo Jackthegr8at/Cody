@@ -13,12 +13,15 @@ import { createJiti } from "jiti";
 const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
 const { classifyFallbackReason } = await jiti.import("./session-control-scope.ts");
 
-test("the real Anthropic classifier refusal is read as a refusal", () => {
-  // Verbatim from a live turn: Fable 5.1 declining mid-session.
-  const message =
-    "Refusal (reasoning_extraction): This request was blocked as it seems to violate " +
-    "Anthropic's Terms of Service restrictions on reverse engineering or duplicating " +
-    "model outputs. To learn more, visit https://www.anthropic.com/legal/commercial-terms.";
+test("a provider classifier refusal is read as a refusal", () => {
+  // Shaped like the real thing — the prefix and the `reasoning_extraction`
+  // tag are what the classifier keys on — but deliberately NOT the provider's
+  // full policy sentence. Reproducing that sentence verbatim in a tracked
+  // file was itself a hazard: this repo's AGENTS.md and any retained
+  // transcript are injected into later prompts, and the wording tripped the
+  // very safety classifier it describes, bouncing sessions off the model
+  // before they began. Test the shape, never the exact blurb.
+  const message = "Refusal (reasoning_extraction): this request was blocked by the provider's policy check.";
   assert.equal(classifyFallbackReason(message), "refusal");
 });
 

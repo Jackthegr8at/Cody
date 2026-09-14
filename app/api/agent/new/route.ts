@@ -59,7 +59,7 @@ export async function POST(req: Request) {
     }
 
     // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
-    const { provider, modelId, toolNames, thinkingLevel, advisor, localOnly, kind, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: string; advisor?: boolean; localOnly?: boolean; kind?: "sidebar"; [key: string]: unknown };
+    const { provider, modelId, toolNames, thinkingLevel, advisor, localOnly, kind, contextSessionId, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: string; advisor?: boolean; localOnly?: boolean; kind?: "sidebar"; contextSessionId?: string | null; [key: string]: unknown };
     // A stale or forged sessionId must never reach the child RPC.
     delete promptCommand.sessionId;
     if (typeof promptCommand.type !== "string" || !promptCommand.type.trim()) {
@@ -101,6 +101,9 @@ export async function POST(req: Request) {
           : configuredTarget ? { contextWindow: configuredTarget.contextWindow, maxTokens: configuredTarget.maxTokens } : {}),
       }
       : undefined;
+    // Resolved before the spawn: the sidebar's context tools are handed this
+    // account, and every session they read is gated by its ownership.
+    const actor = getRequestUser(req);
     const { session, realSessionId } = await startRpcSession(
       tempKey,
       "",
@@ -110,6 +113,9 @@ export async function POST(req: Request) {
       engineMode ? "" : undefined,
       profileTarget,
       kind,
+      // Sidebar only: its context tools read this account's sessions, and
+      // default `read_session` to whichever main chat the panel is pointed at.
+      kind === "sidebar" ? { contextSessionId: typeof contextSessionId === "string" ? contextSessionId : null, user: actor } : undefined,
     );
     if (localIntent) renameSessionLocalRouting(tempKey, realSessionId);
 
@@ -121,8 +127,7 @@ export async function POST(req: Request) {
 
     // Stamp the creating account so the session lists (and opens) only for
     // them. Sessions created with auth off stay unowned — visible to all.
-    const creator = getRequestUser(req);
-    if (creator) setSessionOwner(realSessionId, creator.id);
+    if (actor) setSessionOwner(realSessionId, actor.id);
 
     if (engineMode) {
       // The sidebar lists engine sessions from the index. An ACP session

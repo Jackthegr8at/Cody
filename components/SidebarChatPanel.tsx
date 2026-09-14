@@ -1,9 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type CSSProperties, type KeyboardEvent } from "react";
-import { History, MessageSquarePlus, Paperclip, Send, Square, Trash2, X } from "lucide-react";
+import { Folder, History, MessageSquarePlus, Paperclip, Send, Square, Trash2, X } from "lucide-react";
 import { useAgentSession, type AttachedImage } from "@/hooks/useAgentSession";
 import { useDragDrop } from "@/hooks/useDragDrop";
+import { comparableProjectPath } from "@/lib/comparable-path";
+import { getFileName } from "@/lib/file-paths";
 import { useI18n } from "@/lib/i18n";
 import { MAX_ATTACHED_IMAGE_BYTES, MAX_ATTACHED_IMAGES } from "@/lib/image-attachments";
 import {
@@ -63,6 +65,12 @@ const iconButtonStyle: CSSProperties = {
   cursor: "pointer",
 };
 
+const SIDEBAR_CONTEXT_BAR_CSS = `
+@container (max-width: 360px) {
+  .sidebar-context-ws-text { display: none; }
+}
+`;
+
 async function fetchSidebarChats(cwd: string): Promise<SidebarChatSummary[]> {
   const response = await fetch(`${SIDEBAR_CHATS_ROUTE}?cwd=${encodeURIComponent(cwd)}`);
   if (!response.ok) return [];
@@ -70,7 +78,25 @@ async function fetchSidebarChats(cwd: string): Promise<SidebarChatSummary[]> {
   return Array.isArray(body) ? body : body.chats ?? [];
 }
 
-export function SidebarChatPanel({ cwd, active = true }: { cwd: string; active?: boolean }) {
+export function SidebarChatPanel({
+  cwd,
+  active = true,
+  mainSessionId = null,
+  onContextTargetChange,
+}: {
+  cwd: string;
+  active?: boolean;
+  /** The session id currently open in the main chat pane. The context
+   * picker defaults to it and the sidebar's read-only tools use it as their
+   * default `read_session` target until the user points the picker at a
+   * different workspace session. */
+  mainSessionId?: string | null;
+  /** Fires with the sidebar's resolved read target whenever it changes —
+   * either the user picked a different session in the picker, or
+   * `mainSessionId` moved and the picker is still following it (no manual
+   * override yet). `null` means no session is available to read. */
+  onContextTargetChange?: (sessionId: string | null) => void;
+}) {
   const { t } = useI18n();
   const [chats, setChats] = useState<SidebarChatSummary[]>([]);
   // `chosenId` is what the user picked (history entry or New chat) and keys
@@ -87,6 +113,27 @@ export function SidebarChatPanel({ cwd, active = true }: { cwd: string; active?:
   const reloadChats = useCallback(async () => {
     setChats(await fetchSidebarChats(cwd).catch(() => []));
   }, [cwd]);
+
+  const [contextSessions, setContextSessions] = useState<SessionInfo[]>([]);
+  // `null` means "follow `mainSessionId`"; set only when the user picks a
+  // different session in the picker. Re-picking the session that matches
+  // `mainSessionId` clears it, resuming auto-follow.
+  const [manualTargetId, setManualTargetId] = useState<string | null>(null);
+  const reloadContextSessions = useCallback(async () => {
+    const response = await fetch("/api/sessions").catch(() => null);
+    if (!response?.ok) { setContextSessions([]); return; }
+    const body = await response.json() as { sessions?: SessionInfo[] };
+    const workspaceKey = comparableProjectPath(cwd);
+    const matches = (body.sessions ?? []).filter(
+      (candidate) => comparableProjectPath(candidate.projectRoot ?? candidate.cwd) === workspaceKey,
+    );
+    matches.sort((a, b) => b.modified.localeCompare(a.modified));
+    setContextSessions(matches);
+  }, [cwd]);
+
+  useEffect(() => {
+    if (active) void reloadContextSessions();
+  }, [active, reloadContextSessions]);
 
   useEffect(() => {
     if (active) void reloadChats();
@@ -115,10 +162,78 @@ export function SidebarChatPanel({ cwd, active = true }: { cwd: string; active?:
     ? { id: chosenId, path: "", cwd, created: "", modified: "", messageCount: 0, firstMessage: "" }
     : null, [chosenId, cwd]);
 
+  const workspaceName = getFileName(cwd) || cwd;
+  const contextTargetId = manualTargetId ?? mainSessionId ?? null;
+  // Plain values: the React Compiler memoizes them correctly, while the
+  // hand-written dependency arrays here could not be preserved (the option
+  // labels also depend on `t`), which made it skip optimizing the component.
+  const contextOptions: SelectOption<string>[] = (() => {
+    const options: SelectOption<string>[] = contextSessions.map((candidate) => ({
+      value: candidate.id,
+      label: candidate.name || candidate.firstMessage || t("sidebarChat.contextUntitled"),
+    }));
+    if (mainSessionId && !contextSessions.some((candidate) => candidate.id === mainSessionId)) {
+      options.unshift({ value: mainSessionId, label: t("sidebarChat.contextCurrent") });
+    }
+    return options;
+  })();
+  // Selecting the session the main chat already has open clears the override,
+  // resuming auto-follow — no separate "follow" entry needed.
+  const handleContextTargetChange = (value: string) => {
+    setManualTargetId(value === mainSessionId ? null : value);
+  };
+
+  // Reports the resolved target (not just user picks): if the picker is
+  // still following `mainSessionId` and the main chat switches sessions, the
+  // lead's spawn default has to move with it.
+  useEffect(() => {
+    onContextTargetChange?.(contextTargetId);
+  }, [contextTargetId, onContextTargetChange]);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "var(--bg)" }}>
-      <div className="workspace-subtitle-bar" style={{ display: "flex", alignItems: "center", gap: 6, borderBottom: "1px solid var(--border)", color: "var(--text-muted)", fontSize: 11, fontWeight: 600 }}>
-        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t("sidebarChat.title")}</span>
+      <div
+        className="workspace-subtitle-bar"
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          borderBottom: "1px solid var(--border)",
+          color: "var(--text-muted)",
+          fontSize: 11,
+          fontWeight: 600,
+          containerType: "inline-size",
+        } as CSSProperties}
+      >
+        <style>{SIDEBAR_CONTEXT_BAR_CSS}</style>
+        <div
+          role="group"
+          aria-label={t("sidebarChat.contextGroupLabel")}
+          style={{ display: "flex", alignItems: "center", gap: 6, flex: 1, minWidth: 0 }}
+        >
+          <span
+            title={cwd}
+            style={{ display: "inline-flex", alignItems: "center", gap: 4, flexShrink: 0, maxWidth: 110, overflow: "hidden", color: "var(--text-dim)" }}
+          >
+            <Folder size={12} aria-hidden style={{ flexShrink: 0 }} />
+            <span className="sidebar-context-ws-text" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {workspaceName}
+            </span>
+          </span>
+          <div style={{ flex: "1 1 70px", minWidth: 56 }}>
+            <Select
+              size="sm"
+              value={contextTargetId}
+              onChange={handleContextTargetChange}
+              options={contextOptions}
+              placeholder={t("sidebarChat.contextPlaceholder")}
+              disabled={contextOptions.length === 0}
+              aria-label={t("sidebarChat.contextSessionLabel")}
+              popupWidth={260}
+              data-testid="ContextSession"
+            />
+          </div>
+        </div>
         <div ref={historyRef} style={{ position: "relative" }}>
           <button type="button" className="ui-focus-ring" style={{ ...iconButtonStyle, width: 22, height: 20, padding: 0, lineHeight: 0 }} title={t("sidebarChat.history")} aria-label={t("sidebarChat.history")} aria-expanded={historyOpen} onClick={() => setHistoryOpen((open) => !open)}>
             <History size={13} />
@@ -153,6 +268,7 @@ export function SidebarChatPanel({ cwd, active = true }: { cwd: string; active?:
         key={chosenId ?? `new-${chosenNonce}`}
         session={session}
         cwd={cwd}
+        contextSessionId={contextTargetId}
         onSessionCreated={(id) => { setCreatedId(id); void reloadChats(); }}
         onTurnEnd={() => void reloadChats()}
       />
@@ -160,9 +276,11 @@ export function SidebarChatPanel({ cwd, active = true }: { cwd: string; active?:
   );
 }
 
-function SidebarChatSession({ session, cwd, onSessionCreated, onTurnEnd }: {
+function SidebarChatSession({ session, cwd, contextSessionId, onSessionCreated, onTurnEnd }: {
   session: SessionInfo | null;
   cwd: string;
+  /** Main chat session the context tools read by default. */
+  contextSessionId: string | null;
   onSessionCreated: (id: string) => void;
   onTurnEnd: () => void;
 }) {
@@ -187,6 +305,8 @@ function SidebarChatSession({ session, cwd, onSessionCreated, onTurnEnd }: {
     session,
     newSessionCwd: session ? null : cwd,
     sessionKind: "sidebar",
+    // What `read_session` defaults to: the main chat this panel is pointed at.
+    contextSessionId,
     advisorEnabled: false,
     thinkingDefaultExpanded: false,
     onAgentEnd: onTurnEnd,

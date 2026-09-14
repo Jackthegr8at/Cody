@@ -73,7 +73,6 @@ export function SetupWizard({ engine, hasModelsUi, readiness, engines, onReadine
     if (anchored.current || readiness.pending) return;
     anchored.current = true;
     const firstGap = steps.find((candidate) => {
-      const requirement = STEP_REQUIREMENTS[candidate];
       // The step that SATISFIES the first missing requirement is the one to
       // open on: no engine → the engine step; no provider → providers.
       if (candidate === "engine") return !readiness.engine;

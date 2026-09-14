@@ -599,6 +599,9 @@ export interface UseAgentSessionOptions {
   /** Which launch a fresh spawn asks `/api/agent/new` for. "sidebar" is the
    * tool-less side-panel chat under cody-sidebar-chats/; absent = main. */
   sessionKind?: "sidebar";
+  /** Sidebar only: the main chat session its `read_session` tool defaults to.
+   * Sent at spawn, so the child knows what "this session" means. */
+  contextSessionId?: string | null;
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
@@ -867,7 +870,7 @@ function toSlashCommandInfo(command: RpcAvailableSlashCommand): SlashCommandInfo
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
-    session, newSessionCwd, advisorEnabled, thinkingDefaultExpanded, onAgentEnd, onSessionNamed, onSessionCreated, onSessionForked, sessionKind,
+    session, newSessionCwd, advisorEnabled, thinkingDefaultExpanded, onAgentEnd, onSessionNamed, onSessionCreated, onSessionForked, sessionKind, contextSessionId,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
     onOpenFile, onOpenPreview, onPreviewUrlsSeen,
   } = opts;
@@ -1824,6 +1827,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             cwd: newSessionCwd,
             type: "ensure_session",
             ...(sessionKind ? { kind: sessionKind } : {}),
+            ...(sessionKind === "sidebar" && contextSessionId ? { contextSessionId } : {}),
             toolNames,
             ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
             ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
@@ -1852,7 +1856,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       } finally {
         ensuringNewSessionRef.current = null;
       }
-    }, [advisorEnabled, isNew, newSessionCwd, sessionKind, newSessionModel, newSessionDefaultModel, setSmartModelProvenance, thinkingLevel, toolPreset, updateSessionControlScope]);
+    }, [advisorEnabled, contextSessionId, isNew, newSessionCwd, sessionKind, newSessionModel, newSessionDefaultModel, setSmartModelProvenance, thinkingLevel, toolPreset, updateSessionControlScope]);
 
   const selectLocalOnly = useCallback(async (): Promise<boolean> => {
     if (localOnly.pending || !localOnly.supported) return false;
