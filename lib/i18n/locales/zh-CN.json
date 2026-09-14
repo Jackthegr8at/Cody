@@ -1872,5 +1872,19 @@
   "usage.accountsNote": "当一个账户达到上限时，引擎会自动切换到另一个账户。",
   "usage.accountPrimary": "主账户",
   "usage.accountSecondary": "副账户",
-  "usage.accountNth": "账户 {n}"
+  "usage.accountNth": "账户 {n}",
+  "routing.title": "按用量路由",
+  "routing.autoBindLabel": "绕过已耗尽的提供商分配角色",
+  "routing.autoBindHint": "当角色的模型所在提供商额度耗尽、被封锁或余额不足时，将角色指向你自己的回退链中第一个可用项，并在提供商恢复后立即还原你的原始设置。子代理通过角色而不是模型名解析。适用于新会话和子代理启动；运行中的会话保持当前模型。",
+  "routing.bindingOn": "角色现在会跟随提供商用量",
+  "routing.bindingOff": "Cody 仅观察；角色保持你的设置",
+  "routing.saveFailed": "无法更改路由设置",
+  "routing.blackoutsTitle": "当前不可用的提供商",
+  "routing.noBlackouts": "所有提供商均正常响应",
+  "routing.until": "直到 {time}",
+  "routing.untilTopUp": "直到充值",
+  "routing.bindingsTitle": "Cody 已重新指向的角色",
+  "routing.noBindings": "无 — 每个角色自身的模型均可用",
+  "routing.bindingsOff": "关闭 — 角色与配置完全一致",
+  "routing.restoresTo": "将还原为 {model}"
 }

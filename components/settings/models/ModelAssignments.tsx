@@ -26,6 +26,7 @@ import type { ModelCatalogHandle } from "@/hooks/useModelCatalog";
 import { ModelPlanPanel } from "../ModelPlanPanel";
 import { RetryFallbackPanel, type RuntimeModelEntry } from "../RetryFallbackPanel";
 import { DistillAssignment } from "./DistillAssignment";
+import { RoutingBindingCard } from "./RoutingBindingCard";
 import { ModelRoles, type RoleModelOption } from "./ModelRoles";
 import { LocalRoutingAssignment, useLocalRoutingConfig } from "./LocalRoutingAssignment";
 
@@ -146,6 +147,7 @@ export function ModelAssignments({ catalog, panelId, engineViews, distillView }:
         </details>
       )}
             {active === "roles" && <ModelRoles models={roleOptions} panelId={panelId} />}
+      {active === "retry" && engine?.id === OMP_ENGINE_ID && <RoutingBindingCard />}
       {active === "retry" && <RetryFallbackPanel models={visibleModels} panelId={panelId} onOpenModelPlan={() => setView("plan")} />}
       {active === "plan" && <ModelPlanPanel />}
       {active === "distill" && <DistillAssignment models={roleOptions} panelId={panelId} />}

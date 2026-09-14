@@ -1872,5 +1872,19 @@
   "usage.accountsNote": "The engine switches to another account automatically when one is limited.",
   "usage.accountPrimary": "Primary",
   "usage.accountSecondary": "Secondary",
-  "usage.accountNth": "Account {n}"
+  "usage.accountNth": "Account {n}",
+  "routing.title": "Usage-aware routing",
+  "routing.autoBindLabel": "Route roles around exhausted providers",
+  "routing.autoBindHint": "When a role's model is on a provider that is out of quota, blocked, or out of credits, point the role at the first live entry of your own fallback chain — and restore your original the moment the provider is back. Subagents resolve through roles instead of model names. Applies to new sessions and subagent spawns; running sessions keep their model.",
+  "routing.bindingOn": "Roles will now follow provider quota",
+  "routing.bindingOff": "Cody is observing only; roles stay as you set them",
+  "routing.saveFailed": "Could not change the routing setting",
+  "routing.blackoutsTitle": "Providers currently out",
+  "routing.noBlackouts": "Every provider is answering",
+  "routing.until": "until {time}",
+  "routing.untilTopUp": "until credits are added",
+  "routing.bindingsTitle": "Roles Cody has re-pointed",
+  "routing.noBindings": "None — every role's own model is available",
+  "routing.bindingsOff": "Off — roles are exactly as configured",
+  "routing.restoresTo": "restores to {model}"
 }

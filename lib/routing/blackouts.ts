@@ -20,6 +20,14 @@ import { blackoutActive, type ProviderBlackout, type RouteMemory } from "./route
 
 /** Provider id of the gateway whose balance is money, not a quota window. */
 const OPENROUTER_PROVIDER = "openrouter";
+/**
+ * Below this many dollars a gateway balance is treated as spent. One Opus
+ * turn with a 64k output budget reserves roughly $1.60 at list price, so a
+ * balance under a dollar cannot start the requests this app actually makes.
+ * Deliberately a floor, not a prediction: the point is to stop routing to
+ * an account that will 402, not to price every request.
+ */
+export const OPENROUTER_CREDITS_FLOOR_USD = 1;
 
 function untieredExhausted(account: UsageAccount): UsageWindow[] {
 	return (account.windows ?? []).filter((window) => Boolean(window) && !window.tier && window.state === "exhausted");
@@ -82,15 +90,29 @@ export function deriveBlackouts(
 	// the blackout carries no expiry and is lifted only by seeing money.
 	// A FAILED balance read is not a zero balance and must not black out the
 	// gateway — `available` is what separates the two.
-	if (openRouter?.available && openRouter.credits && openRouter.credits.remaining <= 0) {
-		blackouts.push({
-			provider: OPENROUTER_PROVIDER,
-			accountId: null,
-			kind: "credits",
-			since: now,
-			until: null,
-			reason: "out of credits",
-		});
+	//
+	// "Out of credits" means "cannot afford a request", NOT "exactly zero".
+	// Measured: a balance of a few cents answered every request with
+	// `402 … can only afford 17889 tokens`, and because it was positive the
+	// gateway counted as usable and won a chain walk. A capped key is the
+	// same story on its own limit.
+	if (openRouter?.available) {
+		const balance = openRouter.credits?.remaining;
+		const keyRoom = openRouter.key?.limitRemaining;
+		const broke = (typeof balance === "number" && balance < OPENROUTER_CREDITS_FLOOR_USD)
+			|| (typeof keyRoom === "number" && keyRoom < OPENROUTER_CREDITS_FLOOR_USD);
+		if (broke) {
+			blackouts.push({
+				provider: OPENROUTER_PROVIDER,
+				accountId: null,
+				kind: "credits",
+				since: now,
+				until: null,
+				reason: typeof balance === "number" && balance < OPENROUTER_CREDITS_FLOOR_USD
+					? `out of credits ($${balance.toFixed(2)} left)`
+					: "key spend limit reached",
+			});
+		}
 	}
 	return blackouts;
 }

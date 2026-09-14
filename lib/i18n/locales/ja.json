@@ -1872,5 +1872,19 @@
   "usage.accountsNote": "1つのアカウントが上限に達すると、エンジンは自動的に別のアカウントに切り替えます。",
   "usage.accountPrimary": "メイン",
   "usage.accountSecondary": "サブ",
-  "usage.accountNth": "アカウント {n}"
+  "usage.accountNth": "アカウント {n}",
+  "routing.title": "使用量に基づくルーティング",
+  "routing.autoBindLabel": "上限に達したプロバイダーを避けてロールを割り当てる",
+  "routing.autoBindHint": "ロールのモデルが上限・ブロック・残高不足のプロバイダーにある場合、あなたのフォールバック チェーンで最初に利用可能な項目へロールを向け、復旧したら元の設定に戻します。サブエージェントはモデル名ではなくロールで解決されます。新しいセッションとサブエージェントの起動に適用され、実行中のセッションは現在のモデルを維持します。",
+  "routing.bindingOn": "ロールはプロバイダーの使用量に追従します",
+  "routing.bindingOff": "Cody は監視のみ。ロールは設定どおりです",
+  "routing.saveFailed": "ルーティング設定を変更できませんでした",
+  "routing.blackoutsTitle": "現在利用できないプロバイダー",
+  "routing.noBlackouts": "すべてのプロバイダーが応答しています",
+  "routing.until": "{time} まで",
+  "routing.untilTopUp": "クレジット追加まで",
+  "routing.bindingsTitle": "Cody が変更したロール",
+  "routing.noBindings": "なし — すべてのロールのモデルが利用可能です",
+  "routing.bindingsOff": "オフ — ロールは設定どおりです",
+  "routing.restoresTo": "{model} に復元"
 }
