@@ -1,8 +1,8 @@
 "use client";
 
 /**
- * Every id Settings can be opened with. The nine HUB ids (accounts, general,
- * forge, providers, models, engine, extensions, memory, system) are the
+ * Every id Settings can be opened with. The eight HUB ids (accounts, general,
+ * forge, providers, models, engine, extensions, system) are the
  * sections `components/settings/registry.ts` renders.
  */
 export type SettingsTab =
@@ -11,7 +11,6 @@ export type SettingsTab =
   | "forge"
   | "models"
   | "providers"
-  | "memory"
   | "engine"
   | "extensions"
   | "system";
@@ -35,7 +34,6 @@ export interface EngineCapabilities {
   fastMode: boolean;
   advisor: boolean;
   subagents: boolean;
-  memory: boolean;
   providerLogin: boolean;
 }
 
@@ -47,14 +45,6 @@ export interface ActiveEngineInfo {
   experimental: boolean;
 }
 
-/** What an older server (no `capabilities` in /api/info) and omp both mean.
- * Everything omp serves is on, so gating only ever bites on an explicit
- * `false` — with one exception, below.
- *
- * `memory` defaults OFF because it is the one flag omp itself reports false:
- * omp keeps memory but exposes no read-back, so defaulting it on would show a
- * Memory tab whose route answers 400. A capability flag hides a surface, it
- * never renders a broken one. */
 export const ALL_CAPABILITIES: EngineCapabilities = {
   liveSessions: true,
   models: true,
@@ -68,7 +58,6 @@ export const ALL_CAPABILITIES: EngineCapabilities = {
   fastMode: true,
   advisor: true,
   subagents: true,
-  memory: false,
   providerLogin: true,
 };
 
@@ -123,10 +112,6 @@ export const OMP_ENGINE_ID = "omp";
 
 /** The Extensions & Tools group description, composed from what the active
  * engine actually serves so a skills-only engine (pi) is not promised MCP. */
-/** What this group actually offers on the ACTIVE engine. Shared by the tab
- * entry and the panel heading: the panel is no longer hidden on an engine
- * without MCP, so a hardcoded "MCP servers, skills and OMP plugins" there
- * would name three things a pi or Hermes user does not have. */
 export function extensionsGroupDescription(capabilities: EngineCapabilities): string {
   const parts = [
     ...(capabilities.mcp ? ["MCP servers"] : []),
@@ -144,9 +129,8 @@ export function extensionsGroupDescription(capabilities: EngineCapabilities): st
  *
  * Named once and shared because the tab and the fetch behind it drifted apart
  * twice: the route is engine-GENERIC (it serves omp's TypeScript schema and
- * Hermes\' DEFAULT_CONFIG-derived one through the same panel), so guarding the
  * fetch on `configEditor` — which means "Cody has hand-built editors for this
- * engine", omp alone — left Hermes with a settings tab whose contents the
- * dialog search could not find. One constant, one answer.
+ * engine" — an engine without that setting flag gets a generic read-only view
+ * instead of a hand-crafted one. One constant, one answer.
  */
 export const SCHEMA_TAB_CAPABILITY = "nativeSettings" satisfies keyof EngineCapabilities;

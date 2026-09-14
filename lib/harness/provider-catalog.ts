@@ -4,12 +4,11 @@
  *
  * Every engine Cody drives resolves credentials from the environment before
  * anything else: pi's env map, omp's (pi's descendant, same names and more),
- * Hermes' provider registry (`api_key_env_vars`), the Claude CLI's
- * ANTHROPIC_API_KEY, Codex's OPENAI_API_KEY. That makes an environment
- * variable the one credential path all five share — which is why Cody stores
- * keys by VARIABLE NAME and hands them to every engine child it spawns
- * (lib/harness/provider-keys.ts), rather than writing five different auth
- * files it would have to keep in step with five upstreams.
+ * the Claude CLI's ANTHROPIC_API_KEY, Codex's OPENAI_API_KEY. That makes an
+ * environment variable the one credential path all engines share — which is
+ * why Cody stores keys by VARIABLE NAME and hands them to every engine child
+ * it spawns (lib/harness/provider-keys.ts), rather than writing different auth
+ * files it would have to keep in step with upstreams.
  *
  * This list is deliberately data: a provider is a name, the engines that
  * understand it, and the variables it needs. Multi-variable providers (Bedrock
@@ -56,11 +55,11 @@ export interface ProviderDefinition {
   catalogIds?: readonly string[];
 }
 
-const ALL = ["omp", "pi", "hermes"] as const;
+const ALL = ["omp", "pi"] as const;
 
 // `loginIds` name every engine's roster entry for the vendor: omp's and pi's
 // pi-ai ids, Claude Code's `claude` / `anthropic-console`, Codex's `chatgpt`,
-// Hermes' `*-oauth` ids. `catalogIds` name the model-catalog provider ids
+// an engine's own `*-oauth` ids. `catalogIds` name the model-catalog provider ids
 // that differ from the row id. Both are joins, never displayed as such.
 export const PROVIDER_CATALOG: readonly ProviderDefinition[] = [
   { id: "anthropic", name: "Anthropic", engines: [...ALL, "claude"], variables: [{ name: "ANTHROPIC_API_KEY", label: "API key", secret: true }], loginIds: ["anthropic", "claude", "anthropic-console"] },
@@ -86,13 +85,12 @@ export const PROVIDER_CATALOG: readonly ProviderDefinition[] = [
   { id: "deepseek", name: "DeepSeek", engines: ALL, variables: [{ name: "DEEPSEEK_API_KEY", label: "API key", secret: true }], loginIds: ["deepseek"] },
   { id: "groq", name: "Groq", engines: ["omp", "pi"], variables: [{ name: "GROQ_API_KEY", label: "API key", secret: true }] },
   { id: "mistral", name: "Mistral", engines: ["omp", "pi"], variables: [{ name: "MISTRAL_API_KEY", label: "API key", secret: true }] },
-  { id: "huggingface", name: "Hugging Face", engines: ["omp", "pi", "hermes"], variables: [{ name: "HF_TOKEN", label: "Access token", secret: true }], loginIds: ["huggingface"] },
+  { id: "huggingface", name: "Hugging Face", engines: ["omp", "pi"], variables: [{ name: "HF_TOKEN", label: "Access token", secret: true }], loginIds: ["huggingface"] },
   { id: "cerebras", name: "Cerebras", engines: ["omp", "pi"], variables: [{ name: "CEREBRAS_API_KEY", label: "API key", secret: true }], loginIds: ["cerebras"] },
   { id: "fireworks", name: "Fireworks", engines: ["omp", "pi"], variables: [{ name: "FIREWORKS_API_KEY", label: "API key", secret: true }], loginIds: ["fireworks"] },
-  { id: "minimax", name: "MiniMax", engines: ["omp", "pi", "hermes"], variables: [{ name: "MINIMAX_API_KEY", label: "API key", secret: true }], loginIds: ["minimax-code", "minimax-code-cn", "minimax-oauth"], catalogIds: ["minimax-cn"] },
-  { id: "kimi", name: "Kimi (Moonshot)", engines: ["omp", "pi", "hermes"], variables: [{ name: "KIMI_API_KEY", label: "API key", secret: true }], loginIds: ["kimi-code", "moonshot"], catalogIds: ["kimi-coding", "moonshotai"] },
-  { id: "zai", name: "Z.AI", engines: ["omp", "pi", "hermes"], variables: [{ name: "ZAI_API_KEY", label: "API key", secret: true }], loginIds: ["zai", "zai-coding-plan"], catalogIds: ["zai-coding-cn"] },
-  { id: "ollama-cloud", name: "Ollama Cloud", engines: ["hermes"], variables: [{ name: "OLLAMA_API_KEY", label: "API key", secret: true }], loginIds: ["ollama-cloud"] },
+  { id: "minimax", name: "MiniMax", engines: ["omp", "pi"], variables: [{ name: "MINIMAX_API_KEY", label: "API key", secret: true }], loginIds: ["minimax-code", "minimax-code-cn", "minimax-oauth"], catalogIds: ["minimax-cn"] },
+  { id: "kimi", name: "Kimi (Moonshot)", engines: ["omp", "pi"], variables: [{ name: "KIMI_API_KEY", label: "API key", secret: true }], loginIds: ["kimi-code", "moonshot"], catalogIds: ["kimi-coding", "moonshotai"] },
+  { id: "zai", name: "Z.AI", engines: ["omp", "pi"], variables: [{ name: "ZAI_API_KEY", label: "API key", secret: true }], loginIds: ["zai", "zai-coding-plan"], catalogIds: ["zai-coding-cn"] },
   {
     id: "bedrock",
     name: "Amazon Bedrock",

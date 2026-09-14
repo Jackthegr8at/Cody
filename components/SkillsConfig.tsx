@@ -614,9 +614,8 @@ export function SkillsConfig({ cwd }: { cwd: string }) {
               {tn("skillsConfig.updateCount", availableCount)}
             </span>
           )}
-          {/* Only when a check would do something: an engine whose installs
-              carry no comparable version (Hermes tracks its own hashes and
-              checks them with `hermes skills check`) gets no dead button. */}
+          {/* Only when a check would do something: some engines track their own
+              hashes and check them their own way; they get no dead button. */}
           {canCheckAny && (
             <button
               type="button"

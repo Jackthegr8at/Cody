@@ -30,6 +30,20 @@ test("streaming code blocks avoid syntax-highlighter line markup", () => {
   assert.doesNotMatch(html, /linenumber/);
 });
 
+test("streaming text renders the full buffer at once with a live indicator, no word-by-word reveal", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    isStreaming: true,
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "The quick brown fox jumps over the lazy dog." }],
+    },
+  }));
+
+  assert.match(html, /The quick brown fox jumps over the lazy dog/);
+  assert.doesNotMatch(html, /stream-word/);
+  assert.match(html, /live-dot/);
+});
+
 test("MCP mount notices stay out of the transcript", () => {
   const html = renderToStaticMarkup(React.createElement(MessageView, {
     message: {
@@ -86,6 +100,19 @@ test("thinking blocks stay collapsed by default", () => {
 test("thinking blocks render open when the interface preference is enabled", () => {
   const html = renderToStaticMarkup(React.createElement(MessageView, {
     thinkingDefaultExpanded: true,
+    message: {
+      role: "assistant",
+      content: [{ type: "thinking", thinking: "weighing the options" }],
+    },
+  }));
+
+  assert.match(html, /aria-expanded="true"/);
+  assert.match(html, /weighing the options/);
+});
+
+test("thinking blocks auto-expand while actively streaming, even when collapsed by preference", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    isStreaming: true,
     message: {
       role: "assistant",
       content: [{ type: "thinking", thinking: "weighing the options" }],

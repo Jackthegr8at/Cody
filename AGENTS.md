@@ -91,6 +91,8 @@ app/api/
   agent/running/events/route.ts   GET SSE stream of currently-running session ids
   agent/[id]/display/route.ts     POST publish a display request | GET latest (auth-gated)
   agent/[id]/display/events/route.ts GET SSE stream of display requests (snapshot + live)
+  sidebar-chats/route.ts          GET list sidebar chats for workspace
+  sidebar-chats/[id]/route.ts     DELETE a sidebar chat session by id
   internal/display/route.ts       POST publish from engine MCP servers (capability-token auth)
   internal/todo/route.ts          POST project To-do MCP operations (capability-token auth)
   auth/**                         omp's provider list + login flow (via RPC); every
@@ -129,18 +131,15 @@ app/api/
   models-config/route.ts          GET/PUT — read/write ~/.omp/agent/models.yml (omp only)
   models-config/test/route.ts     POST test a configured model/provider (omp only)
   omp-settings/route.ts           GET/PUT omp's OWN config.yml — `configEditor`,
-                                   not `nativeSettings`: Hermes and pi declare the
-                                   latter for their OWN schema panels and must not
-                                   land here
+                                   not `nativeSettings`: pi declares the latter for
+                                   its OWN schema panel and must not land here
   omp-settings/schema/route.ts    GET the ACTIVE engine's own settings schema +
                                    values; PUT a dotted-path patch. Engine-NEUTRAL:
                                    it dispatches on HarnessAdapter.settings and
                                    refuses `unsupported` when an engine has none —
-                                   never on an engine id (omp/Hermes/pi today)
+                                   never on an engine id
   mcp/route.ts                    GET/POST/PUT/DELETE MCP servers in either
                                    scope (`scope: "project"` default, `"user"`)
-  memory/route.ts                 GET the active engine's persistent memory, read-only
-                                   (400 `unsupported` unless capabilities.memory)
   provider-keys/route.ts          GET the provider-key catalogue for the active
                                    engine with stored/fromEnvironment flags (never
                                    values); PUT {name,value} (admin) stores or clears
@@ -160,9 +159,9 @@ app/api/
                                    add/remove/update marketplace, install/uninstall/upgrade
   projects/route.ts               GET registered+discovered projects | POST add | DELETE hide
   skills/route.ts                 GET loaded skills + surface flags | PATCH enable/disable
-                                  (frontmatter for omp/pi, config.yaml for Hermes)
+                                  (the SKILL.md frontmatter key)
   skills/install/route.ts         POST install through the active engine's own
-                                  installer (npx skills add / hermes skills install)
+                                  installer (npx skills add)
   skills/store/route.ts           GET browse/search/detail | POST card descriptions (skills.sh registry)
   worktrees/route.ts              GET/POST/DELETE git worktrees
   forge/route.ts                  GET the configured code hosts, tokens redacted to
@@ -236,8 +235,7 @@ lib/
                        chain and the 2-at-a-time queue
   distill-preferences.ts  browser-local Distill preferences (`cody:distill`):
                        reply verbosity + collapsed-thinking summaries, normalizer
-                       plus subscribe/snapshot like stream-tuning.ts
-  harness/             pluggable engine seam: adapters (omp/pi/claude/codex/hermes),
+  harness/             pluggable engine seam: adapters (omp/pi/claude/codex),
                        runtime selection state, three transports (rpc-ui, ACP,
                        per-turn), session index, binary probe + on-demand install
                        (docs/harnesses.md)
@@ -246,8 +244,6 @@ lib/
                        runtime, failing soft) and written back to
                        <pi agent dir>/settings.json — the read/write half of
                        pi's HarnessAdapter.settings
-    hermes-settings.ts the same for Hermes, from its Python DEFAULT_CONFIG,
-                       written through `hermes config`
     provider-catalog.ts the provider → environment-variable catalogue
                        (ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY,
                        AWS_* for Bedrock, …) with the engines each provider is
@@ -259,12 +255,9 @@ lib/
                        every engine
     cli-login.ts       runCliLogin(): drives an engine's OWN login command in a
                        node-pty (URL out, pasted code in, device code shown) —
-                       the shared driver behind claude-login / codex-login /
-                       hermes-login
+                       the shared driver behind claude-login / codex-login
     claude-login.ts    `claude auth login` / `auth status` / `auth logout`
     codex-login.ts     `codex login --device-auth` / `login status` / `logout`
-    hermes-login.ts    `hermes auth add <provider> --type oauth` / `auth list`
-                       / `auth logout`
     omp-credentials.ts omp's stored credentials, read and removed through
                        bin/cody-omp-credentials.mjs (never agent.db directly);
                        feeds the per-account rows in lib/omp/provider-login.ts
@@ -315,7 +308,12 @@ lib/
   composer-model-visibility.ts  browser-side mirror of the visibility file so
                        the composer repaints without a round trip, and the
                        store of record on an open instance (no accounts)
-  rpc-manager.ts       session registry + Cody-owned host tools + startRpcSession over RpcProcess
+  rpc-manager.ts       session registry + Cody-owned host tools + startRpcSession over RpcProcess;
+                       sidebar chats: `kind:"sidebar"` launch adds --no-tools --no-skills
+                       --no-extensions --no-rules --no-prewalk --no-title,
+                       --session-dir <agentDir>/cody-sidebar-chats/<workspace-slug>,
+                       --system-prompt (assistant reminder, no file editing); buildSessionSpawnArgs()
+                       handles flag composition; set_host_tools omitted for sidebar
   session-active-models.ts  every model in use in the CURRENT run (live model,
                        Smart resolution, subagents' resolvedModel, fallback
                        targets, this run's assistant turns) with what uses
@@ -324,10 +322,13 @@ lib/
                        ACTIVE rpc-dialect engine (omp's `tiny` role only when omp
                        is that engine; null for ACP engines), plus the pure
                        normalizer that turns its answer into a name
-  session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
+  session-reader.ts    session .jsonl parsing + path cache + buildSessionContext;
+                       per-session routes (GET /api/agent/[id]/*) resolve paths via
+                       resolveSessionPath() which searches cody-sidebar-chats/** as fallback;
+                       listAllSessions() excludes sidebar (scans only main sessions root);
+                       isSidebarSessionPath() gates access control in DELETE /api/sidebar-chats/[id]
   skills-service.ts    pure-Node skill discovery mirroring the ACTIVE engine's
-                       providers (omp's list, pi's narrower one, Hermes' nested
-                       tree) + getSkillsSurface(): what the surface can do here
+                       providers (omp's list, pi's narrower one) + getSkillsSurface(): what the surface can do here
   engine-capabilities.ts  THE client read of /api/info: capability flags, the
                        active engine's identity and its version, memoized once
                        per page load. AppShell loads it and threads
@@ -339,8 +340,6 @@ lib/
   storage-keys.ts      the cody: browser-storage namespace + legacy migration
                        + engineScopedKey(): the keys that must not survive an
                        engine switch (session ids, pinned models)
-  stream-tuning.ts     tunable streaming pacing/motion params: defaults, clamping,
-                       CSS-var diffing, localStorage store (playground: /dev/stream-tuner)
   thinking-level-labels.ts  the one raw-reasoning-level → label-key map shared
                        by the composer selector, its pending status, chat
                        notices and the subagent dialog
@@ -356,6 +355,8 @@ components/
   SessionSidebar.tsx  session tree + FileExplorer
   ChatWindow.tsx      chat composition + completion sound wrapper
   ChatInput.tsx       input bar + model/thinking/tools/compact controls
+  SidebarChatPanel.tsx sidebar chat: rpc-managed session, model picker, thinking level,
+                      message display, composer (no file editing, no tools)
   ComposerPanels.tsx  composer-attached todo + subagent panels (collapsible, live states)
   TodoList.tsx        todo phase grid with preview/show-all (used by ComposerPanels)
   SubagentTranscriptDialog.tsx  task + final output summary dialog (wide, screen-adaptive)
@@ -365,8 +366,13 @@ components/
   BranchNavigator.tsx in-session branch switcher
   DiffView.tsx        folding unified-diff renderer (FileViewer + GitPanel)
   GitPanel.tsx        right-panel Git tool: changed files + diffs + branch info
-  TodoPanel.tsx       right-panel Tasks content: manual .cody/todo.json To-do list
-                      with an embedded collapsed Commands section when .cody/tasks.json exists
+  todo/
+    TodoPanel.tsx       right-panel To-do list UI: input, active/done rows, drag-reorder,
+                        inline title/notes/color editing, delete with undo, clear-completed
+    TodoItemRow.tsx     memo'd row component: checkbox with animation, colored dot palette,
+                        chevron-toggled inline notes textarea, grip drag-handle, trash, hover-reveals
+    TodoQuickAdd.tsx    top-bar quick-add input; Enter adds + keeps focus, Escape clears
+    useTodoDocument.ts  hook: poll/SSE watch on /api/todo, optimistic mutations, busy/error state
   TasksPanel.tsx      embedded Commands runner for .cody/tasks.json
   PreviewPanel.tsx    right-panel Preview: walks the display candidate ladder —
                       direct/gateway iframe, else the streamed surface below —
@@ -392,8 +398,6 @@ components/
                       views having moved to the Models and Providers hubs
   McpConfig.tsx       MCP server editor (Settings › Extensions › MCP), scoped
                       to this project's mcp.json or the user-level one
-  MemoryPanel.tsx     Settings › Memory: the engine's own memory documents,
-                      read-only, each with its path (capability-gated)
   PluginsConfig.tsx   embedded under Settings › Extensions › Plugins; opens
                       PluginMarketplace
   PluginMarketplace.tsx marketplace dialog: browse/search/install across
@@ -494,10 +498,10 @@ hooks/
                            process-wide dormancy latch (unsupported/401/403)
   useIsMobile.ts           responsive breakpoint hook
   usePrefersReducedMotion.ts OS reduce-motion preference (SMIL-safe)
-  useStreamTuning.tsx      live StreamTuning: playground context override, else the stored value
   useTheme.ts              theme state: saved per account (/api/accounts/me) and mirrored in localStorage "cody:theme"; first visit follows prefers-color-scheme
 
 bin/
+
   cody-server.js           custom server; also WS upgrade for /api/display/socket
                            (stream frames + input) and native-gateway host routing;
                            mints the display capability secret at boot
@@ -578,7 +582,7 @@ is a reserved seam if per-uid isolation is ever wanted.
 ## Pluggable engines (`lib/harness/`)
 
 The coding agent under the UI is a swappable **engine**: omp (founding,
-full-featured), plus pi, Claude Code, Codex and Hermes (experimental). Full
+full-featured), plus pi, Claude Code and Codex (experimental). Full
 architecture: `docs/harnesses.md`. The load-bearing rules:
 
 - `getHarness()` resolves persisted selection (`cody-engine.json`) →
@@ -607,8 +611,7 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   pins which engine rides which:
   - **ACP** (`acp-session.ts`) — one long-lived stdio JSON-RPC server,
     `session/new` once and `session/prompt` per turn. An engine is a data
-    description (`AcpEngineSpec`), never a class. Hermes speaks it natively
-    (`hermes acp`); Claude Code and Codex speak it through
+    description (`AcpEngineSpec`), never a class. Claude Code and Codex speak it through
     `@agentclientprotocol/claude-agent-acp` and `@agentclientprotocol/codex-acp`
     — neither CLI has an ACP mode of its own. It is the only transport with a
     real approval channel (`session/request_permission`), which is why an ACP
@@ -694,8 +697,8 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   intentional exception is the Smart model
   label: it is exactly `Smart`, with no engine, role, or resolved-model
   suffix. `agentSession.startingAgent` fires on any slow first connect —
-  i.e. exactly the Hermes/Codex cold start — which is why it said
-  "Starting omp…" to a Hermes user. The Info panel's copyable diagnostics say
+  i.e. exactly an ACP engine's cold start — which is why it said
+  "Starting omp…" to a Codex user. The Info panel's copyable diagnostics say
   `Engine: <shortName> <version>` for the same reason: the VALUE was always
   the active engine's, only the label lied.
 - **Composer request state has two authorities.** Fast catalog support is a
@@ -712,18 +715,18 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   tool continuation), never the stream already in progress.
 - **A capability flag is a UI convenience; the ROUTE is the boundary**
   (`lib/engine-guard.ts`). Every omp-shaped endpoint used to answer 200
-  whichever engine was selected — probed directly under Hermes they served
+  whichever engine was selected — probed directly under another engine they served
   omp's model catalog, model roles, models.yml, config.yml, login providers,
-  plan quota and version, each presented as Hermes'. Some were reachable
+  plan quota and version, each presented as that engine's. Some were reachable
   through the UI too, because the flag that hid them is not the flag they
-  needed: Hermes declares `nativeSettings` (it has its own config) and so
+  needed: an engine that declares `nativeSettings` (it has its own config)
   rendered omp's `config.yml` panels with a Save that wrote to a file it
   never reads; pi has `chatExtras` and so offered omp's `Smart` model-roles
   row and an Export that shells `omp --export`. Every such route now either
   DISPATCHES on `getHarness()` (`/api/models`, `/api/omp-version`) or on an
   ADAPTER METHOD (`/api/omp-settings/schema` → `HarnessAdapter.settings`), or
   REFUSES with 400 `{code:"unsupported"}`, which is the same answer
-  `/api/memory` gives and the one the client hides on. Prefer the adapter
+  every capability-gated route gives and the one the client hides on. Prefer the adapter
   method: a `getHarness()` dispatch is still a list of engine ids in
   engine-neutral code, and the id whose branch is the `else` silently becomes
   the default for every engine nobody thought about. Pinned by
@@ -748,16 +751,15 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   shapes are live at once and both are handled: `configOptions` with
   `category: "model"` + `session/set_config_option` (current spec; the Claude
   Code and Codex adapters), and the older `models: {availableModels,
-  currentModelId}` + `session/set_model` + `current_model_update` (measured
-  live against Hermes 0.19, which publishes no `configOptions` at all). The
+  currentModelId}` + `session/set_model` + `current_model_update` (kept for an
+  agent that publishes no `configOptions` at all). The
   shape decides which call is made, so `acp-session.ts` still names no
   engine. Whether an agent offers models is per SESSION — it depends on the
   account the session opened with — so it is reported as data, never as a
   static capability flag that could not tell the truth about it.
 - **ACP session MODES are session state the same way** (`AcpModeSurface`,
   `session/new` → `modes: {availableModes, currentModeId}`). Claude publishes
-  Manual / Accept edits / Plan / Auto, Hermes Default / Accept Edits / Don't
-  Ask, Codex none — and "none" is the answer for every rpc-dialect engine
+  Manual / Accept edits / Plan / Auto, Codex none — and "none" is the answer for every rpc-dialect engine
   too, so the list rides `get_state` as `{availableModes, currentModeId}`
   and the composer's mode button (`ChatInput`, `data-testid`
   `agent-mode-button`) exists only while the list is non-empty. `set_mode`
@@ -772,7 +774,7 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   command" that reached the client without a code.
 - **Provider credentials are Cody-level state, delivered as environment**
   (`lib/harness/provider-keys.ts`). Every engine already reads its keys from
-  the process environment (pi/omp env maps, Hermes `api_key_env_vars`,
+  the process environment (pi/omp env maps,
   Claude `ANTHROPIC_API_KEY`, Codex `OPENAI_API_KEY`), so the store is a
   0600 JSON file in the instance data dir and `engineChildEnv()` is the one
   function every child spawn (`lib/omp/rpc-process.ts`,
@@ -780,7 +782,7 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   from: process env, then stored keys, then the spec's own entries (a spec
   must be able to override — `CLAUDE_CODE_EXECUTABLE`, `CODEX_PATH`). Values
   never reach the browser; the panel gets `stored` / `fromEnvironment`
-  flags. This is what the owner's "pi and Hermes didn't work" came down to:
+  flags. This is what the owner's "pi didn't work" came down to:
   no credentials, and Cody dropping the error — an assistant turn ending
   with `stopReason: "error"` used to append an EMPTY bubble; it is now an
   error notice in the provider's words, with a pointer at the keys panel when
@@ -792,7 +794,7 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   credential only the engine's own store may hold, and every engine has a
   login of its own that prints a URL and takes a code back — omp's rpc-ui
   extension frames, pi's pi-ai flows, `claude auth login`,
-  `codex login --device-auth`, `hermes auth add`. The surface is
+  `codex login --device-auth`. The surface is
   `list()` → rows `{id, name, authenticated, kind: oauth|device, canLogout}`,
   `login(id, ui)` with `ui = {onUrl, onDeviceCode, onPrompt, onManualInput,
   onProgress, signal}`, optional `logout(id)`. `/api/auth/providers`,
@@ -843,8 +845,8 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   `AuthStorage` per turn, unlike `config.yml`.
 - **The composer reads whichever catalog is real.** `useAgentSession` keeps
   `modelCatalogSource` from `/api/models` and, when it says `"session"`,
-  serves the composer the list it adopted off `get_state` instead (measured:
-  Hermes 0.19 publishes 11). It exposes `modelSelectable` — `null` for a
+  serves the composer the list it adopted off `get_state` instead (a
+  session-scoped catalog). It exposes `modelSelectable` — `null` for a
   global-registry engine, where the rpc-dialect `set_model` surface
   (`chatExtras`) decides as it always did, and a boolean for a session-scoped
   one, where the SESSION decides. `ChatWindow` gates the picker on that, so no
@@ -853,17 +855,6 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   resolves its own on `session/new` and reports it back, and the picker only
   appears once a session exists — before that there is genuinely nothing to
   choose from.
-- **Agent memory is read-only, on purpose** (`capabilities.memory`,
-  `HarnessAdapter.readMemory`, `/api/memory`, `components/MemoryPanel.tsx`).
-  Memory is the agent's own account of what it learned, so Cody shows it and
-  never writes it; each document carries its `path` precisely so the user can
-  open and edit the file themselves. The flag is true only when an engine
-  keeps memory AND can hand it back — Hermes today; omp keeps memory but
-  exposes no read-back, so its surface stays hidden rather than empty. That is
-  also why `memory` is the one flag defaulting to FALSE in
-  `ALL_CAPABILITIES` (components/SettingsTabs.tsx). A document that does not
-  exist yet is the normal state of a fresh install: the panel says the agent
-  has not written anything here yet, never an error.
 - The Docker image ships NO engine — omp included. Every engine installs
   from the picker into the persistent tools prefix (`CODY_TOOLS_DIR`,
   default `<data dir>/tools`; entrypoint puts its `bin` first on PATH), and
@@ -888,10 +879,7 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
 - **The update check follows the ECOSYSTEM, not npm** (`lib/harness/updates.ts`
   `fetchLatestPackageVersion`). npm engines are looked up on
   registry.npmjs.org (scoped names fully URL-encoded, which that registry
-  accepts), Hermes on pypi.org, whose manifest nests the number under `info`
-  — and whose project name is the spec WITHOUT its extras marker
-  (`hermes-agent[acp]` → `hermes-agent`, since the bracketed form is install
-  syntax and 404s). A wrong-registry lookup is not a loud failure: it reports
+  accepts). A wrong-registry lookup is not a loud failure: it reports
   "no update available" for the rest of the instance's life. All five specs
   were checked against the live registries.
 - **An engine installed as TWO packages has TWO versions, and Cody says which
@@ -931,7 +919,7 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   name is not something the installer models.
 - **`HarnessAdapter.verifiedVersion`** is the exact engine version this Cody
   build was last audited against — every adapter carries one (omp: 18.1.21,
-  claude-agent-acp: 0.73.0, codex-acp: 1.8.0, pi: 0.73.1, hermes: 0.19.0).
+  claude-agent-acp: 0.73.0, codex-acp: 1.8.0, pi: 0.73.1).
   It is shown verbatim on the System hub's engine roster card (Settings ›
   System › Engines) ("Built to vX.Y.Z", served through `/api/engines`), and
   its MAJOR drives the warnings: `checkEngineUpdates` compares it to the
@@ -952,7 +940,7 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   `lib/omp/` and `lib/harness/`, importing `lib/omp/*` fails the test unless
   the file is on the in-test allowlist with a written reason, stale allowlist
   entries fail too (the list only ratchets down), and the adapter/translator
-  modules (`harness/omp|claude|codex|hermes|claude-stream|acp-session`) are
+  modules (`harness/omp|claude|codex|claude-stream|acp-session`) are
   private to the seam —
   everything else goes through `@/lib/harness` or its engine-neutral
   submodules. New engine-neutral code must NOT import `lib/omp` directly;
@@ -1040,10 +1028,9 @@ setting added upstream appears without a Cody change.
 - **The route is engine-neutral; the derivation is per engine.**
   `HarnessAdapter.settings` (`EngineSettingsSurface` in `lib/harness/types.ts`)
   is one pair of methods — `readSchema()` → `{path, schema, values, reason?}`
-  and `write(patch)` → `{written, rejected, values}` — implemented three ways:
+  and `write(patch)` → `{written, rejected, values}` — implemented two ways:
   omp from its TypeScript schema (`lib/harness/omp.ts`, the one adapter the
-  seam lets import `lib/omp`), Hermes from its Python `DEFAULT_CONFIG`
-  (`lib/harness/hermes-settings.ts`), and pi from the four-column settings
+  seam lets import `lib/omp`), and pi from the four-column settings
   tables in its installed package's `docs/settings.md`
   (`lib/harness/pi-settings.ts`, writing `<pi agent dir>/settings.json`).
   `/api/omp-settings/schema` gates on `nativeSettings`, reads the hook, and
@@ -1054,8 +1041,7 @@ setting added upstream appears without a Cody change.
   cannot do that. Adding the panel to an engine is now: implement the
   surface, hang it off the adapter, flip the flag.
 - **Derived, never hand-listed — even when there is no schema to read.** That
-  is the whole property: Hermes has no schema but has DEFAULT_CONFIG; pi has
-  neither, but ships every setting's type, default and description in
+  is the whole property: pi has no schema, but ships every setting's type, default and description in
   `docs/settings.md`, which is regular enough to parse (pi's
   `dist/core/settings-manager.js` carries the same defaults in imperative
   code with no types, descriptions or grouping — a hand-written key list
@@ -1309,16 +1295,16 @@ setting added upstream appears without a Cody change.
   Preview button, a throw is a chat that will not open.
 - **Project To-do list is durable user intent, not an engine plan.** `.cody/todo.json`
   sits at the resolved project root so it is visible in the project and survives session
-  or engine changes. Cody writes it atomically, preserves unknown top-level keys, and
-  keeps append-only history capped to the newest 500 entries, so users can audit or reopen
-  an agent completion. omp reaches it through the RPC `cody_todo` host tool; Claude Code
-  and Codex use the bundled MCP server with a session-scoped capability token that resolves
-  the session cwd. Hermes and any engine without a tool bridge still reach it as a plain
-  file: the panel's "Ask the agent" button drops a prompt into the composer that names
-  the path and the tool, so discoverability never depends on prompt injection Cody does
-  not do. This remains separate from an engine execution plan (`omp todo` to
-  Composer `TodoList`): the To-do tab (panel id `tasks`, renamed so the model never confuses it with the composer's task list) calls the user-owned section To-do, while the legacy
-  `.cody/tasks.json` runner is its collapsed Commands section only when that file exists.
+  or engine changes. Cody writes it atomically and preserves unknown top-level keys.
+  omp reaches it through the RPC `cody_todo` host tool; Claude Code and Codex use the
+  bundled MCP server with a session-scoped capability token that resolves the session cwd.
+  Any engine without a tool bridge still reaches it as a plain file: the panel's
+  "Ask the agent" button drops a prompt into the composer that names the path and the tool,
+  so discoverability never depends on prompt injection Cody does not do. This remains
+  separate from an engine execution plan (`omp todo` to Composer `TodoList`): the To-do
+  tab (panel id `tasks`, renamed so the model never confuses it with the composer's task
+  list) calls the user-owned section To-do, while the legacy `.cody/tasks.json` runner is
+  its collapsed Commands section only when that file exists.
 - **Client**: `hooks/useDisplayRequests.ts` subscribes to the SSE route;
   `AppShell` auto-opens the right panel in `preview` mode on live requests —
   the explicit, server-driven trigger alongside the client-side URL sniffing
@@ -1539,7 +1525,7 @@ handled or safely ignored.
   `reconcileAgentState` — there it must be read BEFORE the busy early-return,
   because a turn blocked on an approval is precisely a busy turn.
 - **Render the agent's own options, in its order. `kind` is a styling hint,
-  never an identity.** Hermes sends five options and TWO of them share
+  never an identity.** An agent can send five options with TWO sharing
   `kind: "allow_always"` ("Allow for session" and "Allow always") — ACP has no
   session-scoped kind. Deduping, grouping or reordering by kind deletes a real
   grant. `optionId` is the identity (and the React key), `name` is the label
@@ -1739,12 +1725,7 @@ handled or safely ignored.
   data dir, never in omp's config.yml or the engine's session files, so an
   engine upgrade or switch cannot lose or rewrite them. Under an ACP engine
   the routes answer `unsupported` and every Distill surface hides.
-- **Smoothness.** The distilled reply streams through the same
-  `useSmoothStreamText` pacer as a live block (`revealFromStart` mode, added
-  for a target that arrives whole); cached answers render at once with no
-  animation. Trap fixed on the way: the pacer's unmount cleanup must null
-  `frameRef` after `cancelAnimationFrame`, or StrictMode's effect re-run sees
-  a "pending" frame and never schedules the reveal.
+- **Smoothness.** The distilled reply streams through the coalescer, which reparses the full buffer on each animation frame, giving smooth multi-token reveals without a typewriter pacer. Thinking blocks auto-expand while streaming and collapse when finished, providing clear context hierarchy without jarring motion.
 - **Cancel subtask** (`SubagentTranscriptDialog` `CancelSubtaskButton`): omp's
   RPC has no per-subagent abort (only whole-turn `abort`), so the button
   STEERS the parent through the existing `steer` path with an instruction to
@@ -1868,14 +1849,23 @@ handled or safely ignored.
   following until the next prompt; `scrollUserMsgToTop` handles the
   pending-scroll after sending.
 - **A completion never moves a reader.** The terminal reload replaces
-  `messages` wholesale and every turn re-realizes its content-visibility
-  placeholder, so a reader's kept scrollTop would land on shifted content —
-  the "completion ding scrolled me way up" bug. The arming sites
-  (finishPromptWithoutStream, agent_end) capture the reader's scrollTop in
-  `completionScrollAnchorRef`; the terminal re-pin layout effect restores it
-  pre-paint and once more a frame later (followers get pinned to the bottom
-  instead, as before). A fresh user wheel/keyboard scroll always wins over
-  the re-assert.
+  `messages` wholesale. Two things make that invisible to someone scrolled
+  up: (1) transcript rows and MessageViews are keyed by ENTRY ID
+  (`turnKeyOf` in ChatWindow's CommittedTranscript, exposed on the DOM as
+  `data-turn-key`), never by array index, so the reload does not remount
+  the rows above the viewport and the browser's own scroll anchoring holds;
+  (2) the arming sites (finishPromptWithoutStream, agent_end) capture an
+  ELEMENT anchor — `captureReaderAnchor()`: the first turn whose bottom is
+  below the container's top edge, and its offset from that edge — and the
+  terminal re-pin layout effect puts that element back at that offset,
+  pre-paint and again a frame later once content-visibility placeholders
+  realize their heights; a pixel `scrollTop` is only the fallback for a key
+  that vanished (a pixel offset lands on different content once the
+  per-turn intrinsic-size estimates above the viewport re-realize, which
+  was the "completion ding scrolled me way up" bug). The restore is NEVER
+  skipped because the reader scrolled recently — that early-out was the
+  other half of the bug; a scroll AFTER the restore still wins as before.
+  Followers get pinned to the bottom instead.
 - Programmatic smooth scrolling must respect `prefers-reduced-motion`
   (`usePrefersReducedMotion` in `hooks/usePrefersReducedMotion.ts` — also the
   only way to stop SVG SMIL animations, which CSS cannot).
@@ -1932,13 +1922,11 @@ handled or safely ignored.
 ### Plugins and skills
 - `/api/plugins` shells out to the user's `omp plugin` CLI (`list/install/uninstall/enable/disable/upgrade`, `--json` where available) — never the Bun-only SDK. `lib/omp/plugin-cli.ts` holds the shared `execFile`/loose-JSON-parse helpers (`runOmpCli`, `parseJsonLoose`), used by both `/api/plugins` and `/api/plugins/marketplace`.
 - **Plugin marketplace** (`/api/plugins/marketplace`, `lib/omp/marketplace.ts`, `components/PluginMarketplace.tsx`): browse data is a pure-Node read of `marketplaces.json` (the registry of `omp plugin marketplace add`ed catalogs, at `getMarketplacesRegistryPath()`) plus each marketplace's cached `marketplace.json` catalog (`getPluginsDir()`'s cache dir, `~` expanded) — no child process. `lib/omp/paths.ts`'s `getOmpDataRoot()` is the shared root for both (`~/.omp`, or its XDG equivalent): omp's own `DirResolver` gates XDG activation on the SAME `PI_CODING_AGENT_DIR`-override check for config-root-scoped paths (plugins, marketplaces) as for agent-scoped ones, so `getOmpDataRoot()` reuses the existing `xdgDataAgentRoot()` value rather than re-deriving a separate check — the override disables XDG resolution instance-wide, not per-category. Installed-state (which catalog plugins are already installed, at what version/scope) comes from `omp plugin list --json`, same as `/api/plugins`. Every mutation (add/remove/update marketplace, install/uninstall/upgrade a plugin) shells out to the CLI; name/id segments are validated against omp's own `^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$` rule before reaching argv.
-- `/api/skills` uses `lib/skills-service.ts`, a pure-Node scanner mirroring the ACTIVE engine's discovery. omp: project `.omp/skills` (walk-up), `~/.omp/agent/skills`, then the `.claude` / `.agent(s)` / `.codex` / `.github` compat dirs and managed skills. pi: a narrower set (`buildPiScanRoots`). Hermes: `buildHermesScanRoots` — see below.
-- **The scan is one level deep for every engine but Hermes.** omp's and pi's roots sit inside repos and user config dirs, so a recursive walk there would list every vendored, checked-out or archived `SKILL.md` as a loaded skill. `SkillScanRoot.recursive` is set only by the Hermes branch, whose engine really does `rglob("SKILL.md")`.
-- Skill toggling edits only the `disable-model-invocation` frontmatter key on the target `SKILL.md`; keep that surgical so user formatting survives. Hermes is the exception (below) and never has its `SKILL.md` rewritten.
-- `/api/skills/install` shells through `npx skills add ... --agent universal`, which installs into the ecosystem-standard `.agents/skills` dirs omp reads; project installs run with the selected cwd. Hermes installs through its own CLI instead (below).
-- **Hermes' skills, on Hermes' terms** (`lib/harness/hermes-skills.ts`, verified against 0.19.0). Its roots are `$HERMES_HOME/skills` plus `skills.external_dirs` from its `config.yaml`, each walked recursively — `hermes skills install --category security 1password` writes `skills/security/1password/SKILL.md`, and categories nest further. The walk prunes what Hermes prunes (`.hub`, `node_modules`, VCS/cache dirs, and a skill package's `references/templates/assets/scripts`, the last only when the containing dir is itself a skill). Enable/disable is `skills.disabled` in `config.yaml`, a list of skill NAMES — Hermes never reads the frontmatter key omp honours — and Cody writes it by running Hermes' OWN `skills_config.save_disabled_skills` through the venv interpreter beside the binary, the same "ask the engine's runtime" trick `hermes-settings.ts` uses (`hermes config set` stores scalars only and cannot write a list; `hermes skills config` is a curses checklist). A `platforms:` mismatch hides a skill, as it does in Hermes; `environments:` (kanban/docker/s6) is deliberately NOT replicated, because mis-detecting it would hide a skill that IS loaded. Provenance comes from `<skills root>/.hub/lock.json`, matched on `install_path` first because Hermes keys that ledger by the name it resolved at install time, which is not always the frontmatter `name`.
-- **`hermes skills install` exits 0 whether or not it installed.** Verified: a security-scan block prints "Installation blocked: …" and an unresolvable identifier prints "Error: Could not fetch …", both with status 0. `installHermesSkill` therefore reads success from a literal `Installed: <path>` line, and never passes `--force` (that overrides a blocked verdict, which is the user's call in a terminal). Cody's store spec `owner/repo@slug` becomes Hermes' `skills-sh/owner/repo/slug`; a `https://<domain>` whole-provider bundle has no Hermes equivalent and is refused with a reason.
-- **The surface reports what it can do.** `GET /api/skills` returns `installScopes` and `canToggle` beside the skills. Hermes has one skills root per home and no project scope, so its store hides the scope selector and `/api/skills/install` refuses `scope: "project"`; Cody's update check diffs a GitHub tree hash from the skills.sh lock, which Hermes' own hashes cannot answer, so every Hermes install reports `canCheckForUpdates: false`, the per-skill Check button and the footer check-all both hide, and the System card says checks are unavailable rather than "up to date".
+- `/api/skills` uses `lib/skills-service.ts`, a pure-Node scanner mirroring the ACTIVE engine's discovery. omp: project `.omp/skills` (walk-up), `~/.omp/agent/skills`, then the `.claude` / `.agent(s)` / `.codex` / `.github` compat dirs and managed skills. pi: a narrower set (`buildPiScanRoots`).
+- **The scan is one level deep.** Every root sits inside a repo or a user config dir, so a recursive walk would list every vendored, checked-out or archived `SKILL.md` as a loaded skill.
+- Skill toggling edits only the `disable-model-invocation` frontmatter key on the target `SKILL.md`; keep that surgical so user formatting survives.
+- `/api/skills/install` shells through `npx skills add ... --agent universal`, which installs into the ecosystem-standard `.agents/skills` dirs omp reads; project installs run with the selected cwd.
+- **The surface reports what it can do.** `GET /api/skills` returns `installScopes` and `canToggle` beside the skills, so the store hides a scope selector or a Check button for an engine whose installer cannot honour them, rather than rendering a control that fails.
 - **The composer's skill lookup is capability-gated.** `ChatInput` fetches `/api/skills` to dim dormant skills in the `/` palette; it reads `capabilities.skills` off the flag set AppShell threads down. Without that gate, Claude Code and Codex (`skills: false`) ran a full filesystem scan on every `/` keystroke.
 - The skill store (`components/SkillsStore.tsx`, `/api/skills/store`, `lib/skills-registry.ts`) talks to skills.sh's public endpoints — `/api/search` (fuzzy for one word, semantic over descriptions for phrases) and `/api/download/{owner}/{repo}/{slug}` for SKILL.md details. The documented `/api/v1/*` surface needs a Vercel OIDC token, so browse views are category-seeded searches, never a scraped ranking. Well-known (non-GitHub) sources install as whole-provider bundles (`https://<domain>`) because the CLI has no per-skill selector for them; the UI says so.
 

@@ -12,7 +12,7 @@
  * A change anywhere ends in `invalidateProviderReads()`, and this list
  * re-reads through the settings route cache.
  */
-import { AlertCircle, ArrowDown, ArrowUp, Check, Copy, Cpu, Loader2, Plus, RefreshCw, Server } from "lucide-react";
+import { AlertCircle, Check, Copy, Cpu, Loader2, Plus, RefreshCw, Server } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { useConfigWriter } from "@/hooks/useConfigWriter";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
@@ -72,7 +72,6 @@ export function ProviderDirectory() {
   const connected = useMemo(() => sortConnectedRows(rows), [rows]);
   const canEdit = response?.canEdit ?? false;
   const readOnly = response?.instanceSource === "readonly";
-  const canReorder = engine?.id === "omp" && capabilities.configEditor && canEdit && !readOnly && connected.length > 1;
   const canAddCustom = capabilities.models;
 
   const detailRow = detail ? rows.find((row) => row.id === detail.id) ?? null : null;
@@ -106,19 +105,6 @@ export function ProviderDirectory() {
     }
   };
 
-  const move = (index: number, delta: number) => {
-    const target = index + delta;
-    if (target < 0 || target >= connected.length) return;
-    const next = [...connected];
-    [next[index], next[target]] = [next[target], next[index]];
-    // The engine's order names its own provider ids, never a login id from
-    // another engine's roster (`claude`, `chatgpt`, ...): orderIds is that
-    // narrower list, and a row with none (a bare sign-in) drops out rather
-    // than writing something the engine does not recognize.
-    const ordered = next.flatMap((row) => row.orderIds);
-    void track(() => writer.patchTop({ modelProviderOrder: ordered }).then(reload));
-  };
-
   const pick = (choice: PickChoice) => {
     setPickerOpen(false);
     setDetail({ id: choice.row.id, loginId: choice.loginId ?? null, autoStart: Boolean(choice.loginId) });
@@ -138,12 +124,7 @@ export function ProviderDirectory() {
           {row.disabled && canEdit && (
             <button type="button" className="ui-focus-ring" onClick={(event) => { stopRow(event); void enable(row); }} onKeyDown={stopRow} disabled={readOnly} style={rowButton}>Enable</button>
           )}
-          {canReorder && (
-            <>
-              <button type="button" className="ui-focus-ring" aria-label={`Move ${row.name} up`} disabled={index === 0} onClick={(event) => { stopRow(event); move(index, -1); }} onKeyDown={stopRow} style={{ ...rowButton, opacity: index === 0 ? 0.35 : 1 }}><ArrowUp size={14} aria-hidden="true" /></button>
-              <button type="button" className="ui-focus-ring" aria-label={`Move ${row.name} down`} disabled={index === connected.length - 1} onClick={(event) => { stopRow(event); move(index, 1); }} onKeyDown={stopRow} style={{ ...rowButton, opacity: index === connected.length - 1 ? 0.35 : 1 }}><ArrowDown size={14} aria-hidden="true" /></button>
-            </>
-          )}
+
         </>
       ),
       onOpen: () => setDetail({ id: row.id }),

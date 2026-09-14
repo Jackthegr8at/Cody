@@ -10,11 +10,11 @@ import type { HarnessAdapter, HarnessCapabilities } from "./harness/types";
  * Cody's rule is that a surface an engine cannot serve stays hidden; it never
  * renders another engine's data. The client half of that rule was already in
  * place (capability flags hide tabs and panels), but the routes underneath had
- * no gate at all: they read omp's files and spawned omp's binary whichever
- * engine was selected, and answered 200. Probed directly against a Hermes
- * instance they served omp's model catalog, omp's model roles, omp's
- * models.yml, omp's config.yml, omp's login providers and omp's plan quota —
- * every one of them presented as Hermes'. A client-side flag is a UI
+ no gate at all: they read omp's files and spawned omp's binary whichever
+ engine was selected, and answered 200. Probed directly against a non-omp
+ engine instance they served omp's model catalog, omp's model roles, omp's
+ models.yml, omp's config.yml, omp's login providers and omp's plan quota —
+ every one of them presented as that engine's. A client-side flag is a UI
  * convenience; it is not a boundary, and this is the boundary.
  *
  * A refused surface answers 400 `{error, code: "unsupported"}` — the same

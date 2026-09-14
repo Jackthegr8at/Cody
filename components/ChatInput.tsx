@@ -97,7 +97,7 @@ interface Props {
    * of these (chatExtras for the rpc-dialect affordances, models for omp's
    * role resolution, skills for the "/" palette lookup), so the whole set
    * travels as one prop rather than as a hand-picked handful — the missing
-   * flags are exactly how omp-only controls leaked onto pi and Hermes. */
+   * flags are exactly how omp-only controls leaked onto pi. */
   capabilities?: EngineCapabilities;
   /** Who the active engine is, for labels that used to say "omp" whatever
    * was running, and to scope per-engine browser storage. */
@@ -157,9 +157,8 @@ interface Props {
   /** The requested reasoning level while an acknowledgement is pending. */
   thinkingLevelTarget?: string | null;
   /** The engine's own session modes (ACP `session/new` → `modes`): its
-   * permission posture — Manual / Accept edits / Plan / Auto on Claude,
-   * Default / Accept Edits / Don't Ask on Hermes. Empty for an engine without
-   * the surface, and an empty list renders nothing. */
+   * permission posture — Manual / Accept edits / Plan / Auto on Claude.
+   * Empty for an engine without the surface, and an empty list renders nothing. */
   availableModes?: SessionModeOption[];
   currentModeId?: string | null;
   onModeChange?: (modeId: string) => void;

@@ -19,6 +19,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useSettingsShell } from "../shell-context";
 import { useI18n } from "@/lib/i18n";
 import { setSettingsRouteData, useSettingsRoute } from "@/hooks/useSettingsData";
+import { SegmentedControl } from "../SegmentedControl";
 import { OMP_ENGINE_ID } from "@/components/SettingsTabs";
 import { LocalModelProfileCard, type LocalModelProfileBody, type PromptProfileOverride } from "@/components/LocalModelProfile";
 import { toast } from "@/components/ui/toast";
@@ -107,25 +108,17 @@ export function ModelAssignments({ catalog, panelId, engineViews, distillView }:
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
       {views.length > 1 && (
-        <div role="tablist" aria-label="Assignments" style={{ display: "inline-flex", gap: 2, padding: 3, border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", alignSelf: "flex-start", maxWidth: "100%", overflowX: "auto" }}>
-          {views.map((entry) => {
-            const selected = entry.id === active;
-            return (
-              <button
-                key={entry.id}
-                type="button"
-                role="tab"
-                id={`settings-assignments-${entry.id}`}
-                aria-selected={selected}
-                onClick={() => setView(entry.id)}
-                className="ui-focus-ring"
-                style={{ padding: "5px 12px", minHeight: 30, border: "none", borderRadius: "calc(var(--radius-control) - 2px)", background: selected ? "var(--bg-selected)" : "transparent", color: selected ? "var(--text)" : "var(--text-muted)", fontSize: 12, fontWeight: selected ? 600 : 500, cursor: "pointer", whiteSpace: "nowrap" }}
-              >
-                {entry.id === "local" ? t("localRouting.title") : entry.label}
-              </button>
-            );
-          })}
-        </div>
+        <SegmentedControl
+          label="Assignments"
+          value={active}
+          options={views.map((entry) => ({
+            id: entry.id,
+            label: entry.id === "local" ? t("localRouting.title") : entry.label,
+          }))}
+          onChange={(value) => setView(value as View)}
+          idPrefix="settings-assignments"
+          panelIdPrefix="settings-subpanel"
+        />
       )}
       {active === "local" && <LocalRoutingAssignment panelId={panelId} />}
       {profileRoute.data && active === "local" && (

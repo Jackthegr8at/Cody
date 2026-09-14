@@ -45,9 +45,9 @@ export interface HarnessCapabilities {
    * through /api/omp-settings.
    *
    * Distinct from `nativeSettings`, which is the schema-DRIVEN panel any
-   * engine can have by declaring its settings. Hermes has the latter and not
-   * the former: conflating them put three tabs of omp's controls on a Hermes
-   * install, where every Save wrote a file Hermes never reads.
+   * engine can have by declaring its settings. An engine with only the latter
+   * once got three tabs of omp's controls: conflating the two put them on an
+   * install where every Save wrote a file that engine never reads.
    */
   configEditor: boolean;
   /** Harness self-update checks and restarts. */
@@ -65,11 +65,6 @@ export interface HarnessCapabilities {
   advisor: boolean;
   /** Subagent rosters/progress (`get_subagents`, subagent frames) — omp-only. */
   subagents: boolean;
-  /** The engine keeps persistent memory across sessions AND can hand Cody its
-   * contents to display (see `readMemory`). A flag on its own is not enough:
-   * omp has memory too, but exposes no way to read it back, so it stays
-   * false and the surface stays hidden rather than empty. */
-  memory: boolean;
   /**
    * The engine can sign the user in to a provider with the provider's OWN
    * login (a Claude Pro/Max or ChatGPT subscription, a device code, …) and
@@ -127,12 +122,12 @@ export interface EngineUsage {
  * Cody's settings tab is schema-DRIVEN: it draws whatever the active engine
  * declares, so a setting added upstream appears without a Cody release. Three
  * engines supply that declaration from three unrelated places — omp from a
- * TypeScript schema in its package, Hermes from its Python DEFAULT_CONFIG, pi
+ * TypeScript schema in its package, pi
  * from the settings table in its shipped docs — and the panel neither knows
  * nor cares which. This is the type that makes them interchangeable.
  *
  * It exists because the route used to switch on engine IDs
- * (`active.id === "hermes" ? … : ompBranch`), which made "no branch of mine"
+ * (`active.id === X ? … : ompBranch`), which made "no branch of mine"
  * mean "omp's branch": every engine without a case fell through and was
  * handed omp's ~550-key schema and omp's config.yml, stamped with its own
  * name. An adapter hook cannot do that — an engine either implements it or
@@ -243,10 +238,10 @@ export interface EngineSettingsSurface {
  *
  * Every engine keeps subscription credentials somewhere Cody must not write
  * (omp's SQLite store, pi's auth.json, Claude Code's and Codex's own files,
- * Hermes' auth.json), and every one of them has a login of its own that
+ * an engine's own auth store), and every one of them has a login of its own that
  * prints a URL and takes a code back: omp and pi through the pi-ai OAuth
  * flows, Claude Code through `claude auth login`, Codex through
- * `codex login --device-auth`, Hermes through `hermes auth add`. This seam
+ * `codex login --device-auth`. This seam
  * is the one shape all five are driven through, so the sign-in UI is written
  * once and the route never asks which engine it is talking to.
  */
@@ -362,22 +357,6 @@ export interface ProviderDirectoryInfo {
   /** Set when the registry keys hold entries Cody cannot round-trip (omp's
    * path-scoped entries): the hub renders read-only and says why. */
   readOnlyReason?: string;
-}
-
-/** One document of an engine's persistent memory. */
-export interface MemoryDocument {
-  /** Stable id within the engine ("memory", "user"). */
-  id: string;
-  /** Human label for the section heading. */
-  label: string;
-  /** One clause on what this document is for, from the engine's own docs. */
-  description: string;
-  /** Absolute path, shown so the user can find and edit it themselves. */
-  path: string;
-  /** Raw contents; "" when the file does not exist yet. */
-  content: string;
-  /** False when the file is absent — a fresh install, not an error. */
-  exists: boolean;
 }
 
 export interface EngineSessionOptions {
@@ -503,11 +482,10 @@ export interface HarnessAdapter {
   /** Experimental engines carry a visible chip and reduced expectations. */
   readonly experimental?: boolean;
   /** Package spec for on-demand install ("@openai/codex@latest",
-   * "hermes-agent[acp]"); absent when Cody cannot install this engine. */
+   * "@agentclientprotocol/codex-acp@latest"); absent when Cody cannot install this engine. */
   readonly installSpec?: string;
   /** Which package manager installs `installSpec`. Defaults to npm, which is
-   * what every engine used before Hermes — a Python program on PyPI. */
-  readonly installVia?: "npm" | "uv";
+   * the only channel Cody installs from. */
   /**
    * Further packages the engine cannot run without, installed into the same
    * prefix by the same job (npm only, one invocation each so per-package
@@ -522,7 +500,7 @@ export interface HarnessAdapter {
   readonly installAlso?: readonly string[];
   /**
    * The engine CLI half of a two-package install — see EngineCliPart. Absent
-   * for every engine whose `installSpec` IS the engine (omp, pi, hermes), and
+   * for every engine whose `installSpec` IS the engine (omp, pi), and
    * absent is what tells the update check and the UI there is one version to
    * report rather than two.
    */
@@ -541,7 +519,7 @@ export interface HarnessAdapter {
    */
   readonly skipNativeOptional?: boolean;
   /** Args that make the binary print its version. Defaults to ["--version"].
-   * Hermes needs ["acp", "--version"]: its plain --version prints a report
+   * an adapter may need argv beyond --version when the plain form prints a report
    * whose lines include the PYTHON version, which a first-match scan would
    * happily report as the engine's. */
   readonly versionArgs?: readonly string[];
@@ -629,23 +607,11 @@ export interface HarnessAdapter {
   /** RPC-dialect spawn descriptor (omp, pi). See RpcUiSpawn. */
   readonly rpcUi?: RpcUiSpawn;
   /**
-   * The engine's persistent memory, as documents to display. Present only
-   * when `capabilities.memory` is true.
-   *
-   * Read-only on purpose. Memory is the agent's own account of what it has
-   * learned; a user editing it through Cody would be rewriting the engine's
-   * notes behind its back, and every engine curates it differently. Showing
-   * it answers the question users actually have — "what does it think it
-   * knows about me?" — without pretending Cody owns the file.
-   */
-  readMemory?(): MemoryDocument[];
-  /**
    * The engine's own settings, read and written for the schema-driven panel.
    * Present exactly when `capabilities.nativeSettings` is true.
    *
    * This is the seam that replaced an engine-id switch in the route. Each
    * engine derives the same shape from a different place — omp from its
-   * TypeScript schema, Hermes from its Python DEFAULT_CONFIG, pi from the
    * settings tables in its shipped docs — and the route asks the adapter
    * rather than asking which engine it is talking to.
    */

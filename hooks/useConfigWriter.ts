@@ -390,7 +390,7 @@ const NOOP_PATCH = () => Promise.resolve();
 /**
  * omp's config.yml for the curated cards: read through the cache, written
  * through the writer. Gate on `configEditor`, not `nativeSettings`: the
- * route serves omp's file and refuses every other engine, and Hermes
+ * route serves omp's file and refuses every other engine, and an engine with its own config
  * declares `nativeSettings` for its own schema panel.
  */
 export function useNativeSettings(enabled: boolean): NativeSettingsHandle {

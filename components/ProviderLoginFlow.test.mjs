@@ -109,10 +109,10 @@ test("ProviderDirectory renders its pre-fetch shell before the directory loads",
 
 test("ProviderDirectory names the engine it serves and hides custom-endpoint copy without `models`", () => {
   const html = renderDirectory({
-    engine: { id: "hermes", displayName: "Hermes", shortName: "Hermes", experimental: false },
-    harnessLabel: "Hermes",
+    engine: { id: "codex", displayName: "Codex", shortName: "Codex", experimental: true },
+    harnessLabel: "Codex",
     capabilities: { ...ALL_CAPABILITIES, models: false, configEditor: false },
   });
-  assert.match(html, /How Hermes reaches a model vendor/);
-  assert.match(html, /Hermes takes no custom endpoints from Cody/);
+  assert.match(html, /How Codex reaches a model vendor/);
+  assert.match(html, /Codex takes no custom endpoints from Cody/);
 });

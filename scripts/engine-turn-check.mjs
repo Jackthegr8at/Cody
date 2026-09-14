@@ -19,7 +19,7 @@
  *
  * Usage:
  *   node scripts/engine-turn-check.mjs --base http://127.0.0.1:30177 \
- *        --user admin --pass secret --cwd /path/to/workspace omp pi hermes
+ *        --user admin --pass secret --cwd /path/to/workspace omp pi claude
  *   node scripts/engine-turn-check.mjs --cookie <cody_session value> claude codex
  *   --marker TEXT      what the reply must contain (default MOCK-TURN-OK)
  *   --timeout SECONDS  per-turn budget (default 120)

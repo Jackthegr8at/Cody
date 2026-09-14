@@ -4,9 +4,9 @@ Cody is the IDE; the coding agent underneath it — the **engine** — is
 swappable. The same UI ships with [omp (oh-my-pi)](https://github.com/can1357/oh-my-pi)
 as its founding, fully-featured engine, and can drive
 [Pi](https://pi.dev) (omp's ancestor, over its native RPC mode),
-[Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code),
+[Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code) and
 [Codex](https://www.npmjs.com/package/@openai/codex) (over the Agent Client
-Protocol) or [Hermes](https://github.com/NousResearch/hermes-agent) as
+Protocol) as
 experimental engines today. New engines are added by implementing one adapter — the UI, accounts,
 terminals, git surface, files, checkpoints and themes all stay.
 
@@ -170,8 +170,8 @@ What pi serves is flagged per surface, not as one bundle:
   NAME, because omp is a fork of the same package name-stem installed into a
   sibling directory), and writes back to `<pi agent dir>/settings.json`. So a
   setting pi adds upstream appears in the panel the moment the user updates
-  pi, with no Cody release — the same property omp's schema and Hermes'
-  DEFAULT_CONFIG give, from the only place pi states its whole surface. The
+  pi, with no Cody release — the same property omp's schema gives, from the
+  only place pi states its whole surface. The
   alternative, `dist/core/settings-manager.js`, carries the same defaults in
   imperative code with no types, descriptions or grouping, which would have
   bought a hand-written key list dressed up as a pipeline.
@@ -215,25 +215,24 @@ What pi serves is flagged per surface, not as one bundle:
 - `index.ts` — the registry and `getHarness()`: persisted selection →
   `CODY_HARNESS` → omp. `selectHarness()` persists a switch.
 - `state.ts` — `cody-engine.json` persistence (active engine + onboarded).
-- `omp.ts` / `pi.ts` / `claude.ts` / `codex.ts` / `hermes.ts` — the adapters.
-- `pi-settings.ts` / `hermes-settings.ts` — the two derived settings
-  pipelines behind `HarnessAdapter.settings` (pi from its shipped
-  `docs/settings.md`, Hermes from its Python `DEFAULT_CONFIG` written through
-  `hermes config`); omp's hangs off `lib/omp/settings-schema` +
+- `omp.ts` / `pi.ts` / `claude.ts` / `codex.ts` — the adapters.
+- `pi-settings.ts` — the derived settings pipeline behind
+  `HarnessAdapter.settings` for pi (from its shipped `docs/settings.md`);
+  omp's hangs off `lib/omp/settings-schema` +
   `settings-values`, imported by `omp.ts`, which is the one adapter allowed
   to reach into `lib/omp` (`lib/architecture.test.mjs`).
 - `acp-session.ts` — `AcpEngineSession`, the engine-neutral Agent Client
   Protocol client: one long-lived stdio JSON-RPC server per session, driven
   from an `AcpEngineSpec` (binary, argv, env, MCP servers, setup hint). It
   names no engine — an engine-specific fact (where the agent hides the real
-  tool name, which MCP servers to attach) reaches it as spec DATA. Hermes
-  speaks ACP natively; Claude Code and Codex ride it through the
+  tool name, which MCP servers to attach) reaches it as spec DATA. Claude
+  Code and Codex ride it through the
   `@agentclientprotocol/claude-agent-acp` and `@agentclientprotocol/codex-acp`
   adapters, since neither CLI has an ACP mode of its own.
   What a session can switch is captured at `session/new` and reported as
   DATA on `get_state`: models (`availableModels`, `modelSelectable`) and
   modes (`availableModes`, `currentModeId` — Claude's Manual / Accept edits /
-  Plan / Auto, Hermes' Default / Accept Edits / Don't Ask; Codex publishes
+  Plan / Auto; Codex publishes
   none). `set_model` and `set_mode` switch them; `config_update` and
   `mode_changed` report the agent's own switches back.
 - `provider-catalog.ts` / `provider-keys.ts` — provider API keys as
@@ -243,7 +242,7 @@ What pi serves is flagged per surface, not as one bundle:
   reads credentials from its environment, so one key works under all of
   them, and a spec's own entries still win (`CLAUDE_CODE_EXECUTABLE`,
   `CODEX_PATH`).
-- `cli-login.ts` + `claude-login.ts` / `codex-login.ts` / `hermes-login.ts` /
+- `cli-login.ts` + `claude-login.ts` / `codex-login.ts` /
   `pi-login.ts` (+ `bin/cody-pi-login.mjs`) and `lib/omp/provider-login.ts` —
   provider SIGN-IN behind `HarnessAdapter.providerLogins`
   (`ProviderLoginSurface`: `list()`, `login(id, ui)`, optional `logout(id)`),
@@ -255,9 +254,8 @@ What pi serves is flagged per surface, not as one bundle:
   pi: the pi-ai OAuth flows, imported from the INSTALLED pi package in a
   child process. Claude Code: `claude auth login --claudeai` in a
   pseudo-terminal ("Paste code here if prompted >"). Codex:
-  `codex login --device-auth` (URL + one-time code, the CLI polls). Hermes:
-  `hermes auth add <provider> --type oauth --no-browser` ("Authorization
-  code:"). The CLIs will not run these flows without a TTY, which is why
+  `codex login --device-auth` (URL + one-time code, the CLI polls).
+  The CLIs will not run these flows without a TTY, which is why
   `cli-login.ts` is a node-pty driver and not a pipe.
 - `turn-session.ts` — `TurnEngineSession`, the shared one-process-per-turn
   base for CLIs that offer nothing better; `claude-stream.ts` translates the
@@ -311,16 +309,13 @@ and it is what to run after touching a transport. The per-engine wiring:
 - **codex** — `[model_providers.mock]` in `$CODEX_HOME/config.toml` with
   `wire_api = "responses"` (`"chat"` is gone since Codex 0.153) and any
   `OPENAI_API_KEY`.
-- **hermes** — the `openai-api` provider with `OPENAI_BASE_URL`, and
-  `model.provider` / `model.default` set through `hermes config set`,
-  because Hermes with keys but no provider silently defaults to OpenRouter.
 
 ### The settings route dispatches on the ADAPTER, never on an engine id
 
 `GET`/`PUT /api/omp-settings/schema` is engine-neutral by construction: it
 gates on `requireCapability("nativeSettings")`, then reads
 `harness.settings` and refuses `unsupported` when there is none. It used to
-switch on ids — `active.id === "hermes" ? hermesBranch : ompBranch` — which
+switch on ids — `active.id === X ? xBranch : ompBranch` — which
 quietly made "no branch of mine" mean "omp's branch", and that default is
 what the id-switch always costs: an engine with no case got omp's ~550-key
 schema and omp's `config.yml` back under its own name, and its `PUT` wrote
@@ -376,8 +371,8 @@ format/size ladder (`lib/preview-screenshot.ts`).
 3. Pick a transport, in this order:
    - **ACP** if the engine (or an adapter for it) speaks the Agent Client
      Protocol — the richest of the three and the only one with an approval
-     channel. It costs an `AcpEngineSpec`, no new class: that is all Hermes
-     and Codex needed. Record it in `lib/harness/engine-transport.test.mjs`.
+     channel. It costs an `AcpEngineSpec`, no new class: that is all Codex
+     needed. Record it in `lib/harness/engine-transport.test.mjs`.
    - **rpc-ui** if it speaks the pi/omp RPC dialect — the full live pipeline
      for the cost of an `RpcUiSpawn` descriptor, which is all Pi needed.
    - **Per turn** only if neither applies: write a translator
@@ -399,8 +394,8 @@ format/size ladder (`lib/preview-screenshot.ts`).
    `nativeSettings`. That is the whole cost of the settings panel; the route
    dispatches on the hook and names no engine. Derive it, never hand-list
    it: the point is that a setting added upstream appears when the user
-   updates the engine. `hermes-settings.ts` and `pi-settings.ts` are the two
-   worked examples of deriving one from something that is not a schema.
+   updates the engine. `pi-settings.ts` is the worked example of deriving
+   one from something that is not a schema.
    Mark any credential-shaped leaf (an API key, a password) `secret: true` —
    its value is then withheld from `values` entirely and reported only by
    membership in `secretsSet`, and the Behavior hub renders it write-only.

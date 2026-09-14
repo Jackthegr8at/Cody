@@ -5,7 +5,7 @@ import { parseJsonWithinLimit } from "@/lib/bounded-form-data";
 import { getHarness, getHarnessById } from "@/lib/harness";
 import { getToolsDir, probeEngineVersion } from "@/lib/harness/engine-bin";
 import { EngineInstallError, installEngine, isEngineInstalling, readInstallHistory, uninstallEngine } from "@/lib/harness/install";
-import { packageNameFromSpec, pypiNameFromSpec } from "@/lib/harness/updates";
+import { packageNameFromSpec } from "@/lib/harness/updates";
 import { invalidateOmpCliCache } from "@/lib/omp/omp-cli";
 import { restartAllRpcSessions } from "@/lib/rpc-manager";
 
@@ -59,9 +59,7 @@ export async function POST(request: Request) {
     // `name==1.2.3` — and the PyPI name may carry an extra (`pkg[acp]`) that
     // must be preserved, since dropping it installs a package whose optional
     // features are missing.
-    installSpec = adapter.installVia === "uv"
-      ? `${adapter.installSpec}==${version}`
-      : `${packageNameFromSpec(adapter.installSpec)}@${version}`;
+    installSpec = `${packageNameFromSpec(adapter.installSpec)}@${version}`;
     // A two-package engine has to go back as a PAIR. Pinning the adapter to
     // the version an update replaced while letting the CLI install `@latest`
     // is not a revert: if the CLI is what broke, the "revert" reinstalls the
@@ -94,7 +92,6 @@ export async function POST(request: Request) {
       binaryName: adapter.binaryName,
       currentVersion,
       currentEngineVersion,
-      installVia: adapter.installVia,
       installAlso,
       skipNativeOptional: adapter.skipNativeOptional,
       engineEnv: adapter.engineEnv?.bind(adapter),
@@ -126,7 +123,7 @@ export async function POST(request: Request) {
   //
   // The adapter's own health probe, not a bare --version: an engine whose
   // entry point lives behind a subcommand is only verified by running THAT.
-  // Hermes' ACP server sits behind an optional extra, and `hermes --version`
+  // An ACP adapter's own --version can answer from its bundle with no CLI
   // reports a healthy 0.19.0 whether or not the extra is present — so a bare
   // probe would bless an install whose every chat turn then dies with "ACP
   // dependencies not installed". Codex's ACP adapter is the same shape: it
@@ -226,16 +223,12 @@ export async function DELETE(request: Request) {
   try {
     await uninstallEngine({
       id: adapter.id,
-      // Ecosystems name packages differently, and the extras marker in a PyPI
-      // spec ("hermes-agent[acp]") is not part of the installed tool's name.
-      packageName: adapter.installVia === "uv"
-        ? pypiNameFromSpec(adapter.installSpec)
-        : packageNameFromSpec(adapter.installSpec),
+      // Package names in npm only, no special uv handling needed.
+      packageName: packageNameFromSpec(adapter.installSpec),
       // An engine split across packages is removed whole; otherwise the
       // companion stays on disk with nothing left to offer deleting it.
       alsoPackageNames: adapter.installAlso?.map(packageNameFromSpec),
       binaryName: adapter.binaryName,
-      installVia: adapter.installVia,
     });
   } catch (error) {
     const detail = error instanceof EngineInstallError ? error.detail : "";

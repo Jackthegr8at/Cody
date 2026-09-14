@@ -3,67 +3,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { isRecord } from "./type-guards";
 
-export const TODO_FILE_RELATIVE_PATH = ".cody/todo.json";
-export const TODO_VERSION = 1 as const;
-export const MAX_TODO_TITLE_LENGTH = 200;
-export const MAX_TODO_NOTES_LENGTH = 4_000;
-export const MAX_TODO_ITEMS = 1_000;
-export const MAX_TODO_HISTORY = 500;
-export const MAX_TODO_FILE_BYTES = 8 * 1024 * 1024;
-
-export const TODO_COLORS = ["gray", "red", "orange", "yellow", "green", "blue", "purple", "pink"] as const;
-export type TodoColor = (typeof TODO_COLORS)[number];
-export type TodoStatus = "active" | "done";
-export type TodoHistoryAction = "created" | "completed" | "reopened" | "edited" | "deleted";
-
-export interface TodoActor {
-  kind: "user" | "agent";
-  label: string;
-}
-
-export interface TodoItem {
-  id: string;
-  title: string;
-  notes?: string;
-  status: TodoStatus;
-  color?: TodoColor;
-  order: number;
-  createdAt: string;
-  updatedAt: string;
-  completedAt: string | null;
-}
-
-export interface TodoHistoryEntry {
-  ts: string;
-  itemId: string;
-  title: string;
-  action: TodoHistoryAction;
-  actor: TodoActor;
-  detail?: string;
-}
-
-/** The project document may carry future top-level fields Cody does not own. */
-export interface TodoDocument {
-  version: typeof TODO_VERSION;
-  items: TodoItem[];
-  history: TodoHistoryEntry[];
-  [key: string]: unknown;
-}
-
-export type TodoOperation =
-  | { op: "add"; title: string; notes?: string | null; color?: TodoColor | null }
-  | { op: "update"; id: string; title?: string; notes?: string | null; color?: TodoColor | null }
-  | { op: "complete"; id: string }
-  | { op: "reopen"; id: string }
-  | { op: "delete"; id: string }
-  | { op: "reorder"; ids: string[] };
-
-export type TodoAgentAction =
-  | { action: "list" }
-  | { action: "add"; title: string; notes?: string | null; color?: TodoColor | null }
-  | { action: "complete"; id: string }
-  | { action: "reopen"; id: string }
-  | { action: "note"; id: string; notes: string | null };
+export * from "./project-todo-types";
+import {
+  MAX_TODO_FILE_BYTES, MAX_TODO_ITEMS, MAX_TODO_NOTES_LENGTH, MAX_TODO_TITLE_LENGTH,
+  TODO_COLORS, TODO_FILE_RELATIVE_PATH, TODO_VERSION,
+  type TodoAgentAction, type TodoColor, type TodoDocument, type TodoItem, type TodoOperation, type TodoStatus,
+} from "./project-todo-types";
 
 export type ProjectTodoReadResult =
   | { status: "loaded"; path: string; doc: TodoDocument }
@@ -80,9 +25,6 @@ export class ProjectTodoError extends Error {
 }
 
 const TODO_ID_RE = /^t_[A-Za-z0-9]{8}$/u;
-const TODO_HISTORY_ACTIONS: Record<TodoHistoryAction, true> = { created: true, completed: true, reopened: true, edited: true, deleted: true };
-const DEFAULT_USER_ACTOR: TodoActor = { kind: "user", label: "You" };
-const MAX_ACTOR_LABEL_LENGTH = 120;
 const MAX_AGENT_LINE_BYTES = 300;
 
 declare global {
@@ -144,17 +86,6 @@ function requireIso(value: unknown, field: string): string {
   return value;
 }
 
-function parseActor(value: unknown, fallback: TodoActor = DEFAULT_USER_ACTOR): TodoActor {
-  if (value === undefined) return { ...fallback };
-  if (!isRecord(value)) throw new ProjectTodoError("actor must be an object");
-  const kind = value.kind;
-  const label = typeof value.label === "string" ? value.label.trim() : "";
-  if ((kind !== "user" && kind !== "agent") || !label || label.length > MAX_ACTOR_LABEL_LENGTH) {
-    throw new ProjectTodoError("actor must have a supported kind and short label");
-  }
-  return { kind, label };
-}
-
 function readItem(value: unknown, index: number): TodoItem {
   if (!isRecord(value)) throw new ProjectTodoError(`items[${String(index)}] must be an object`);
   const id = requireTodoId(value.id, `items[${String(index)}].id`);
@@ -189,29 +120,9 @@ function readItem(value: unknown, index: number): TodoItem {
   return item;
 }
 
-function readHistoryEntry(value: unknown, index: number): TodoHistoryEntry {
-  if (!isRecord(value)) throw new ProjectTodoError(`history[${String(index)}] must be an object`);
-  const action = value.action;
-  if (typeof action !== "string" || !(action as TodoHistoryAction in TODO_HISTORY_ACTIONS)) {
-    throw new ProjectTodoError(`history[${String(index)}].action is not supported`);
-  }
-  const entry: TodoHistoryEntry = {
-    ts: requireIso(value.ts, `history[${String(index)}].ts`),
-    itemId: requireTodoId(value.itemId, `history[${String(index)}].itemId`),
-    title: requireTitle(value.title),
-    action: action as TodoHistoryAction,
-    actor: parseActor(value.actor),
-  };
-  if (hasOwn(value, "detail")) {
-    if (typeof value.detail !== "string" || value.detail.length > MAX_TODO_NOTES_LENGTH) {
-      throw new ProjectTodoError(`history[${String(index)}].detail must be a short string`);
-    }
-    if (value.detail) entry.detail = value.detail;
-  }
-  return entry;
-}
-
-/** Parse and normalize a version-1 document without touching the filesystem. */
+/** Parse and normalize a version-1 document without touching the filesystem.
+ * A legacy `history` key from before history was removed is dropped; every
+ * other unknown top-level field the project may carry is preserved. */
 export function parseTodoDocument(value: unknown): { ok: true; doc: TodoDocument } | { ok: false; reason: string } {
   try {
     if (!isRecord(value)) throw new ProjectTodoError("To-do document must be an object");
@@ -219,7 +130,6 @@ export function parseTodoDocument(value: unknown): { ok: true; doc: TodoDocument
     if (!Array.isArray(value.items) || value.items.length > MAX_TODO_ITEMS) {
       throw new ProjectTodoError(`items must be an array of at most ${String(MAX_TODO_ITEMS)} entries`);
     }
-    if (!Array.isArray(value.history)) throw new ProjectTodoError("history must be an array");
 
     const items = value.items.map(readItem);
     const ids = new Set<string>();
@@ -227,15 +137,16 @@ export function parseTodoDocument(value: unknown): { ok: true; doc: TodoDocument
       if (ids.has(item.id)) throw new ProjectTodoError(`Duplicate to-do item id: ${item.id}`);
       ids.add(item.id);
     }
-    const history = value.history.map(readHistoryEntry).slice(-MAX_TODO_HISTORY);
-    return { ok: true, doc: { ...value, version: TODO_VERSION, items, history } };
+    const rest: Record<string, unknown> = { ...value };
+    delete rest.history;
+    return { ok: true, doc: { ...rest, version: TODO_VERSION, items } };
   } catch (error) {
     return { ok: false, reason: errorText(error) };
   }
 }
 
 export function emptyTodoDocument(): TodoDocument {
-  return { version: TODO_VERSION, items: [], history: [] };
+  return { version: TODO_VERSION, items: [] };
 }
 
 /** Absolute canonical location under an already-resolved project root. */
@@ -298,6 +209,7 @@ export async function readProjectTodo(projectRoot: string): Promise<ProjectTodoR
   } catch (error) {
     return { status: "invalid", path: filePath, reason: `Invalid JSON in ${TODO_FILE_RELATIVE_PATH}: ${errorText(error)}` };
   }
+
   const normalized = parseTodoDocument(parsed);
   return normalized.ok
     ? { status: "loaded", path: filePath, doc: normalized.doc }
@@ -319,14 +231,6 @@ function nextTodoId(items: TodoItem[], idFactory: () => string): string {
   throw new ProjectTodoError("Unable to allocate a unique to-do item id");
 }
 
-function historyEntry(item: TodoItem, action: TodoHistoryAction, actor: TodoActor, ts: string): TodoHistoryEntry {
-  return { ts, itemId: item.id, title: item.title, action, actor: { ...actor } };
-}
-
-function appendHistory(doc: TodoDocument, entry: TodoHistoryEntry): TodoDocument {
-  return { ...doc, history: [...doc.history, entry].slice(-MAX_TODO_HISTORY) };
-}
-
 function orderedItems(items: readonly TodoItem[]): TodoItem[] {
   return [...items].sort((left, right) => left.order - right.order || left.id.localeCompare(right.id));
 }
@@ -335,11 +239,9 @@ function orderedItems(items: readonly TodoItem[]): TodoItem[] {
 export function applyTodoOperation(
   doc: TodoDocument,
   operation: TodoOperation,
-  actor: TodoActor = DEFAULT_USER_ACTOR,
   options: { now?: Date; idFactory?: () => string } = {},
 ): TodoDocument {
   const ts = (options.now ?? new Date()).toISOString();
-  const normalizedActor = parseActor(actor);
 
   if (operation.op === "add") {
     if (doc.items.length >= MAX_TODO_ITEMS) throw new ProjectTodoError(`A project can contain at most ${String(MAX_TODO_ITEMS)} to-do items`);
@@ -362,7 +264,7 @@ export function applyTodoOperation(
       const color = parseColor(operation.color);
       if (color !== null) item.color = color;
     }
-    return appendHistory({ ...doc, items: [...doc.items, item] }, historyEntry(item, "created", normalizedActor, ts));
+    return { ...doc, items: [...doc.items, item] };
   }
 
   if (operation.op === "reorder") {
@@ -378,12 +280,9 @@ export function applyTodoOperation(
       const item = byId.get(id)!;
       return item.order === order ? item : { ...item, order, updatedAt: ts };
     });
-    const moved = items.find((item, order) => byId.get(item.id)!.order !== order);
+    const moved = items.some((item, order) => byId.get(item.id)!.order !== order);
     if (!moved) throw new ProjectTodoError("reorder did not change a to-do item");
-    return appendHistory(
-      { ...doc, items },
-      { ...historyEntry(moved, "edited", normalizedActor, ts), detail: "Reordered" },
-    );
+    return { ...doc, items };
   }
 
   const index = doc.items.findIndex((item) => item.id === operation.id);
@@ -391,10 +290,7 @@ export function applyTodoOperation(
   const item = doc.items[index];
 
   if (operation.op === "delete") {
-    return appendHistory(
-      { ...doc, items: [...doc.items.slice(0, index), ...doc.items.slice(index + 1)] },
-      historyEntry(item, "deleted", normalizedActor, ts),
-    );
+    return { ...doc, items: [...doc.items.slice(0, index), ...doc.items.slice(index + 1)] };
   }
 
   if (operation.op === "complete") {
@@ -402,7 +298,7 @@ export function applyTodoOperation(
     const next = { ...item, status: "done" as const, completedAt: ts, updatedAt: ts };
     const items = [...doc.items];
     items[index] = next;
-    return appendHistory({ ...doc, items }, historyEntry(next, "completed", normalizedActor, ts));
+    return { ...doc, items };
   }
 
   if (operation.op === "reopen") {
@@ -410,7 +306,7 @@ export function applyTodoOperation(
     const next = { ...item, status: "active" as const, completedAt: null, updatedAt: ts };
     const items = [...doc.items];
     items[index] = next;
-    return appendHistory({ ...doc, items }, historyEntry(next, "reopened", normalizedActor, ts));
+    return { ...doc, items };
   }
 
   let next: TodoItem = item;
@@ -438,7 +334,7 @@ export function applyTodoOperation(
   next.updatedAt = ts;
   const items = [...doc.items];
   items[index] = next;
-  return appendHistory({ ...doc, items }, historyEntry(next, "edited", normalizedActor, ts));
+  return { ...doc, items };
 }
 
 /** Validate one browser/internal POST operation. */
@@ -497,11 +393,6 @@ export function todoAgentActionOperation(action: Exclude<TodoAgentAction, { acti
     case "reopen": return { op: "reopen", id: action.id };
     case "note": return { op: "update", id: action.id, notes: action.notes };
   }
-}
-
-/** Parse a supplied actor or return the user-visible default. */
-export function parseTodoActor(value: unknown): TodoActor {
-  return parseActor(value);
 }
 
 async function ensureTodoDirectory(projectRoot: string): Promise<string> {
@@ -563,13 +454,12 @@ async function serializeProjectTodoWrite<T>(filePath: string, task: () => Promis
 export async function mutateProjectTodo(
   projectRoot: string,
   operation: TodoOperation,
-  actor: TodoActor = DEFAULT_USER_ACTOR,
 ): Promise<TodoDocument> {
   const filePath = projectTodoPath(projectRoot);
   return serializeProjectTodoWrite(filePath, async () => {
     const loaded = await readProjectTodo(projectRoot);
     if (loaded.status === "invalid") throw new ProjectTodoError(loaded.reason);
-    const doc = applyTodoOperation(loaded.doc, operation, actor);
+    const doc = applyTodoOperation(loaded.doc, operation);
     if (doc !== loaded.doc) await writeTodoDocument(projectRoot, doc);
     return doc;
   });
@@ -606,7 +496,5 @@ export function formatTodoForAgent(doc: TodoDocument): string {
       return `${prefix}${notes}`;
     });
   if (lines.length === 0) lines.push("No to-do items.");
-  const noun = doc.history.length === 1 ? "entry" : "entries";
-  lines.push(`History: ${String(doc.history.length)} ${noun}; Cody keeps the newest ${String(MAX_TODO_HISTORY)}.`);
   return lines.join("\n");
 }

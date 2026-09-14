@@ -22,9 +22,10 @@ export async function GET(request: Request) {
   if ("response" in resolved) return resolved.response;
 
   // `omp usage --json` is the ONLY reader lib/usage has, so this route can
-  // only answer for omp. It used to answer for every engine: on Hermes the
-  // composer's quota ring reported an OMP account's exhaustion, polled every
-  // 90 seconds, for a subscription the running agent was not spending.
+  // only answer for omp. It used to answer for every engine: on another
+  // engine the composer's quota ring reported an OMP account's exhaustion,
+  // polled every 90 seconds, for a subscription the running agent was not
+  // spending.
   //
   // The refusal is a VALUE, not an error — an unavailable snapshot is a
   // well-formed answer this endpoint already returns for a missing binary,

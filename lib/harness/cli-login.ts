@@ -1,8 +1,8 @@
 /**
  * Drive an engine's OWN login command inside a pseudo-terminal.
  *
- * Claude Code (`claude auth login`), Codex (`codex login --device-auth`) and
- * Hermes (`hermes auth add <provider> --type oauth`) each print a URL, then
+ * Claude Code (`claude auth login`) and Codex (`codex login --device-auth`)
+ * each print a URL, then
  * either wait for a pasted code ("Paste code here if prompted >",
  * "Authorization code:") or poll for a device code the user types on the
  * provider's site. None of them has a machine interface for it, and none of

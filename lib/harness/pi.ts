@@ -107,7 +107,6 @@ export const piHarness: HarnessAdapter = {
     fastMode: false,
     advisor: false,
     subagents: false,
-    memory: false,
     // Provider sign-in with the engine's own login: the pi-ai OAuth flows pi ships, driven through the installed package.
     providerLogin: true,
   },

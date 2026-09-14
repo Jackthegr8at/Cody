@@ -5,7 +5,6 @@ import { parseJsonWithinLimit } from "@/lib/bounded-form-data";
 import {
   ProjectTodoError,
   mutateProjectTodo,
-  parseTodoActor,
   parseTodoOperation,
   readProjectTodo,
 } from "@/lib/project-todo";
@@ -85,12 +84,7 @@ export async function POST(request: Request) {
       return invalidResponse("Invalid to-do request body");
     }
     const operation = parseTodoOperation(body);
-    const actor = parseTodoActor(
-      typeof body === "object" && body !== null && !Array.isArray(body)
-        ? (body as Record<string, unknown>).actor
-        : undefined,
-    );
-    const doc = await mutateProjectTodo(resolved.projectRoot, operation, actor);
+    const doc = await mutateProjectTodo(resolved.projectRoot, operation);
     return NextResponse.json({ doc }, { headers: NO_STORE });
   } catch (error) {
     return todoErrorResponse(error);

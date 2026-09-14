@@ -11,13 +11,13 @@ export const dynamic = "force-dynamic";
  * This is omp's `~/.omp/agent/config.yml`, read and written key by key with
  * omp's own shape (approval modes, advisor, compaction, autolearn).
  *
- * It is NOT "the active engine's native settings", and the difference bit:
- * Hermes declares `capabilities.nativeSettings` — truthfully, it has its own
- * config — so the Settings dialog fetched this route under Hermes and showed
- * omp's real values under a Hermes heading, with a Save that wrote to a file
- * Hermes never reads. An engine's own schema-driven settings go through
- * /api/omp-settings/schema, which dispatches per engine; this one is omp's
- * and says so.
+ * It is NOT "the active engine's native settings", and the distinction matters:
+ * an engine can declare `capabilities.nativeSettings` truthfully — it has its
+ * own config — and the Settings dialog then fetched this route under it,
+ * showing omp's real values under that engine's heading, with a Save that wrote
+ * to a file the engine never reads. An engine's own schema-driven settings go
+ * through /api/omp-settings/schema, which dispatches per engine; this one is
+ * omp's and says so.
  */
 const SURFACE = "OMP's config.yml";
 

@@ -14,7 +14,7 @@ import type { ProviderLoginList, ProviderLoginSurface, ProviderLoginUi } from ".
  * `Paste code here if prompted >` prompt with no fallback device code,
  * `status --json` reports the current credential, `logout` clears it. All
  * three are measured against a real 2.1.259 install; `login` is driven
- * through `runCliLogin` under node-pty exactly as Codex's and Hermes' are.
+ * through `runCliLogin` under node-pty exactly as Codex's is.
  *
  * `claude auth login --help` documents exactly two mutually exclusive sign-in
  * modes sharing ONE credential slot: `--claudeai` (the default, a Claude

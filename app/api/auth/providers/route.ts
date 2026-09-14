@@ -7,8 +7,8 @@ export const dynamic = "force-dynamic";
 /**
  * The providers the ACTIVE engine can sign the user in to with its own
  * login — omp's /login roster, pi's OAuth providers, Claude Code's and
- * Codex's subscriptions, Hermes' OAuth providers — read through the
- * adapter's `providerLogins` surface, so this route never names an engine.
+ * Codex's subscriptions — read through the adapter's `providerLogins` surface,
+ * so this route never names an engine.
  * An empty list carries the engine's own reason (not installed, its status
  * command failed); an engine without the surface refuses `unsupported`,
  * which is what hides the section.

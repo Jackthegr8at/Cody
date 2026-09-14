@@ -73,9 +73,6 @@ export const ompHarness: HarnessAdapter = {
     fastMode: true,
     advisor: true,
     subagents: true,
-    // omp has memory (mnemopi, hindsight) but exposes no read-back Cody
-    // can call, so the surface stays hidden rather than empty.
-    memory: false,
     // Provider sign-in with the engine's own login: omp's own OAuth flows (Claude Pro/Max, ChatGPT, GitHub Copilot, …), driven over rpc-ui.
     providerLogin: true,
   },

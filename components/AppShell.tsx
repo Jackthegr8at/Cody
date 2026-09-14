@@ -51,7 +51,7 @@ const FileViewer = dynamic(() => import("./FileViewer").then((m) => m.FileViewer
   ssr: false,
   loading: () => <PanelLoadingFallback />,
 });
-const DirectChatPanel = dynamic(() => import("./DirectChatPanel").then((m) => m.DirectChatPanel), {
+const SidebarChatPanel = dynamic(() => import("./SidebarChatPanel").then((m) => m.SidebarChatPanel), {
   ssr: false,
   loading: () => <PanelLoadingFallback />,
 });
@@ -63,7 +63,7 @@ const GitPanel = dynamic(() => import("./GitPanel").then((module) => module.GitP
   ssr: false,
   loading: () => <PanelLoadingFallback />,
 });
-const TodoPanel = dynamic(() => import("./TodoPanel"), {
+const TodoPanel = dynamic(() => import("./todo/TodoPanel"), {
   ssr: false,
   loading: () => <PanelLoadingFallback />,
 });
@@ -2126,7 +2126,7 @@ export function AppShell() {
           aria-labelledby="workspace-chat-tab"
           style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "chat" ? "flex" : "none", flexDirection: "column" }}
         >
-          {mountedPanels.has("chat") && <DirectChatPanel cwd={activeCwd} active={rightPanelMode === "chat" && rightPanelOpen} onOpenProviders={() => openSettings("providers")} onOpenExtensions={() => openSettings("extensions")} />}
+          {mountedPanels.has("chat") && <SidebarChatPanel cwd={activeCwd || "."} active={rightPanelMode === "chat"} />}
         </div>
 
         <div

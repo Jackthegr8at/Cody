@@ -215,8 +215,8 @@ type AgentStateResponse = {
   availableModels?: { provider?: unknown; id?: unknown; name?: unknown }[];
   modelSelectable?: boolean;
   // The session modes an ACP agent published at session/new — its own
-  // permission posture (Claude: Manual / Accept edits / Plan / Auto; Hermes:
-  // Default / Accept Edits / Don't Ask). Never sent by an rpc-dialect engine,
+  // permission posture (Claude: Manual / Accept edits / Plan / Auto).
+  // Never sent by an rpc-dialect engine,
   // and absent means "no picker" — there is no global fallback to consult.
   availableModes?: { id?: unknown; name?: unknown; description?: unknown }[];
   currentModeId?: string | null;
@@ -567,8 +567,8 @@ export interface UseAgentSessionOptions {
    * entirely rather than provoking an "unsupported" rejection per send. */
   subagentsCapable?: boolean;
   /** What to call the engine in notices and toasts. These fire on any slow
-   * first connect and on any fallback event, so hardcoding "omp" told a
-   * Hermes user that omp was starting up. */
+   * first connect and on any fallback event, so hardcoding "omp" told users
+   * of other engines that omp was starting up. */
   engineName?: string;
   /** The Interface & Behavior preference. When thinking is shown by default,
    *  session loads must NOT defer thinking text: a deferred block renders
@@ -582,6 +582,9 @@ export interface UseAgentSessionOptions {
    *  list so the sidebar stops showing the first-message fallback. */
   onSessionNamed?: () => void;
   onSessionCreated?: (session: SessionInfo) => void;
+  /** Which launch a fresh spawn asks `/api/agent/new` for. "sidebar" is the
+   * tool-less side-panel chat under cody-sidebar-chats/; absent = main. */
+  sessionKind?: "sidebar";
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
@@ -849,7 +852,7 @@ function toSlashCommandInfo(command: RpcAvailableSlashCommand): SlashCommandInfo
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
-    session, newSessionCwd, advisorEnabled, thinkingDefaultExpanded, onAgentEnd, onSessionNamed, onSessionCreated, onSessionForked,
+    session, newSessionCwd, advisorEnabled, thinkingDefaultExpanded, onAgentEnd, onSessionNamed, onSessionCreated, onSessionForked, sessionKind,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
     onOpenFile, onOpenPreview, onPreviewUrlsSeen,
   } = opts;
@@ -1105,15 +1108,30 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // Non-null while a terminal run-end reload is replacing `messages` AND the
   // user was following at the bottom: holds the pre-reload array identity.
   // While set, follow scrolls stay instant; the layout effect below consumes
-  // it on the reload's commit to re-pin before that commit paints.
+  // it before that commit paints.
   const completionRepinFromRef = useRef<AgentMessage[] | null>(null);
-  // Reader's scroll offset captured when a terminal reload is armed while
-  // the user is scrolled up (NOT following). The re-pin layout effect
-  // restores it across the reload commit — without this, the wholesale
-  // `messages` replacement re-realizes every turn's content-visibility
-  // placeholder and the kept scrollTop lands on shifted content, which is
-  // the "completion ding threw me way up the transcript" bug.
-  const completionScrollAnchorRef = useRef<number | null>(null);
+  // The reader's anchor across a terminal reload: the first turn visible at
+  // the container's top edge (by `data-turn-key`, which is the entry id) and
+  // how far its top sits from the container's top. Restoring "that element at
+  // that offset" shows the same content after the reload, whatever the
+  // content-visibility placeholders above it re-estimate their heights as —
+  // a pixel scrollTop cannot, which was the "completion ding scrolled me way
+  // up" bug. `pixel` is the fallback when the keyed element no longer exists.
+  const completionScrollAnchorRef = useRef<{ key: string; offset: number; pixel: number } | null>(null);
+
+  /** Capture the reader's anchor; null when following (a follower is re-pinned instead). */
+  const captureReaderAnchor = useCallback(() => {
+    if (completionScrollAllowedRef.current) return null;
+    const container = scrollContainerRef.current;
+    if (!container) return null;
+    const top = container.getBoundingClientRect().top;
+    for (const turn of container.querySelectorAll<HTMLElement>("[data-turn-key]")) {
+      const rect = turn.getBoundingClientRect();
+      if (rect.bottom <= top) continue;
+      return { key: turn.dataset.turnKey ?? "", offset: rect.top - top, pixel: container.scrollTop };
+    }
+    return { key: "", offset: 0, pixel: container.scrollTop };
+  }, []);
   const executeBashRef = useRef<(command: string, excludeFromContext: boolean) => Promise<void> | undefined>(undefined);
   const userScrollIntentUntilRef = useRef(0);
   const ignoreProgrammaticScrollUntilRef = useRef(0);
@@ -1786,6 +1804,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           body: JSON.stringify({
             cwd: newSessionCwd,
             type: "ensure_session",
+            ...(sessionKind ? { kind: sessionKind } : {}),
             toolNames,
             ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
             ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
@@ -1814,7 +1833,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       } finally {
         ensuringNewSessionRef.current = null;
       }
-    }, [advisorEnabled, isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, setSmartModelProvenance, thinkingLevel, toolPreset, updateSessionControlScope]);
+    }, [advisorEnabled, isNew, newSessionCwd, sessionKind, newSessionModel, newSessionDefaultModel, setSmartModelProvenance, thinkingLevel, toolPreset, updateSessionControlScope]);
 
   const selectLocalOnly = useCallback(async (): Promise<boolean> => {
     if (localOnly.pending || !localOnly.supported) return false;
@@ -2487,9 +2506,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // re-pinned instantly through the reflow; a reader scrolled up must
       // keep the exact offset (see the terminal re-pin effect).
       completionRepinFromRef.current = messagesRef.current;
-      completionScrollAnchorRef.current = completionScrollAllowedRef.current
-        ? null
-        : scrollContainerRef.current?.scrollTop ?? null;
+      completionScrollAnchorRef.current = captureReaderAnchor();
       // Pass the fence into loadSession: the pre-check above only guards the
       // start — a next prompt that begins while the reload is in flight must
       // not be overwritten by the finished run's snapshot.
@@ -2881,9 +2898,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // Same contract as finishPromptWithoutStream: re-pin a follower,
           // anchor a reader, before the reload's content-visibility reflow.
           completionRepinFromRef.current = messagesRef.current;
-          completionScrollAnchorRef.current = completionScrollAllowedRef.current
-            ? null
-            : scrollContainerRef.current?.scrollTop ?? null;
+          completionScrollAnchorRef.current = captureReaderAnchor();
           void loadSession(endedSid, false, false, endedRunId);
           const endToken = beginAuthoritativeModelSync();
           const endModeSeq = modeSyncSeqRef.current;
@@ -4590,14 +4605,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return;
     }
     if (anchor === null) return;
+    // A reader's restore always runs: skipping it because they scrolled a
+    // moment ago is exactly how the viewport got handed to the browser's own
+    // guess. A NEW scroll after the restore still wins, because the restore
+    // only marks the programmatic-scroll window and never touches intent.
     const restore = () => {
-      if (Date.now() <= userScrollIntentUntilRef.current) return;
       const container = scrollContainerRef.current;
       if (!container) return;
       ignoreProgrammaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
-      container.scrollTop = anchor;
+      const turn = anchor.key ? container.querySelector<HTMLElement>(`[data-turn-key="${CSS.escape(anchor.key)}"]`) : null;
+      if (turn) {
+        const delta = (turn.getBoundingClientRect().top - container.getBoundingClientRect().top) - anchor.offset;
+        if (Math.abs(delta) > 0.5) container.scrollTop += delta;
+      } else {
+        container.scrollTop = anchor.pixel;
+      }
     };
     restore();
+    // Once more after content-visibility placeholders realize their heights.
     requestAnimationFrame(restore);
   }, [messages, scrollToBottom]);
 

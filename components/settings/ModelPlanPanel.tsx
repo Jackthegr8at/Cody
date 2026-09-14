@@ -6,6 +6,7 @@ import { useI18n } from "@/lib/i18n";
 import { formatModelDisplayName } from "@/lib/model-display";
 import { toast } from "@/components/ui/toast";
 import { NativeSetting, ToggleSwitch, nativeSelectStyle } from "./primitives";
+import { SettingsSection } from "./SettingsSection";
 
 /**
  * Proposes a model for every omp role plus the retry fallback chains that go
@@ -551,31 +552,32 @@ export function ModelPlanPanel({ onApplied, onSkip, compact }: {
             <p style={{ margin: "3px 0 0", fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.5 }}>{group.note}</p>
           </div>
           {group.entries.map(([key, entries]) => (
-            <div key={key} style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
-              <div style={{ padding: "7px 12px", background: "var(--bg-panel)", fontSize: 11.5, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-mono)" }}>{key}</div>
+            <SettingsSection key={key} title={<code style={{ fontSize: 12, color: "var(--text-muted)" }}>{key}</code>} variant="plain">
               {entries.length === 0
-                ? <div style={{ padding: "8px 12px", fontSize: 11.5, color: "var(--text-dim)" }}>{t("modelPlan.chainEmpty")}</div>
+                ? <div style={{ padding: "10px 14px", color: "var(--text-muted)", fontSize: 11 }}>{t("modelPlan.chainEmpty")}</div>
                 : entries.map((entry, index) => {
                   const { base } = splitSelector(entry, availableSelectorSet);
                   const modelName = selectorNames.get(base);
-                  return <div key={`${entry}-${index}`} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px 6px 12px", borderTop: "1px solid var(--border)" }}>
-                    <span style={{ width: 16, fontSize: 11, color: "var(--text-dim)", flexShrink: 0 }}>{index + 1}</span>
-                    <span style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1, minWidth: 0 }}>
-                      <span title={entry} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11.5, color: "var(--text)" }}>{modelName ?? entry}</span>
-                      {modelName && <code title={entry} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)", fontSize: 10.5, fontFamily: "var(--font-mono)" }}>{entry}</code>}
-                    </span>
-                    <button type="button" title={t("modelPlan.moveUp")} aria-label={t("modelPlan.moveUp")} disabled={index === 0} onClick={() => moveChainEntry(key, index, -1)} style={disabledStyle(iconButton, index === 0)}>
-                      <ArrowUp size={12} aria-hidden />
-                    </button>
-                    <button type="button" title={t("modelPlan.moveDown")} aria-label={t("modelPlan.moveDown")} disabled={index === entries.length - 1} onClick={() => moveChainEntry(key, index, 1)} style={disabledStyle(iconButton, index === entries.length - 1)}>
-                      <ArrowDown size={12} aria-hidden />
-                    </button>
-                    <button type="button" title={t("modelPlan.remove")} aria-label={t("modelPlan.remove")} onClick={() => removeChainEntry(key, index)} style={iconButton}>
-                      <X size={12} aria-hidden />
-                    </button>
-                  </div>;
+                  return (
+                    <div key={`${entry}-${index}`} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 14px", borderTop: index === 0 ? "none" : "1px solid var(--border)", fontSize: 12 }}>
+                      <span style={{ width: 16, fontSize: 11, color: "var(--text-dim)", flexShrink: 0 }}>{index + 1}</span>
+                      <span style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1, minWidth: 0 }}>
+                        <span title={entry} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11.5, color: "var(--text)" }}>{modelName ?? entry}</span>
+                        {modelName && <code title={entry} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)", fontSize: 10.5, fontFamily: "var(--font-mono)" }}>{entry}</code>}
+                      </span>
+                      <button type="button" title={t("modelPlan.moveUp")} aria-label={t("modelPlan.moveUp")} disabled={index === 0} onClick={() => moveChainEntry(key, index, -1)} style={disabledStyle(iconButton, index === 0)}>
+                        <ArrowUp size={12} aria-hidden />
+                      </button>
+                      <button type="button" title={t("modelPlan.moveDown")} aria-label={t("modelPlan.moveDown")} disabled={index === entries.length - 1} onClick={() => moveChainEntry(key, index, 1)} style={disabledStyle(iconButton, index === entries.length - 1)}>
+                        <ArrowDown size={12} aria-hidden />
+                      </button>
+                      <button type="button" title={t("modelPlan.remove")} aria-label={t("modelPlan.remove")} onClick={() => removeChainEntry(key, index)} style={iconButton}>
+                        <X size={12} aria-hidden />
+                      </button>
+                    </div>
+                  );
                 })}
-            </div>
+            </SettingsSection>
           ))}
         </section>
       ))}

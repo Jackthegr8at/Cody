@@ -3,8 +3,8 @@
  * A model provider that needs no account.
  *
  * Every engine Cody drives can be pointed at an OpenAI-compatible endpoint
- * (omp and pi through a custom provider, Hermes through its `custom`
- * provider, Codex through a `model_provider` with `wire_api = "chat"`), and
+ * (omp and pi through a custom provider, Codex through a `model_provider`
+ * with `wire_api = "chat"`), and
  * Claude Code at an Anthropic-compatible one through ANTHROPIC_BASE_URL. This
  * serves both dialects with a canned, streamed reply, so a turn can run all
  * the way through Cody — spawn, RPC or ACP, streaming, transcript, sidebar —

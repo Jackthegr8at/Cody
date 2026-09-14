@@ -9,7 +9,7 @@
  * lives server-side (`cody-distill.json`, Settings › Models › Assignments);
  * nothing here knows or cares which model that is.
  *
- * Same shape as lib/stream-tuning.ts: a pure normalizer (so a hand-edited or
+ * Pure normalizer and cached snapshot: a pure normalizer (so a hand-edited or
  * half-written value can never crash a render), a cached snapshot safe for
  * useSyncExternalStore, and a same-window change event so a toggle in the
  * settings dialog repaints the transcript behind it without a reload.

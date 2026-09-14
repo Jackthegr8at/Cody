@@ -3,8 +3,9 @@ import { Noto_Sans_Mono, Noto_Serif_SC, Source_Serif_4 } from "next/font/google"
 import { cookies } from "next/headers";
 import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/auth/session";
 import { DEFAULT_DARK_THEME_ID, DEFAULT_THEME_ID, getTheme, isThemeId } from "@/lib/theme-catalog";
-import { themeBootstrapScript } from "@/lib/theme-bootstrap";
 import { LEGACY_STORAGE_KEYS, STORAGE_KEYS } from "@/lib/storage-keys";
+import { themeBootstrapScript } from "@/lib/theme-bootstrap";
+import { chatFontSizeBootstrapScript } from "@/lib/chat-font-size-bootstrap";
 import "./globals.css";
 
 const notoSansMono = Noto_Sans_Mono({
@@ -116,10 +117,11 @@ export default async function RootLayout({
             __html: `(function(){try{var m=${legacyStorageKeys};for(var i=0;i<m.length;i++){try{var o=m[i][0],n=m[i][1];if(localStorage.getItem(n)!==null){localStorage.removeItem(o);continue}var v=localStorage.getItem(o);if(v===null)continue;localStorage.setItem(n,v);localStorage.removeItem(o)}catch(e){}}}catch(e){}})();`,
           }}
         />
+        <script dangerouslySetInnerHTML={{ __html: themeBootstrapScript(savedTheme) }} />
+        <script dangerouslySetInnerHTML={{ __html: chatFontSizeBootstrapScript() }} />
         {/* Apply the theme before first paint so neither the UI nor the browser
             chrome flashes the wrong palette: the account's saved theme, then
             this browser's, then the device's colour scheme (lib/theme-bootstrap.ts). */}
-        <script dangerouslySetInnerHTML={{ __html: themeBootstrapScript(savedTheme) }} />
         <script
           dangerouslySetInnerHTML={{
             __html: `(function(){try{var l=localStorage.getItem(${JSON.stringify(STORAGE_KEYS.lang)});if(l!=="en"&&l!=="zh-CN"&&l!=="ja"){var n=(navigator.language||"").toLowerCase();l=n.indexOf("zh")===0?"zh-CN":n.indexOf("ja")===0?"ja":"en"}document.documentElement.lang=l}catch(e){}})();`,

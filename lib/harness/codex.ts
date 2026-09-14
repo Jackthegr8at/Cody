@@ -200,7 +200,7 @@ export const codexHarness: HarnessAdapter = {
   // version, which is the package `installSpec` names and therefore the one
   // the update check compares against the registry.
   //
-  // It is the wrong HEALTH probe, for exactly the reason Hermes taught. The
+  // It is the wrong HEALTH probe, for exactly the same lesson learned the hard way. The
   // adapter answers `--version` from its bundle before it ever looks at Codex,
   // so it reports a healthy 1.6.2 with the platform-native `@openai/codex-*`
   // dependency missing — the failure npm produces silently when it cannot
@@ -255,8 +255,6 @@ export const codexHarness: HarnessAdapter = {
     advisor: false,
     // ACP has no subagent vocabulary, so the roster would stay empty.
     subagents: false,
-    // Codex keeps memories, and exposes no way for Cody to read them back.
-    memory: false,
     // Provider sign-in with the engine's own login: `codex login --device-auth` in a pseudo-terminal — a ChatGPT subscription.
     providerLogin: true,
   },

@@ -19,7 +19,6 @@
  * write, ordered after every pending patch, and it names the session
  * restart it causes before running.
  */
-import { RotateCcw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { ConfirmDialog } from "@/components/ui/field";
 import { toast } from "@/components/ui/toast";
@@ -29,6 +28,8 @@ import { formatModelDisplayName } from "@/lib/model-display";
 import { isRecognizedThinkingSuffix } from "@/lib/model-plan/derive";
 import { nativeOptionStyle, nativeSelectStyle, UNAVAILABLE_BADGE, chipStyle } from "../primitives";
 import { useSaveStatus } from "../SaveStatus";
+import { SettingsActions } from "../SettingsActions";
+import { SettingsSection, SettingsRow } from "../SettingsSection";
 import { useSettingsShell } from "../shell-context";
 
 export interface RoleModelOption {
@@ -127,61 +128,70 @@ export function ModelRoles({ models, panelId }: { models: RoleModelOption[]; pan
   const visibleModels = models.filter((model) => !model.hidden);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <div>
-        <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>Model roles</div>
-        <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
-          Saved in {harnessLabel}&apos;s own config. Choose a model and, where it supports one, a reasoning level for each role.
-        </p>
-      </div>
-      {route.loading && !route.data
-        ? <div style={{ color: "var(--text-muted)", fontSize: 12 }}>Loading roles…</div>
-        : roleNames.map((role) => {
-          const { model: selectedModel, effort: selectedThinking } = splitSelector(roles[role] ?? "", modelSelectors);
-          const assigned = models.find((item) => item.provider + "/" + item.id === selectedModel);
-          const assignedHidden = Boolean(assigned?.hidden);
-          const modelKnown = !selectedModel || Boolean(assigned);
-          const unavailable = assignedHidden
-            ? "hidden — still used until changed"
-            : !modelKnown
-              ? "not currently available — still used until changed"
-              : null;
-          return (
-            <div key={role} data-search-id={`model-role-${role}`} className="model-role-row" style={{ display: "grid", gridTemplateColumns: "minmax(82px, 0.3fr) minmax(0, 1fr) minmax(110px, 0.35fr)", alignItems: "center", gap: 10, fontSize: 12 }}>
-              <div style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0 }}>
-                <code style={{ color: "var(--text-muted)" }}>{role}</code>
-                {unavailable && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                    <span style={{ ...chipStyle, color: "var(--status-warning)" }}>{UNAVAILABLE_BADGE}</span>
-                    <span style={{ fontSize: 10.5, color: "var(--status-warning)" }}>{unavailable}</span>
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <SettingsSection
+        title="Model roles"
+        description={<>Saved in {harnessLabel}&apos;s own config. Choose a model and, where it supports one, a reasoning level for each role.</>}
+        variant="rows"
+      >
+        {route.loading && !route.data ? (
+          <div style={{ padding: "10px 14px", color: "var(--text-muted)", fontSize: 12 }}>Loading roles…</div>
+        ) : (
+          roleNames.map((role) => {
+            const { model: selectedModel, effort: selectedThinking } = splitSelector(roles[role] ?? "", modelSelectors);
+            const assigned = models.find((item) => item.provider + "/" + item.id === selectedModel);
+            const assignedHidden = Boolean(assigned?.hidden);
+            const modelKnown = !selectedModel || Boolean(assigned);
+            const unavailable = assignedHidden
+              ? "hidden — still used until changed"
+              : !modelKnown
+                ? "not currently available — still used until changed"
+                : null;
+            return (
+              <SettingsRow
+                key={role}
+                label={
+                  <span style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0 }}>
+                    <code style={{ color: "var(--text-muted)" }}>{role}</code>
+                    {unavailable && (
+                      <span style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                        <span style={{ ...chipStyle, color: "var(--status-warning)" }}>{UNAVAILABLE_BADGE}</span>
+                        <span style={{ fontSize: 11, color: "var(--status-warning)" }}>{unavailable}</span>
+                      </span>
+                    )}
                   </span>
-                )}
-              </div>
-              <select value={selectedModel} aria-label={`${role} model`} onChange={(event) => update(role, { model: event.target.value })} style={{ ...nativeSelectStyle, minWidth: 0, width: "100%" }}>
-                <option value="" style={nativeOptionStyle}>No override</option>
-                {selectedModel && (!modelKnown || assignedHidden) && (
-                  <option value={selectedModel} style={nativeOptionStyle}>{assigned ? formatModelDisplayName(assigned.id, assigned.name) : selectedModel} ({assignedHidden ? "hidden" : "not currently available"})</option>
-                )}
-                {visibleModels.map((item) => (
-                  <option key={item.provider + "/" + item.id} value={item.provider + "/" + item.id} style={nativeOptionStyle}>{formatModelDisplayName(item.id, item.name)} ({item.provider}/{item.id})</option>
-                ))}
-              </select>
-              <select value={selectedThinking} aria-label={`${role} reasoning level`} disabled={!assigned} onChange={(event) => update(role, { effort: event.target.value })} style={{ ...nativeSelectStyle, minWidth: 0, width: "100%", opacity: assigned ? 1 : 0.55 }}>
-                <option value="" style={nativeOptionStyle}>Model default</option>
-                {(assigned?.thinkingLevels ?? []).filter((level) => level !== "off").map((level) => <option key={level} value={level} style={nativeOptionStyle}>{level}</option>)}
-              </select>
-            </div>
-          );
-        })}
+                }
+              >
+                <div data-search-id={`model-role-${role}`} className="model-role-row" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(168px, 0.4fr)", gap: 8, flex: 1, minWidth: 0 }}>
+                  <select value={selectedModel} aria-label={`${role} model`} onChange={(event) => update(role, { model: event.target.value })} style={{ ...nativeSelectStyle, minWidth: 0, width: "100%" }}>
+                    <option value="" style={nativeOptionStyle}>No override</option>
+                    {selectedModel && (!modelKnown || assignedHidden) && (
+                      <option value={selectedModel} style={nativeOptionStyle}>{assigned ? formatModelDisplayName(assigned.id, assigned.name) : selectedModel} ({assignedHidden ? "hidden" : "not currently available"})</option>
+                    )}
+                    {visibleModels.map((item) => (
+                      <option key={item.provider + "/" + item.id} value={item.provider + "/" + item.id} style={nativeOptionStyle}>{formatModelDisplayName(item.id, item.name)} ({item.provider}/{item.id})</option>
+                    ))}
+                  </select>
+                  <select value={selectedThinking} aria-label={`${role} reasoning level`} disabled={!assigned} onChange={(event) => update(role, { effort: event.target.value })} style={{ ...nativeSelectStyle, minWidth: 0, width: "100%", opacity: assigned ? 1 : 0.55 }}>
+                    <option value="" style={nativeOptionStyle}>Model default</option>
+                    {(assigned?.thinkingLevels ?? []).filter((level) => level !== "off").map((level) => <option key={level} value={level} style={nativeOptionStyle}>{level}</option>)}
+                  </select>
+                </div>
+              </SettingsRow>
+            );
+          })
+        )}
+      </SettingsSection>
       {route.error && <div role="alert" style={{ color: "var(--status-error)", fontSize: 12 }}>{route.error}</div>}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <button type="button" onClick={save} disabled={!dirty || saving} style={{ padding: "7px 12px", minHeight: 32, border: "none", borderRadius: "var(--radius-control)", background: dirty ? "var(--accent)" : "var(--bg-hover)", color: dirty ? "var(--on-accent)" : "var(--text-dim)", cursor: saving ? "wait" : dirty ? "pointer" : "default", fontSize: 12, fontWeight: 600 }}>
-          {saving ? "Saving…" : "Save roles"}
-        </button>
-        <button type="button" onClick={() => setResetOpen(true)} disabled={route.loading && !route.data} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", minHeight: 32, border: "1px solid var(--status-error)", borderRadius: "var(--radius-control)", background: "none", color: "var(--status-error)", cursor: "pointer", fontSize: 12, fontWeight: 500 }}>
-          <RotateCcw size={13} aria-hidden="true" /> Reset to {harnessLabel} defaults
-        </button>
-      </div>
+      <SettingsActions
+        dirty={dirty}
+        onSave={save}
+        saving={saving}
+        saveLabel="Save roles"
+        onReset={() => setResetOpen(true)}
+        resetLabel={`Reset to ${harnessLabel} defaults`}
+        resetDisabled={route.loading && !route.data}
+      />
       <ConfirmDialog
         open={resetOpen}
         onOpenChange={setResetOpen}

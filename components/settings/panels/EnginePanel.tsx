@@ -11,7 +11,7 @@
  *     engine's tabs and groups; keys a card owns stay listed and wear an
  *     "Also under Recommended" chip.
  *
- * pi and Hermes have no config editor, so they get the complete list alone.
+ * Engines without a config editor get the complete list alone.
  * Both layers read one cached body (`useSchemaIndex`) and write through
  * the config writer, reporting to this panel's save corner.
  */

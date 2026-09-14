@@ -10,10 +10,9 @@ import { isEmptyThinkingBlock, isVisibleTranscriptMessage } from "@/lib/message-
 import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
 import { Tooltip, Collapsible, CollapsibleTrigger, CollapsiblePanel } from "./ui/primitives";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
-import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
-import { useSmoothStreamText, shouldPaceStream, splitMarkdownReveal, splitPlainReveal, chunkRevealWords, type StreamPaceMode, type StreamPacerOptions } from "@/hooks/useSmoothStreamText";
+import { StreamingMarkdown } from "./StreamingMarkdown";
+import { splitMarkdownReveal, splitPlainReveal } from "@/lib/stream-reveal-split";
 import { requestDistill, retryDistill, useDistillChatSettings, useDistillState, useSeenOnScreen, type DistillRequest, type DistillState } from "@/hooks/useDistill";
-import { useStreamTuning } from "@/hooks/useStreamTuning";
 import { SubagentStatusIcon } from "./SubagentStatusIcon";
 import { formatCost, formatDuration, formatTokens, shortModel } from "@/lib/subagent-format";
 import { formatModelDisplayName } from "@/lib/model-display";
@@ -429,7 +428,7 @@ function AssistantMessageView({
   const blocks = visibleBlockItems.map(({ block }) => block);
   // Only the last block of the live message is still growing; earlier blocks
   // became final the moment a successor appeared and must render (and flush)
-  // as settled text, so pacing and word entrances apply to exactly one block.
+  // as settled text, so live rendering (the streaming reveal, thinking auto-expand) applies to exactly one block.
   const activeStreamIndex = isStreaming && blockItems.length > 0 ? blockItems[blockItems.length - 1].originalIndex : -1;
   const [hovered, setHovered] = useState(false);
   const [actionsActive, setActionsActive] = useState(false);
@@ -504,31 +503,7 @@ function AssistantMessageView({
   useEffect(() => {
     if (replyRequest !== null) requestDistill(replyRequest);
   }, [replyRequest]);
-  // Only a distillation this view watched start gets the reveal animation.
-  // One already sitting in the store when the view mounted (a scroll back, a
-  // re-render after the transcript reloaded) is history: it appears at once.
-  const [watchedReplyRun, setWatchedReplyRun] = useState(false);
-  useEffect(() => {
-    if (replyState.status === "running") setWatchedReplyRun(true);
-  }, [replyState.status]);
-  // The reveal is driven from HERE rather than inside the distilled body,
-  // because its output decides whether the swap happens at all: until the
-  // pacer has produced a first character the full reply stays on screen. A
-  // browser that never runs the animation frame (a hidden tab, a throttled
-  // one) therefore degrades to today's transcript instead of an empty bubble.
-  const prefersReducedMotion = usePrefersReducedMotion();
-  const tuning = useStreamTuning();
-  const revealDistill = watchedReplyRun && !replyState.cached && !prefersReducedMotion;
-  const distillPacerOptions = useMemo<StreamPacerOptions | undefined>(() => (revealDistill ? {
-    catchUpMs: tuning.catchUpMs,
-    minRevealChars: tuning.minRevealChars,
-    wordLookaheadChars: tuning.wordLookaheadChars,
-    // A distilled reply is a few KB at most; the live-stream backlog cap
-    // exists for pathological bursts and would skip its opening lines.
-    maxBacklogChars: 40_000,
-    revealFromStart: true,
-  } : undefined), [revealDistill, tuning]);
-  const distillShown = useSmoothStreamText(replyState.text, revealDistill ? "pace" : "snap", distillPacerOptions);
+  const distillShown = replyState.text;
   const distilledReply = !showFullReply && distillShown !== "" && replyState.errorCode === null ? distillShown : null;
   // The thinking summary needs nothing per-block beyond this flag; sessionId,
   // entryId and the block index are already on their way down.
@@ -673,7 +648,7 @@ function AssistantMessageView({
           // today. Later text blocks fold into the one distilled view.
           if (distilledReply !== null && block.type === "text") {
             return originalIndex === distilledTextIndex
-              ? <DistilledReply key={`${entryId ?? "stream"}-distilled`} text={distilledReply} paced={distilledReply !== replyState.text} cwd={cwd} onOpenFile={onOpenFile} />
+              ? <DistilledReply key={`${entryId ?? "stream"}-distilled`} text={distilledReply} cwd={cwd} onOpenFile={onOpenFile} />
               : null;
           }
           return (
@@ -751,50 +726,13 @@ function BlockView({ block, toolResults, isStreaming, isActiveStreamBlock, strea
   return null;
 }
 
-/** Pacer options for one block, derived from the live tuning. In "drain"
- *  mode the faster drain rate replaces the streaming catch-up rate. */
-function usePacerOptions(mode: StreamPaceMode, lenient = false): StreamPacerOptions | undefined {
-  const tuning = useStreamTuning();
-  return useMemo(() => (mode === "snap" ? undefined : {
-    catchUpMs: mode === "drain" ? tuning.drainCatchUpMs : tuning.catchUpMs,
-    minRevealChars: tuning.minRevealChars,
-    maxBacklogChars: tuning.maxBacklogChars,
-    wordLookaheadChars: tuning.wordLookaheadChars,
-    lenientPrefix: lenient,
-  }), [mode, lenient, tuning]);
-}
-
 // Every message_update frame delivers freshly parsed block objects, so the
 // block memos below compare content (text/thinking strings, tool call ids)
 // instead of object identity: finished blocks of the streaming message then
 // skip their ReactMarkdown re-parse and only the actively growing block
 // re-renders per frame.
 const TextBlock = memo(function TextBlock({ block, isStreaming, isActiveStreamBlock, cwd, onOpenFile }: { block: TextContent; isStreaming?: boolean; isActiveStreamBlock?: boolean; cwd?: string; onOpenFile?: (filePath: string) => void }) {
-  const prefersReducedMotion = usePrefersReducedMotion();
-  const tuning = useStreamTuning();
-  // Oversized messages fall back to SafeMarkdownBody's raw-reveal button;
-  // pacing text that will not render as markdown is pointless churn.
-  const sizeOk = block.text.length <= MAX_MARKDOWN_CHARS;
-  const paced = shouldPaceStream({
-    isStreaming: isStreaming === true,
-    isActiveBlock: isActiveStreamBlock === true,
-    prefersReducedMotion,
-  }) && sizeOk;
-  // A superseded block (a tool call started below it) drains its remaining
-  // backlog at the drain rate instead of snapping — when the knob is off
-  // (drainCatchUpMs = 0, the default) it snaps exactly as it always has.
-  const mode: StreamPaceMode = paced
-    ? "pace"
-    : isStreaming === true && sizeOk && !prefersReducedMotion && tuning.drainCatchUpMs > 0
-      ? "drain"
-      : "snap";
-  const options = usePacerOptions(mode);
-  const displayed = useSmoothStreamText(block.text, mode, options);
-  const showPaced = mode === "pace" || (mode === "drain" && displayed !== block.text);
-  if (!showPaced) {
-    return <SafeMarkdownBody isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile}>{block.text}</SafeMarkdownBody>;
-  }
-  return <PacedMarkdownText text={displayed} cwd={cwd} onOpenFile={onOpenFile} />;
+  return <StreamingMarkdown text={block.text} streaming={isStreaming === true && isActiveStreamBlock === true} plain={false} />;
 }, (prev, next) => (
   prev.block.text === next.block.text
   && prev.isStreaming === next.isStreaming
@@ -804,57 +742,15 @@ const TextBlock = memo(function TextBlock({ block, isStreaming, isActiveStreamBl
 ));
 
 /**
- * The live block's paced render: a markdown prefix that only changes when a
- * completed line migrates into it, plus a plain-text tail of just-revealed
- * words that re-renders every animation frame. Per-frame work is the split
- * scan and a bounded window of tail spans — the markdown subtree is memoized
- * on the prefix string and skipped while only the tail grows, and the tail's
- * older words settle into a single static text node so an unbroken paragraph
- * cannot inflate the span count.
+ * The distilled body that stands in for a finished reply — the full
+ * distilled text renders at once. Presentational only: AssistantMessageView
+ * decides whether to render it at all, based on whether the distillation
+ * has produced any text yet.
  */
-function PacedMarkdownText({ text, cwd, onOpenFile }: { text: string; cwd?: string; onOpenFile?: (filePath: string) => void }) {
-  const tuning = useStreamTuning();
-  const split = useMemo(() => splitMarkdownReveal(text), [text]);
-  const tailWindow = useMemo(() => splitPlainReveal(split.tail, tuning.plainTailWindowChars), [split.tail, tuning.plainTailWindowChars]);
-  return (
-    <div className="stream-reveal">
-      {split.prefix !== "" && (
-        <StreamRevealPrefix text={split.prefix} sampleParse={split.tail === ""} cwd={cwd} onOpenFile={onOpenFile} />
-      )}
-      {split.tail !== "" && (
-        <div className={`markdown-body stream-reveal-tail${split.paragraphGap ? " stream-reveal-tail--para" : ""}`}>
-          {tailWindow.prefix}
-          {chunkRevealWords(tailWindow.tail, split.tailOffset + tailWindow.tailOffset).map((chunk) => (
-            <span key={chunk.key} className="stream-word">{chunk.text}</span>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// While the tail is live the prefix parses unsampled — it advances at line
-// granularity, and the ≤10 Hz sampler's delay would blank each migrating
-// line for up to 100ms (gone from the tail, not yet in the parse). In
-// prefix-only mode (open code fence, oversized tail) the prefix grows per
-// frame again, so the normal streaming sampling takes back over.
-const StreamRevealPrefix = memo(function StreamRevealPrefix({ text, sampleParse, cwd, onOpenFile }: { text: string; sampleParse: boolean; cwd?: string; onOpenFile?: (filePath: string) => void }) {
-  return <SafeMarkdownBody isStreaming sampleParse={sampleParse} className="stream-reveal-prefix" cwd={cwd} onOpenFile={onOpenFile}>{text}</SafeMarkdownBody>;
-});
-
-/**
- * The distilled body that stands in for a finished reply. Presentational
- * only: the reveal runs in AssistantMessageView, because whether there is
- * anything revealed yet is what decides that this component renders at all.
- * `paced` is true while the reveal is still behind the full answer, and the
- * settled text is handed to the ordinary markdown body once it catches up.
- */
-function DistilledReply({ text, paced, cwd, onOpenFile }: { text: string; paced: boolean; cwd?: string; onOpenFile?: (filePath: string) => void }) {
+function DistilledReply({ text, cwd, onOpenFile }: { text: string; cwd?: string; onOpenFile?: (filePath: string) => void }) {
   return (
     <div className="distill-reply" data-testid="distilled-reply">
-      {paced
-        ? <PacedMarkdownText text={text} cwd={cwd} onOpenFile={onOpenFile} />
-        : <SafeMarkdownBody cwd={cwd} onOpenFile={onOpenFile}>{text}</SafeMarkdownBody>}
+      <SafeMarkdownBody cwd={cwd} onOpenFile={onOpenFile}>{text}</SafeMarkdownBody>
     </div>
   );
 }
@@ -900,38 +796,6 @@ function ReplyDistillFooter({ state, distillKey, showFull, onToggle }: { state: 
         {showFull ? t("distill.showDistilled") : t("distill.showFull")}
       </button>
     </div>
-  );
-}
-
-/**
- * Streamed reasoning gets the same paced treatment as body text, but it is
- * plain pre-wrap text — no markdown-safety constraint — so the boundary just
- * keeps the trailing window animated. Gated on `active` (streaming + last
- * block + panel expanded): a collapsed panel must not run an invisible rAF
- * loop, and expanding mid-stream snaps to the current text instead of
- * replaying it.
- */
-function PacedPlainText({ text, streaming, activeBlock }: { text: string; streaming: boolean; activeBlock: boolean }) {
-  const prefersReducedMotion = usePrefersReducedMotion();
-  const tuning = useStreamTuning();
-  const paced = shouldPaceStream({ isStreaming: streaming, isActiveBlock: activeBlock, prefersReducedMotion });
-  const mode: StreamPaceMode = paced
-    ? "pace"
-    : streaming && !prefersReducedMotion && tuning.drainCatchUpMs > 0
-      ? "drain"
-      : "snap";
-  const options = usePacerOptions(mode);
-  const displayed = useSmoothStreamText(text, mode, options);
-  const showPaced = mode === "pace" || (mode === "drain" && displayed !== text);
-  if (!showPaced) return <>{text}</>;
-  const split = splitPlainReveal(displayed, tuning.plainTailWindowChars);
-  return (
-    <>
-      {split.prefix}
-      {chunkRevealWords(split.tail, split.tailOffset).map((chunk) => (
-        <span key={chunk.key} className="stream-word">{chunk.text}</span>
-      ))}
-    </>
   );
 }
 
@@ -1063,7 +927,7 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
 }) {
   const { t } = useI18n();
   const [userExpanded, setUserExpanded] = useState<boolean | null>(null);
-  const expanded = userExpanded ?? defaultExpanded;
+  const expanded = userExpanded ?? (defaultExpanded || (isStreaming === true && isActiveStreamBlock === true));
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1179,7 +1043,7 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
               ? t("messageView.loadingThinking")
               : error ?? (block.deferred
                 ? content
-                : <PacedPlainText text={block.thinking ?? ""} streaming={isStreaming === true && expanded} activeBlock={isActiveStreamBlock === true} />)}
+                : <StreamingMarkdown text={block.thinking ?? ""} streaming={isStreaming === true && expanded} plain={true} />)}
           </div>
         </CollapsiblePanel>
       </Collapsible>
@@ -1204,22 +1068,14 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
   const isError = result?.isError ?? false;
   const hidden = activityDisplayMode === "hidden" && !isError;
   const [expanded, setExpanded] = useState(activityDisplayMode === "full" || isError);
-  const prefersReducedMotion = usePrefersReducedMotion();
   useEffect(() => {
     if (activityDisplayMode === "full" || isError) setExpanded(true);
     else if (activityDisplayMode === "compact") setExpanded(false);
   }, [activityDisplayMode, isError]);
   const { animating, beginToggle, onPanelTransitionEnd } = useCollapseMotion();
-  const tuning = useStreamTuning();
-  // Streaming tool input arrives as raw network bursts (the input JSON and
-  // the header preview repaint per frame). When the knob is on, both run
-  // through the pacer in lenient-prefix mode — the stringified JSON re-closes
-  // its braces on every growth, which must retract a few chars, not snap.
-  const inputLive = isStreaming === true && isActiveStreamBlock === true && result === undefined && !prefersReducedMotion && tuning.paceToolInput;
   const inputJson = useMemo(() => JSON.stringify(block.input, null, 2) ?? "", [block.input]);
-  const toolPaceOptions = usePacerOptions(inputLive ? "pace" : "snap", true);
-  const displayedJson = useSmoothStreamText(inputJson, inputLive && expanded ? "pace" : "snap", toolPaceOptions);
-  const displayedPreview = useSmoothStreamText(getToolPreview(block), inputLive ? "pace" : "snap", toolPaceOptions);
+  const displayedJson = inputJson;
+  const displayedPreview = getToolPreview(block);
   const isEditTool = isEditToolName(block.toolName);
   const resultDiff = result && !result.isError ? getResultDiff(result) : null;
   const activityStatus = getStructuredActivityStatus(result);

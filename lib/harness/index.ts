@@ -1,7 +1,6 @@
 import { readEnv } from "../env";
 import { claudeHarness } from "./claude";
 import { codexHarness } from "./codex";
-import { hermesHarness } from "./hermes";
 import { ompHarness } from "./omp";
 import { piHarness } from "./pi";
 import { readEngineState, writeEngineState } from "./state";
@@ -36,7 +35,6 @@ const ADAPTERS: Record<string, HarnessAdapter> = {
   [piHarness.id]: piHarness,
   [claudeHarness.id]: claudeHarness,
   [codexHarness.id]: codexHarness,
-  [hermesHarness.id]: hermesHarness,
 };
 
 export function listHarnesses(): HarnessAdapter[] {

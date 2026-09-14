@@ -94,7 +94,7 @@ export interface SettingsShellValue {
   engine: ActiveEngineInfo | null;
   capabilities: EngineCapabilities;
   platform?: PlatformInfo;
-  /** Short brand of the active engine ("OMP", "Pi", "Hermes"…). */
+  /** Short brand of the active engine ("OMP", "Pi", "Codex"…). */
   harnessLabel: string;
   sessionModels: SessionModel[] | null;
   callbacks: SettingsShellCallbacks;

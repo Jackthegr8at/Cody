@@ -142,6 +142,15 @@ export function getSessionsDir(): string {
   return agentDataSubdir("sessions");
 }
 
+/** Cody's sidebar-chat sessions (lib/rpc-manager's `kind: "sidebar"` launch):
+ * a sibling of the normal sessions tree, always under omp's own agent dir
+ * regardless of the active engine — a sidebar chat always runs on omp.
+ * Deliberately outside getSessionsDir() so listAllSessions/the session list
+ * never walks it. */
+export function getSidebarChatsDir(): string {
+  return path.join(getAgentDir(), "cody-sidebar-chats");
+}
+
 /** OMP's gc archive root for compressed session JSONL files. */
 export function getArchivedSessionsDir(): string {
   return path.join(path.dirname(getSessionsDir()), "archive", "sessions");

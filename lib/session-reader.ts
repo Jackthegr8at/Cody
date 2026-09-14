@@ -1,7 +1,7 @@
 import { existsSync, statSync } from "fs";
 import { normalize as normalizePath, sep } from "path";
 import { getHarness } from "./harness";
-import { getAgentDir } from "./omp/paths";
+import { getAgentDir, getSidebarChatsDir } from "./omp/paths";
 import {
   invalidateSessionFileListCache,
   listAllSessionInfos,
@@ -227,6 +227,31 @@ function isActiveEngineTranscript(filePath: string): boolean {
   return candidate === root || candidate.startsWith(root.endsWith(sep) ? root : root + sep);
 }
 
+/** Check if a resolved session path is in the sidebar chats tree. */
+export function isSidebarSessionPath(filePath: string): boolean {
+  const sidebarRoot = getSidebarChatsDir();
+  const normalized = normalizePath(filePath);
+  const sidebarNormalized = normalizePath(sidebarRoot);
+  return normalized === sidebarNormalized || normalized.startsWith(sidebarNormalized + sep);
+}
+
+/** Scan the sidebar chats tree for a session by id (fallback resolver when not
+ * found in the main sessions tree). Used by resolveSessionPath as a fallback. */
+async function resolveSidebarSessionPath(sessionId: string): Promise<string | null> {
+  try {
+    const sidebarSessions = await listAllSessionInfos(getSidebarChatsDir());
+    const session = sidebarSessions.find((s) => s.id === sessionId);
+    if (session && existsSync(session.path)) {
+      // Cache this path so subsequent resolves are fast.
+      cacheSessionPath(sessionId, session.path);
+      return session.path;
+    }
+  } catch {
+    // Sidebar tree might not exist yet (new install), or scan failed — just return null.
+  }
+  return null;
+}
+
 export async function resolveSessionPath(sessionId: string): Promise<string | null> {
   const cached = getPathCache().get(sessionId);
   if (cached) {
@@ -241,7 +266,11 @@ export async function resolveSessionPath(sessionId: string): Promise<string | nu
   // Cache miss: scan all sessions to populate cache, then retry
   await listAllSessions();
   const resolved = getPathCache().get(sessionId);
-  if (!resolved) return null;
+  if (!resolved) {
+    // Sidebar sessions are not included in listAllSessions, so check sidebar
+    // tree as a fallback for sidebar chat sessions.
+    return await resolveSidebarSessionPath(sessionId);
+  }
   if (!existsSync(resolved)) {
     invalidateSessionPathCache(sessionId);
     return null;

@@ -1,4 +1,4 @@
-import { readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
+import { readSessionHeader, resolveSessionPath, isSidebarSessionPath } from "@/lib/session-reader";
 import { getRpcSession, resolveSpawnCwd, startRpcSession } from "@/lib/rpc-manager";
 import { getRequestUser } from "@/lib/auth/guard";
 import { canAccessSession } from "@/lib/auth/session-owners";
@@ -32,6 +32,7 @@ export async function GET(
   const engineMode = typeof harness.createSession === "function";
   let filePath = "";
   let engineCwd = "";
+  let kind: "sidebar" | undefined;
   if (!alive) {
     if (engineMode) {
       const row = getEngineSession(id);
@@ -47,6 +48,7 @@ export async function GET(
         return new Response("Session not found", { status: 404 });
       }
       filePath = resolved;
+      kind = isSidebarSessionPath(filePath) ? "sidebar" : undefined;
     }
   }
 
@@ -146,7 +148,7 @@ export async function GET(
             const cwd = resolveSpawnCwd(engineMode ? engineCwd : readSessionHeader(filePath)?.cwd);
             ({ session } = engineMode
               ? await startRpcSession(id, "", cwd, undefined, false, id)
-              : await startRpcSession(id, filePath, cwd));
+              : await startRpcSession(id, filePath, cwd, undefined, false, undefined, undefined, kind));
           } catch (error) {
             encode({ type: "notice", level: "error", message: `Failed to start agent: ${error}` });
             cleanup();

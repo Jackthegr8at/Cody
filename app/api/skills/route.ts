@@ -1,8 +1,6 @@
 import { NextResponse } from "next/server";
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "fs";
 import { basename, dirname } from "path";
-import { getHarness } from "@/lib/harness";
-import { setHermesSkillDisabled } from "@/lib/harness/hermes-skills";
 import {
   getSkillScanRootDirs,
   getSkillsSurface,
@@ -16,9 +14,7 @@ import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-acces
 export const dynamic = "force-dynamic";
 
 // GET /api/skills?cwd=<path>
-// Scans the roots the ACTIVE engine discovers — omp's provider list, pi's
-// narrower one, or Hermes' recursive `$HERMES_HOME/skills` tree — and reports
-// what the surface can do for that engine alongside them.
+// Scans the roots the ACTIVE engine discovers and reports what the surface can do for that engine.
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const cwd = searchParams.get("cwd");
@@ -36,7 +32,7 @@ export async function GET(req: Request) {
 }
 
 /** The name the engine keys a skill by: its frontmatter `name`, else the
- * directory it sits in. Both omp and Hermes resolve it this way. */
+ * directory it sits in. Both omp and pi resolve it this way. */
 function skillNameFor(filePath: string, content: string): string {
   const raw = parseSkillFrontmatter(content).frontmatter.name;
   return typeof raw === "string" && raw.trim() ? raw.trim() : basename(dirname(filePath));
@@ -44,12 +40,8 @@ function skillNameFor(filePath: string, content: string): string {
 
 // PATCH /api/skills — enable or disable a skill for the active engine.
 //
-// Where that state LIVES is engine-specific and the two are not
-// interchangeable: omp and pi read a `disable-model-invocation` key in the
-// SKILL.md, while Hermes reads a list of skill names under `skills.disabled`
-// in its own config.yaml and never looks at the frontmatter at all. Writing
-// the frontmatter key for Hermes would report a successful toggle that
-// changes nothing about what the engine loads.
+// Where that state lives is engine-specific: omp and pi read a `disable-model-invocation` key in the
+// SKILL.md.
 export async function PATCH(req: Request) {
   try {
     const body = await req.json() as { filePath: string; disableModelInvocation: boolean; cwd?: string };
@@ -79,29 +71,6 @@ export async function PATCH(req: Request) {
 
     const content = readFileSync(resolvedFilePath, "utf8");
 
-    const harness = getHarness();
-    if (harness.id === "hermes") {
-      const binaryPath = harness.resolveBinary();
-      if (!binaryPath) {
-        return NextResponse.json(
-          { error: "Hermes is not installed, so its skill configuration cannot be changed.", code: "engine_not_installed" },
-          { status: 409 },
-        );
-      }
-      // The SKILL.md is read only to learn the name Hermes keys the skill by;
-      // the file itself is never rewritten for this engine.
-      try {
-        setHermesSkillDisabled(binaryPath, skillNameFor(resolvedFilePath, content), disableModelInvocation);
-      } catch (error) {
-        // Hermes' own stderr says why (a managed config, an unreadable file);
-        // String(e) below would prefix it with "Error:" and read as a crash.
-        return NextResponse.json(
-          { error: error instanceof Error ? error.message : String(error), code: "skill_toggle_failed" },
-          { status: 500 },
-        );
-      }
-      return NextResponse.json({ success: true, disableModelInvocation });
-    }
 
     const updated = setDisableModelInvocation(content, disableModelInvocation);
     if (updated !== content) writeFileSync(resolvedFilePath, updated, "utf8");

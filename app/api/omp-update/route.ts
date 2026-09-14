@@ -15,8 +15,8 @@ export async function POST(request: Request) {
     // Every branch below is omp's: omp's registry check, omp's installer,
     // omp's RPC health probe, omp's session restart. The client already gates
     // the button on `capabilities.updates`, but a client flag is not a guard —
-    // probed directly under Hermes this reported omp's version as the active
-    // engine's, and its `update` action would have installed omp.
+    // when probed directly under a non-omp engine, this reported omp's version
+    // as the active engine's, and its `update` action would have installed omp.
     const gate = requireEngine("omp", "The OMP runtime update check");
     if ("response" in gate) return gate.response;
     const body = await request.json() as { action?: unknown };

@@ -11,7 +11,7 @@
  * What is REQUIRED to pass is credential-free, because a release gate cannot
  * carry the user's account:
  *
- *   ACP engines (claude, codex, hermes) — spawn and answer `initialize`.
+ *   ACP engines (claude, codex) — spawn and answer `initialize`.
  *     That proves the binary exists, runs, and speaks ACP at the version Cody
  *     drives it with.
  *   rpc-ui engines (omp, pi) — spawn with the engine's own `--mode`, then
@@ -20,7 +20,7 @@
  * Opening a session is reported but never required, and that line is drawn
  * from measurement rather than caution: with no credentials the Claude
  * adapter HANGS on `session/new` and Codex answers "Authentication required",
- * while Hermes opens one happily. Requiring it would hang the gate on two
+ * while another engine may open one. Requiring it would hang the gate on two
  * engines out of three. `--sessions` opts in where credentials exist.
  *
  * The same distinction bites the rpc dialect harder. Measured in a clean
@@ -40,11 +40,11 @@
  *
  * Usage:
  *   node scripts/engine-bringup.mjs             # every installed engine
- *   node scripts/engine-bringup.mjs omp hermes  # only these
+ *   node scripts/engine-bringup.mjs omp codex  # only these
  *   node scripts/engine-bringup.mjs --sessions      # also open a session
  *       …needs each engine signed in; without credentials two of three hang
  *       or refuse, which is why it is not the default.
- *   node scripts/engine-bringup.mjs --require omp,hermes
+ *   node scripts/engine-bringup.mjs --require omp,codex
  *       …additionally FAIL if one of those is not installed, which is what
  *       the smoke gate wants: it just installed them, so absent means broken.
  */

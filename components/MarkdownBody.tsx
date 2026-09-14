@@ -1,6 +1,6 @@
 "use client";
 
-import { Children, cloneElement, isValidElement, useEffect, useMemo, useRef, useState, type ComponentProps, type MouseEvent, type ReactElement, type ReactNode } from "react";
+import { Children, cloneElement, isValidElement, useMemo, type ComponentProps, type MouseEvent, type ReactElement, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import { resolveLocalFileHref } from "@/lib/file-links";
 import { encodeFilePathForApi } from "@/lib/file-paths";
@@ -14,71 +14,10 @@ interface MarkdownBodyProps {
   isStreaming?: boolean;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
-  /** While streaming the parse is normally time-sampled (≤10 Hz). The paced
-   *  reveal in MessageView renders its committed prefix with sampling off:
-   *  the prefix only changes when a whole line migrates out of the animated
-   *  tail, and any sampling delay would leave that line invisible for a beat
-   *  (unmounted from the tail, not yet parsed into the prefix). */
-  sampleParse?: boolean;
 }
 
-/** Slowest cadence at which a growing block re-parses while it streams. The
- *  SSE coalescer delivers updates at display rate, and normalizeDisplayMath +
- *  the whole remark→rehype→react-markdown pass over the accumulated answer is
- *  a 10–40ms task on a long one — the frame budget is gone before layout. */
-const STREAMING_PARSE_INTERVAL_MS = 100;
-
-/**
- * The text this block should parse right now: the live text while settled, or
- * a ≤10 Hz sample of it while streaming. Never withholds the final text —
- * `isStreaming` is false the moment the message settles, so the last update
- * always renders in full.
- */
-function useParseSource(text: string, isStreaming: boolean | undefined, sample: boolean): string {
-  const [sampled, setSampled] = useState(text);
-  const latestRef = useRef(text);
-  const lastFlushRef = useRef(0);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    // Written after commit, never during render, so a trailing flush can only
-    // ever publish text that was actually committed.
-    latestRef.current = text;
-    if (!isStreaming || !sample) {
-      // Keep the sample in lockstep while sampling is off, so flipping it
-      // back on (the paced tail collapsing into whole-text mode around a code
-      // fence) can never paint a frame of stale text.
-      lastFlushRef.current = 0;
-      setSampled((prev) => (prev === text ? prev : text));
-      return;
-    }
-    const flush = () => {
-      lastFlushRef.current = Date.now();
-      setSampled((prev) => (prev === latestRef.current ? prev : latestRef.current));
-    };
-    const elapsed = Date.now() - lastFlushRef.current;
-    if (elapsed >= STREAMING_PARSE_INTERVAL_MS) {
-      flush();
-      return;
-    }
-    // A trailing flush is already pending; it will pick up this text too.
-    if (timerRef.current !== null) return;
-    timerRef.current = setTimeout(() => {
-      timerRef.current = null;
-      flush();
-    }, STREAMING_PARSE_INTERVAL_MS - elapsed);
-  }, [text, isStreaming, sample]);
-
-  useEffect(() => () => {
-    if (timerRef.current !== null) clearTimeout(timerRef.current);
-  }, []);
-
-  return isStreaming && sample ? sampled : text;
-}
-
-export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile, sampleParse = true }: MarkdownBodyProps) {
-  const parseSource = useParseSource(children, isStreaming, sampleParse);
-  const normalizedMarkdown = useMemo(() => normalizeDisplayMath(parseSource), [parseSource]);
+export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile }: MarkdownBodyProps) {
+  const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
   const { remarkPlugins, rehypePlugins } = useMarkdownPlugins(normalizedMarkdown);
 
   // Rebuilt only when its captured props change, not on every render.
@@ -137,57 +76,56 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
       });
 
     return {
-    code: markdownCodeRenderer({ isStreaming, inlineClassName: "markdown-inline-code" }),
-    pre({ children }) {
-      return <>{children}</>;
-    },
-    a({ href, children, ...props }) {
-      // `node` is react-markdown metadata, not a DOM attribute.
-      delete props.node;
-      const { textParts, imageParts } = partitionLinkContent(children);
-      // A <button> cannot nest inside an <a>. Pure image links (direct or
-      // wrapped in formatting, possibly with surrounding whitespace) render
-      // only the previews — the lightbox supersedes the link. Mixed links
-      // keep their text linked and render image previews beside the anchor.
-      if (imageParts.length > 0 && !hasMeaningfulText(textParts)) {
+      code: markdownCodeRenderer({ isStreaming, inlineClassName: "markdown-inline-code" }),
+      pre({ children }) {
         return <>{children}</>;
-      }
-      const filePath = onOpenFile ? resolveLocalFileHref(href, cwd) : null;
-      const openFile = onOpenFile;
-      if (filePath && openFile) {
-        const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
-          if (event.defaultPrevented || event.button !== 0) return;
-          if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-          const target = event.currentTarget.getAttribute("target");
-          if (target && target !== "_self") return;
-          event.preventDefault();
-          openFile(filePath);
-        };
-        const anchor = <a href={href} {...props} onClick={handleClick}>{textParts}</a>;
-        return imageParts.length > 0 ? <>{anchor}{imageParts}</> : anchor;
-      }
+      },
+      a({ href, children, ...props }) {
+        // `node` is react-markdown metadata, not a DOM attribute.
+        delete props.node;
+        const { textParts, imageParts } = partitionLinkContent(children);
+        // A <button> cannot nest inside an <a>. Pure image links (direct or
+        // wrapped in formatting, possibly with surrounding whitespace) render
+        // only the previews — the lightbox supersedes the link. Mixed links
+        // keep their text linked and render image previews beside the anchor.
+        if (imageParts.length > 0 && !hasMeaningfulText(textParts)) {
+          return <>{children}</>;
+        }
+        const filePath = onOpenFile ? resolveLocalFileHref(href, cwd) : null;
+        const openFile = onOpenFile;
+        if (filePath && openFile) {
+          const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
+            if (event.defaultPrevented || event.button !== 0) return;
+            if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+            const target = event.currentTarget.getAttribute("target");
+            if (target && target !== "_self") return;
+            event.preventDefault();
+            openFile(filePath);
+          };
+          const anchor = <a href={href} {...props} onClick={handleClick}>{textParts}</a>;
+          return imageParts.length > 0 ? <>{anchor}{imageParts}</> : anchor;
+        }
 
-      const anchor = (
-        <a href={href} {...props} target="_blank" rel="noopener noreferrer">
-          {textParts}
-        </a>
-      );
-      return imageParts.length > 0 ? <>{anchor}{imageParts}</> : anchor;
-    },
-    img: imgComponent,
-    table({ children }) {
-      return (
-        <div className="markdown-table-wrap">
-          <table>{children}</table>
-        </div>
-      );
-    },
+        const anchor = (
+          <a href={href} {...props} target="_blank" rel="noopener noreferrer">
+            {textParts}
+          </a>
+        );
+        return imageParts.length > 0 ? <>{anchor}{imageParts}</> : anchor;
+      },
+      img: imgComponent,
+      table({ children }) {
+        return (
+          <div className="markdown-table-wrap">
+            <table>{children}</table>
+          </div>
+        );
+      },
     };
   }, [isStreaming, cwd, onOpenFile]);
 
   // Held by identity so a re-render that changed nothing the parse depends on
-  // (a re-render between two streaming samples, a parent state change) skips
-  // the whole markdown subtree instead of re-parsing and re-reconciling it.
+  // skips the whole markdown subtree instead of re-parsing and re-reconciling it.
   const parsed = useMemo(() => (
     <ReactMarkdown
       remarkPlugins={remarkPlugins}

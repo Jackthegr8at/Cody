@@ -649,14 +649,14 @@ their models live, and an empty list is not an error:
 - `"global"` — the engine has a registry Cody can enumerate up front (omp, pi).
   `modelList` is the catalogue.
 - `"session"` — the models belong to the SESSION, not to a registry (any ACP
-  engine: Claude Code, Codex, Hermes). `modelList` is `[]` and there is
+  engine: Claude Code, Codex). `modelList` is `[]` and there is
   deliberately no `modelError`, because nothing failed. Read the models from
   the session instead: `GET /api/sessions/{id}/state` carries
   `availableModels`, the current `model`, and `modelSelectable`; switch with
   `POST /api/agent/{id}` `{"type":"set_model", …}`.
 
 A client that treats `modelList: []` as "this engine has no models" will hide
-its picker forever on three of the five engines Cody ships.
+its picker forever on two of the four engines Cody ships.
 
 The `"global"` registry is global rather than per-workspace; `?cwd=` is still
 accepted and ignored. Every id, provider name and effort level in here comes from the
@@ -871,7 +871,7 @@ catalogue, and an empty value clears it. Keys live in the instance data dir
 without touching any engine's own config.
 
 ```json
-{"engine":{"id":"hermes","shortName":"Hermes"},
+{"engine":{"id":"codex","shortName":"Codex"},
  "providers":[{"id":"openai","name":"OpenAI",
    "variables":[{"name":"OPENAI_API_KEY","label":"API key","secret":true,
                  "stored":true,"fromEnvironment":false}]}]}
@@ -1020,7 +1020,7 @@ hardware video.
 ## `GET|PUT /api/omp-settings/schema` — Incidental
 
 The ACTIVE engine's own settings, derived from the engine itself (omp's
-TypeScript schema, Hermes' `DEFAULT_CONFIG`, the settings tables in pi's
+TypeScript schema, the settings tables in pi's
 shipped `docs/settings.md`) — never a hand-kept list. Gated on
 `capabilities.nativeSettings`; any other engine gets `400 {code:"unsupported"}`.
 
@@ -1035,7 +1035,7 @@ installed yet, a layout this Cody does not know) — an answer, not an error.
 the engine's default applies.
 
 **Secret leaves.** A row with `secret: true` is a credential-shaped string
-key the engine keeps beside its other settings (Hermes' `auxiliary.*.api_key`,
+key the engine keeps beside its other settings (such as
 `dashboard.basic_auth.password`). Its value is **never** in `values`;
 `secretsSet` lists the secret keys that currently hold a non-empty value, so a
 client can say "Set" without knowing what. The web client renders these

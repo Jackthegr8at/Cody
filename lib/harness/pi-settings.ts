@@ -14,7 +14,7 @@ import type {
  *
  * Cody's settings tab is schema-driven — it renders whatever the active engine
  * declares — so the question for each engine is only "where does it declare
- * its settings?". omp ships a TypeScript schema; Hermes has DEFAULT_CONFIG;
+ * its settings?". omp ships a TypeScript schema;
  * pi has neither. What pi DOES ship, in the npm tarball, is
  * `docs/settings.md`: every setting with its type, its default and a sentence
  * of description, in regular four-column markdown tables under `###` section
@@ -94,14 +94,13 @@ export const PI_TERMINAL_ONLY_KEYS: readonly string[] = [...TERMINAL_ONLY_KEYS];
  * secret, a password). pi documents none today, but a future row would
  * otherwise be printed in clear: a matching STRING setting is flagged
  * `secret`, the schema route sends only whether it is set, and the row
- * renders write-only. The twin lives in ./hermes-settings.ts, deliberately
- * not shared, for the same reason the terminal-only lists are not.
+ * renders write-only.
  *
- * Widened alongside that twin: an optional-underscore `hash` (a password
- * hash is offline-crackable even though it is not the plaintext),
- * `session(_)key` and `cookie` (session/cookie-shaped secrets) join the
- * original four. Bare `key` stays excluded so a non-secret leaf named e.g.
- * `recordKey` stays editable.
+ * Widened over time: an optional-underscore `hash` (a password hash is
+ * offline-crackable even though it is not the plaintext), `session(_)key`
+ * and `cookie` (session/cookie-shaped secrets) join the original four. Bare
+ * `key` stays excluded so a non-secret leaf named e.g. `recordKey` stays
+ * editable.
  */
 const SECRET_KEY_PATTERN = /(api_?key|session_?key|cookie|token|secret|password|_?hash)$/i;
 

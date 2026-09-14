@@ -11,11 +11,11 @@ import { PROVIDER_CATALOG, PROVIDER_VARIABLE_NAMES, type ProviderDefinition } fr
  *
  * Why this exists: an engine with no credentials does not fail loudly. Pi ends
  * the turn with an empty assistant message carrying `stopReason: "error"`,
- * Hermes prints a bare "HTTP 401", Codex asks for a login in a terminal the
+ * Codex asks for a login in a terminal the
  * user is not looking at. The only way to configure any of them used to be a
  * terminal inside the container. Storing keys here and injecting them at
- * spawn (`engineChildEnv`) gives all five engines one in-app path, without
- * Cody writing five engines' private auth files.
+ * spawn (`engineChildEnv`) gives all four engines one in-app path, without
+ * Cody writing four engines' private auth files.
  *
  * Lives in the instance data dir like every other piece of Cody-level state,
  * so it survives engine switches and image updates; written 0600 and

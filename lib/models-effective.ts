@@ -40,7 +40,7 @@ export const EMPTY_MODELS: ModelsData = {
 /**
  * What an engine with no sessionless catalog answers.
  *
- * ACP engines (claude, codex, hermes) carry model selection as a per-SESSION
+ * ACP engines (claude, codex) carry model selection as a per-SESSION
  * config option that only exists once `session/new` has run — see
  * lib/harness/acp-session.ts, which captures it and reports it through
  * `get_state`. There is nothing to read, and the ONE thing this must never

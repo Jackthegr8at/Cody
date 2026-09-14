@@ -29,9 +29,9 @@ import { useSaveStatus } from "../SaveStatus";
 import { useSettingsShell } from "../shell-context";
 import { ALSO_UNDER, ENGINE_PANEL_ID, cardOwner, cardSurfaceAvailable, rowSearchIdBesideCard, searchIdForKey, type CardSurface } from "./recommended-cards";
 
-/** Beyond this many rows a tab's groups start collapsed on desktop too:
- * Hermes declares ~550 settings in one tab, and an open wall of them is not
- * a page anyone reads top to bottom. */
+/** Beyond this many rows a tab's groups start collapsed on desktop too: a
+ * schema-driven engine can declare hundreds of settings in one tab, and an
+ * open wall of them is not a page anyone reads top to bottom. */
 export const COLLAPSE_ABOVE_ROWS = 120;
 
 /** Beyond this, an option label will not fit a select sitting beside the
@@ -308,8 +308,8 @@ function SecretControl({ row, onSave, onClear }: { row: SchemaRow; onSave: (valu
 
 /** One row of the complete list: the control, the key with Copy, the
  * Changed / Also-under chips and Reset. The index comes from the parent —
- * one hook call per list, not one per row, or Hermes' 553 rows would each
- * rebuild the whole tab index on every cache change. */
+ * one hook call per list, not one per row, or a large schema's rows would
+ * each rebuild the whole tab index on every cache change. */
 export function SchemaSettingRow({ row, index }: { row: SchemaRow; index: SchemaIndex }) {
   const { capabilities, callbacks } = useSettingsShell();
   const { track } = useSaveStatus(ENGINE_PANEL_ID);
@@ -352,7 +352,7 @@ export function SchemaSettingRow({ row, index }: { row: SchemaRow; index: Schema
     <NativeSetting
       label={row.label}
       // No fallback to the key: the row already prints it in mono below the
-      // control, so falling back duplicates it. Hermes declares no descriptions.
+      // control, so falling back duplicates it. Not every setting declares a description.
       description={description || undefined}
       badge={row.readOnly ? READ_ONLY_BADGE : (row.terminalOnly ? TERMINAL_ONLY_BADGE : undefined)}
       searchId={cardRendered ? rowSearchIdBesideCard(row.key) : searchIdForKey(row.key)}

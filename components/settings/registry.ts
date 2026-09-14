@@ -10,14 +10,14 @@
  */
 import dynamic from "next/dynamic";
 import { createElement, type ComponentType, type CSSProperties } from "react";
-import { Brain, Cable, Cpu, GitBranch, KeyRound, RefreshCw, Settings2, SlidersHorizontal, UserRound } from "lucide-react";
+import { Cable, Cpu, GitBranch, KeyRound, RefreshCw, Settings2, SlidersHorizontal, UserRound } from "lucide-react";
 import { isSubscriptionLogin } from "@/lib/provider-directory";
 import type { ActiveEngineInfo, EngineCapabilities, SettingsTab } from "../SettingsTabs";
 
-export type SettingsSectionId = "accounts" | "general" | "forge" | "providers" | "models" | "engine" | "extensions" | "memory" | "system";
+export type SettingsSectionId = "accounts" | "general" | "forge" | "providers" | "models" | "engine" | "extensions" | "system";
 
 /** Eyebrow the row sits under: "You" (the human's own things), the active
- * engine's short name (its providers, models, behavior, extensions, memory)
+ * engine's short name (its providers, models, behavior, extensions)
  * or "Server" (this Cody instance). */
 export type SettingsGroup = "you" | "engine" | "server";
 
@@ -81,7 +81,6 @@ const ProvidersPanel = dynamic(() => import("./panels/ProvidersPanel").then((m) 
 const ModelsPanel = dynamic(() => import("./panels/ModelsPanel").then((m) => m.ModelsPanel), { loading: PanelLoading });
 const EnginePanel = dynamic(() => import("./panels/EnginePanel").then((m) => m.EnginePanel), { loading: PanelLoading });
 const ExtensionsPanel = dynamic(() => import("./panels/ExtensionsPanel").then((m) => m.ExtensionsPanel), { loading: PanelLoading });
-const MemoryPanel = dynamic(() => import("./panels/MemoryPanel").then((m) => m.MemoryPanel), { loading: PanelLoading });
 const SystemPanel = dynamic(() => import("./panels/SystemPanel").then((m) => m.SystemPanel), { loading: PanelLoading });
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -252,20 +251,6 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
       return parts.length > 0 ? { text: parts.join(" · ") } : null;
     },
     panel: ExtensionsPanel,
-  },
-  {
-    id: "memory",
-    label: "Memory",
-    group: "engine",
-    Icon: Brain,
-    needsCapability: "memory",
-    phoneOrder: 7,
-    statusRoutes: ["/api/memory"],
-    statusLine: ({ routes }) => {
-      const documents = countOf(asRecord(routes["/api/memory"])?.documents);
-      return documents === null ? null : { text: `${documents} document${documents === 1 ? "" : "s"}` };
-    },
-    panel: MemoryPanel,
   },
   {
     id: "system",

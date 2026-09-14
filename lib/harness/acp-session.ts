@@ -35,9 +35,9 @@ import { validateAgentImages } from "../image-attachments";
 /** How to launch and drive one ACP server. Data, not code, so a new engine is
  * a description rather than a class. */
 export interface AcpEngineSpec {
-  /** Engine id ("hermes"), used for command errors and session ids. */
+  /** Engine id ("codex"), used for command errors and session ids. */
   readonly id: string;
-  /** Human name for messages ("Hermes"). */
+  /** Human name for messages ("Codex"). */
   readonly name: string;
   /** Absolute path of the resolved engine binary. */
   readonly binaryPath: string;
@@ -173,9 +173,8 @@ function readPermissionOptions(raw: unknown): AcpPermissionOption[] {
  *  - SESSION MODEL STATE (the older field, still shipped). `session/new`
  *    carries `models: {availableModels: [{modelId, name, description}],
  *    currentModelId}`; changes arrive as `current_model_update`; switching is
- *    `session/set_model {sessionId, modelId}`. Measured live against an agent
- *    running the Python ACP SDK, which publishes exactly this and no
- *    `configOptions` at all.
+    `session/set_model {sessionId, modelId}`. This shape is still present in
+    some agent implementations.
  *
  * `configId` is what tells the two apart at switch time: a string means the
  * config-option call, `null` means the `session/set_model` call. Nothing here
@@ -275,7 +274,7 @@ export function readSessionModelState(raw: unknown): AcpModelSurface | null {
  * `modes: {availableModes: [{id, name, description}], currentModeId}`, changed
  * with `session/set_mode {sessionId, modeId}` and announced back as a
  * `current_mode_update`. Both installed ACP agents that offer modes use this
- * one shape (measured against Hermes 0.19 and Codex's adapter).
+ * one shape (measured against Codex's adapter).
  *
  * Modes are the ACP counterpart of omp's approval-mode setting, but they are
  * per SESSION and chosen by the agent, so they belong in the composer next to
@@ -578,7 +577,7 @@ export class AcpEngineSession implements EngineSession {
     return this._sessionId;
   }
 
-  /** The agent owns its transcript storage (Hermes uses SQLite), so Cody has
+  /** The agent owns its transcript storage (often a database of its own), so Cody has
    * no file to read — the empty string is the established signal for that. */
   get sessionFile(): string {
     return "";
@@ -740,7 +739,7 @@ export class AcpEngineSession implements EngineSession {
       });
     });
     // stderr is the agent's diagnostics channel, and agents are CHATTY on it:
-    // Hermes alone logs dozens of INFO lines per start. Surfacing each as a
+    // An engine can log dozens of INFO lines per start. Surfacing each as a
     // notice buries the conversation, so it is buffered instead and reported
     // only when it explains a failure — which is precisely where it earns its
     // keep (a missing optional dependency announces itself here and nowhere
@@ -759,7 +758,7 @@ export class AcpEngineSession implements EngineSession {
       protocolVersion: PROTOCOL_VERSION,
       // Claim NOTHING that registerHandlers does not answer. An agent that
       // believes an advertised capability and calls it gets -32601 back;
-      // Hermes happens to ignore clientCapabilities and use its own file
+      // An engine may ignore clientCapabilities and use its own file
       // tools, but this transport exists to carry engines that do not. fs and
       // terminals land here when phase 2 wires their handlers.
       clientCapabilities: {},
@@ -1075,7 +1074,7 @@ export class AcpEngineSession implements EngineSession {
    *
    * ACP's `session/prompt` request resolves only when the whole turn ends,
    * but Cody's prompt POST is an acknowledgement that the browser aborts
-   * after 30 seconds. Awaiting the turn here made every Hermes turn longer
+   * after 30 seconds. Awaiting the turn here made every turn longer
    * than that surface as a FAILED send: the user's message rolled back out
    * of the transcript and into the composer, under a banner promising the
    * prompt never started, while the agent carried on working. The turn

@@ -17,7 +17,7 @@
  * has no one-shot runner to distill with); `useDistillConfig` is the one
  * place that decision is read from.
  */
-import { AlertCircle, ArrowDown, ArrowUp, Trash2 } from "lucide-react";
+import { AlertCircle } from "lucide-react";
 import { useMemo, useState, type CSSProperties } from "react";
 import { toast } from "@/components/ui/toast";
 import { invalidateSettingsRoutes, setSettingsRouteData, useSettingsRoute, type SettingsRouteResult } from "@/hooks/useSettingsData";
@@ -25,6 +25,9 @@ import { useI18n } from "@/lib/i18n";
 import { formatModelDisplayName } from "@/lib/model-display";
 import { chipStyle, nativeOptionStyle, nativeSelectStyle, UNAVAILABLE_BADGE } from "../primitives";
 import { useSaveStatus } from "../SaveStatus";
+import { SettingsActions } from "../SettingsActions";
+import { SettingsSection } from "../SettingsSection";
+import { ChainList, ChainRow } from "./ChainList";
 import { useSettingsShell } from "../shell-context";
 import { splitSelector, type RoleModelOption } from "./ModelRoles";
 
@@ -65,24 +68,16 @@ export function useDistillConfig(): { route: SettingsRouteResult<DistillConfigBo
   return { route, available: !route.unsupported && route.data !== null };
 }
 
-const sectionCardStyle: CSSProperties = { border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" };
-const sectionHeaderStyle: CSSProperties = { padding: "10px 12px", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12, fontWeight: 600 };
-const noteStyle: CSSProperties = { margin: 0, padding: "8px 12px", borderTop: "1px solid var(--border)", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 };
-const iconButtonStyle: CSSProperties = { padding: 2, border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer" };
+const noteStyle: CSSProperties = { margin: 0, padding: "8px 10px", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 };
 
-/** One chain entry: a model, its reasoning level, and (for a fallback) the
- * order controls. A selector the catalog does not list keeps its own option
- * so reordering or removing it never silently rewrites it. */
-function ChainRow({ label, selector, models, selectors, disabled, onModel, onEffort, onMove, onRemove }: {
-  label: string;
+/** Renders model/effort selects for a distill chain entry. */
+function DistillChainRowContent({ selector, models, selectors, disabled, onModel, onEffort }: {
   selector: string;
   models: RoleModelOption[];
   selectors: ReadonlySet<string>;
   disabled: boolean;
   onModel: (model: string) => void;
   onEffort: (effort: string) => void;
-  onMove?: (direction: -1 | 1) => void;
-  onRemove?: () => void;
 }) {
   const { t } = useI18n();
   const { model, effort } = splitSelector(selector, selectors);
@@ -94,40 +89,39 @@ function ChainRow({ label, selector, models, selectors, disabled, onModel, onEff
   const flag = missing ? t("distillSettings.unavailable") : hidden ? t("distillSettings.hidden") : null;
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "minmax(74px, 0.28fr) minmax(0, 1fr) minmax(104px, 0.3fr) auto", alignItems: "center", gap: 10, padding: "8px 12px", borderTop: "1px solid var(--border)", fontSize: 12 }}>
-      <div style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0 }}>
-        <span style={{ color: "var(--text-muted)" }}>{label}</span>
+    <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(104px, 0.35fr)", gap: 8, flex: 1, minWidth: 0 }}>
+      <div>
+        <select
+          value={model}
+          aria-label={t("distillSettings.modelAria", { position: selector })}
+          disabled={disabled}
+          onChange={(event) => onModel(event.target.value)}
+          style={{ ...nativeSelectStyle, minWidth: 0, width: "100%", opacity: disabled ? 0.55 : 1 }}
+        >
+          <option value="" style={nativeOptionStyle}>{t("distillSettings.engineDefault")}</option>
+          {(missing || hidden) && model && (
+            <option value={model} style={nativeOptionStyle}>
+              {assigned
+                ? t("distillSettings.optionHidden", { model: formatModelDisplayName(assigned.id, assigned.name) })
+                : t("distillSettings.optionUnavailable", { model })}
+            </option>
+          )}
+          {visible.map((item) => (
+            <option key={item.provider + "/" + item.id} value={item.provider + "/" + item.id} style={nativeOptionStyle}>
+              {formatModelDisplayName(item.id, item.name)} ({item.provider}/{item.id})
+            </option>
+          ))}
+        </select>
         {flag && (
-          <span style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-            <span style={{ ...chipStyle, color: "var(--status-warning)" }}>{UNAVAILABLE_BADGE}</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginTop: 3 }}>
+            <span style={{ ...chipStyle, color: "var(--status-warning)", fontSize: 11 }}>{UNAVAILABLE_BADGE}</span>
             <span style={{ fontSize: 10.5, color: "var(--status-warning)" }}>{flag}</span>
-          </span>
+          </div>
         )}
       </div>
       <select
-        value={model}
-        aria-label={t("distillSettings.modelAria", { position: label })}
-        disabled={disabled}
-        onChange={(event) => onModel(event.target.value)}
-        style={{ ...nativeSelectStyle, minWidth: 0, width: "100%", opacity: disabled ? 0.55 : 1 }}
-      >
-        <option value="" style={nativeOptionStyle}>{t("distillSettings.engineDefault")}</option>
-        {(missing || hidden) && model && (
-          <option value={model} style={nativeOptionStyle}>
-            {assigned
-              ? t("distillSettings.optionHidden", { model: formatModelDisplayName(assigned.id, assigned.name) })
-              : t("distillSettings.optionUnavailable", { model })}
-          </option>
-        )}
-        {visible.map((item) => (
-          <option key={item.provider + "/" + item.id} value={item.provider + "/" + item.id} style={nativeOptionStyle}>
-            {formatModelDisplayName(item.id, item.name)} ({item.provider}/{item.id})
-          </option>
-        ))}
-      </select>
-      <select
         value={effort}
-        aria-label={t("distillSettings.thinkingAria", { position: label })}
+        aria-label={t("distillSettings.thinkingAria", { position: selector })}
         disabled={disabled || levels.length === 0}
         onChange={(event) => onEffort(event.target.value)}
         style={{ ...nativeSelectStyle, minWidth: 0, width: "100%", opacity: disabled || levels.length === 0 ? 0.55 : 1 }}
@@ -136,17 +130,6 @@ function ChainRow({ label, selector, models, selectors, disabled, onModel, onEff
         {effort && !levels.includes(effort) && <option value={effort} style={nativeOptionStyle}>{effort}</option>}
         {levels.map((level) => <option key={level} value={level} style={nativeOptionStyle}>{level}</option>)}
       </select>
-      <div style={{ display: "flex", alignItems: "center", gap: 2, justifyContent: "flex-end" }}>
-        {onMove && (
-          <>
-            <button type="button" disabled={disabled} onClick={() => onMove(-1)} title={t("distillSettings.moveUp")} aria-label={t("distillSettings.moveUp")} style={{ ...iconButtonStyle, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.4 : 1 }}><ArrowUp size={14} aria-hidden="true" /></button>
-            <button type="button" disabled={disabled} onClick={() => onMove(1)} title={t("distillSettings.moveDown")} aria-label={t("distillSettings.moveDown")} style={{ ...iconButtonStyle, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.4 : 1 }}><ArrowDown size={14} aria-hidden="true" /></button>
-          </>
-        )}
-        {onRemove && (
-          <button type="button" disabled={disabled} onClick={onRemove} title={t("distillSettings.remove")} aria-label={t("distillSettings.remove")} style={{ ...iconButtonStyle, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.4 : 1 }}><Trash2 size={14} aria-hidden="true" /></button>
-        )}
-      </div>
     </div>
   );
 }
@@ -241,61 +224,74 @@ export function DistillAssignment({ models, panelId }: { models: RoleModelOption
   const blocked = route.data?.supported === false ? route.data.reason ?? null : null;
 
   return (
-    <div data-search-id="distill-chain" style={{ display: "flex", flexDirection: "column", gap: 14, minWidth: 0 }}>
-      <div>
-        <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>{t("distillSettings.title")}</div>
-        <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>{t("distillSettings.intro")}</p>
-        <p style={{ margin: "4px 0 0", fontSize: 11, color: "var(--text-dim)", lineHeight: 1.45 }}>{t("distillSettings.prefsHint")}</p>
-      </div>
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <SettingsSection
+        title={t("distillSettings.title")}
+        description={
+          <>
+            <p style={{ margin: "0 0 8px 0" }}>{t("distillSettings.intro")}</p>
+            <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)" }}>{t("distillSettings.prefsHint")}</p>
+          </>
+        }
+      >
+        {blocked && (
+          <div role="status" style={{ display: "flex", alignItems: "flex-start", gap: 7, padding: "8px 10px", margin: "0 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", fontSize: 11.5, color: "var(--status-warning)", lineHeight: 1.45 }}>
+            <AlertCircle size={13} aria-hidden="true" style={{ flexShrink: 0, marginTop: 1 }} />
+            <span>{t("distillSettings.notReady")} {blocked}</span>
+          </div>
+        )}
+        {route.loading && !route.data ? (
+          <div style={{ padding: "10px 14px", color: "var(--text-muted)", fontSize: 12 }}>{t("distillSettings.loading")}</div>
+        ) : (
+          <>
+            <div style={{ borderBottom: "1px solid var(--border)", padding: "10px 14px" }}>
+              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8 }}>{t("distillSettings.primaryTitle")}</div>
+              <ChainRow
+                leading={<span style={{ color: "var(--text-muted)", fontSize: 12 }}>{t("distillSettings.primaryLabel")}</span>}
+              >
+                <DistillChainRowContent
+                  selector={primary}
+                  models={models}
+                  selectors={selectors}
+                  disabled={!editable}
+                  onModel={(model) => setEntry(0, { model })}
+                  onEffort={(effort) => setEntry(0, { effort })}
+                />
+              </ChainRow>
+              <p style={{ ...noteStyle, borderTop: 0, paddingTop: 6 }}>{primary ? t("distillSettings.primaryNote") : t("distillSettings.engineDefaultNote", { engine: harnessLabel })}</p>
+            </div>
 
-      {blocked && (
-        <div role="status" style={{ display: "flex", alignItems: "flex-start", gap: 7, padding: "8px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", fontSize: 11.5, color: "var(--status-warning)", lineHeight: 1.45 }}>
-          <AlertCircle size={13} aria-hidden="true" style={{ flexShrink: 0, marginTop: 1 }} />
-          <span>{t("distillSettings.notReady")} {blocked}</span>
-        </div>
-      )}
-
-      {route.loading && !route.data ? (
-        <div style={{ color: "var(--text-muted)", fontSize: 12 }}>{t("distillSettings.loading")}</div>
-      ) : (
-        <>
-          <section style={sectionCardStyle}>
-            <div style={sectionHeaderStyle}>{t("distillSettings.primaryTitle")}</div>
-            <ChainRow
-              label={t("distillSettings.primaryLabel")}
-              selector={primary}
-              models={models}
-              selectors={selectors}
-              disabled={!editable}
-              onModel={(model) => setEntry(0, { model })}
-              onEffort={(effort) => setEntry(0, { effort })}
-            />
-            <p style={noteStyle}>{primary ? t("distillSettings.primaryNote") : t("distillSettings.engineDefaultNote", { engine: harnessLabel })}</p>
-          </section>
-
-          <section style={sectionCardStyle}>
-            <div style={sectionHeaderStyle}>{t("distillSettings.fallbackTitle")}</div>
-            <p style={noteStyle}>{t("distillSettings.fallbackNote")}</p>
-            {!primary ? (
-              <p style={noteStyle}>{t("distillSettings.needPrimary")}</p>
-            ) : (
-              <>
-                {fallbacks.length === 0 && <p style={noteStyle}>{t("distillSettings.noFallbacks")}</p>}
-                {fallbacks.map((entry, index) => (
-                  <ChainRow
-                    key={`${entry}-${index}`}
-                    label={t("distillSettings.fallbackLabel", { position: index + 1 })}
-                    selector={entry}
-                    models={models}
-                    selectors={selectors}
-                    disabled={!editable}
-                    onModel={(model) => setEntry(index + 1, { model })}
-                    onEffort={(effort) => setEntry(index + 1, { effort })}
-                    onMove={(direction) => move(index + 1, direction)}
-                    onRemove={() => setDraft(chain.filter((_, position) => position !== index + 1))}
-                  />
-                ))}
-                {full && <p style={noteStyle}>{t("distillSettings.chainFull", { max: MAX_CHAIN })}</p>}
+            {primary && (
+              <div style={{ borderTop: "1px solid var(--border)", padding: "10px 14px" }}>
+                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8 }}>{t("distillSettings.fallbackTitle")}</div>
+                <p style={{ ...noteStyle, borderTop: 0, marginBottom: 8, paddingTop: 0 }}>{t("distillSettings.fallbackNote")}</p>
+                <ChainList>
+                  {fallbacks.length === 0 ? (
+                    <p style={{ ...noteStyle, borderTop: 0, paddingTop: 0 }}>{t("distillSettings.noFallbacks")}</p>
+                  ) : (
+                    <>
+                      {fallbacks.map((entry, index) => (
+                        <ChainRow
+                          key={`${entry}-${index}`}
+                          leading={<span style={{ color: "var(--text-muted)", fontSize: 12 }}>{index + 1}</span>}
+                          onMoveUp={index > 0 ? () => move(index + 1, -1) : undefined}
+                          onMoveDown={index < fallbacks.length - 1 ? () => move(index + 1, 1) : undefined}
+                          onRemove={() => setDraft(chain.filter((_, position) => position !== index + 1))}
+                        >
+                          <DistillChainRowContent
+                            selector={entry}
+                            models={models}
+                            selectors={selectors}
+                            disabled={!editable}
+                            onModel={(model) => setEntry(index + 1, { model })}
+                            onEffort={(effort) => setEntry(index + 1, { effort })}
+                          />
+                        </ChainRow>
+                      ))}
+                    </>
+                  )}
+                </ChainList>
+                {full && <p style={{ ...noteStyle, borderTop: 0, paddingTop: 0 }}>{t("distillSettings.chainFull", { max: MAX_CHAIN })}</p>}
                 <div style={{ padding: "8px 12px", borderTop: "1px solid var(--border)" }}>
                   <select
                     value={candidate}
@@ -316,26 +312,24 @@ export function DistillAssignment({ models, panelId }: { models: RoleModelOption
                     ))}
                   </select>
                 </div>
-              </>
+              </div>
             )}
-          </section>
-        </>
-      )}
+          </>
+        )}
+      </SettingsSection>
 
       {route.error && <div role="alert" style={{ color: "var(--status-error)", fontSize: 12 }}>{route.error}</div>}
 
-      {canManage ? (
-        <div>
-          <button
-            type="button"
-            onClick={save}
-            disabled={!dirty || saving}
-            style={{ padding: "7px 12px", minHeight: 32, border: "none", borderRadius: "var(--radius-control)", background: dirty ? "var(--accent)" : "var(--bg-hover)", color: dirty ? "var(--on-accent)" : "var(--text-dim)", cursor: saving ? "wait" : dirty ? "pointer" : "default", fontSize: 12, fontWeight: 600 }}
-          >
-            {saving ? t("distillSettings.saving") : t("distillSettings.save")}
-          </button>
-        </div>
-      ) : (
+      {canManage && (
+        <SettingsActions
+          dirty={dirty}
+          onSave={save}
+          saving={saving}
+          saveLabel={t("distillSettings.save")}
+          savingLabel={t("distillSettings.saving")}
+        />
+      )}
+      {!canManage && (
         <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.45 }}>{t("distillSettings.readOnly")}</p>
       )}
     </div>

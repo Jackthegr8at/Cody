@@ -836,7 +836,7 @@ test("the quota ring is absent on an engine that reports no plan quota", () => {
       onSend() {},
       onAbort() {},
       isStreaming: false,
-      engine: { id: "hermes", displayName: "Hermes", shortName: "Hermes", experimental: true },
+ engine: { id: "codex", displayName: "Codex", shortName: "Codex", experimental: true },
     }),
   );
 

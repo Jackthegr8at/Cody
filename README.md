@@ -104,7 +104,6 @@ NVIDIA GPU is optional, for local models running inside the distro.
 | **Pi** (pi.dev) | Experimental | Live chat over Pi's native RPC — streamed replies, tool activity, steering, aborts; a settings panel read from Pi's own docs, skills, provider sign-in (Claude Pro/Max, ChatGPT, GitHub Copilot) and API keys |
 | **Claude Code** | Experimental | Chat over ACP: streamed replies, tool activity, approvals in chat, the agent's own permission modes (Manual / Accept edits / Plan / Auto), model picker, session resume; sign in with a Claude subscription or an API key |
 | **Codex** | Experimental | The same ACP surface: approvals, approval levels, model picker; sign in with ChatGPT (device code) or an API key |
-| **Hermes** | Experimental | ACP chat with approvals, modes and a model picker; memory browser, skills, a settings panel from Hermes' own defaults; sign in with Nous Portal, Claude Pro/Max, ChatGPT and more |
 
 - **Install & update from the UI**: the onboarding picker and
   Settings → System → Engines install engines on demand and give
@@ -115,7 +114,7 @@ NVIDIA GPU is optional, for local models running inside the distro.
   every engine as an environment variable, the same way a key set on the
   container would reach it — so switching engines never means re-entering
   credentials. Subscriptions sign in from the same hub: a Claude Pro/Max
-  account, ChatGPT for Codex, Nous Portal for Hermes, GitHub Copilot and the
+  account, ChatGPT for Codex, GitHub Copilot and the
   rest run the engine's OWN login headless — Cody shows the URL, and when the
   browser cannot reach the container you paste the code or the final
   redirect URL back (or type a device code where the provider uses one).
@@ -223,7 +222,7 @@ Cody is a Node-hosted Next.js app that drives an installed engine binary — it 
 
 - **The engine seam** (`lib/harness/`): an adapter per engine — identity, capability flags, binary probing, install spec, and a live-session factory. Runtime selection is persisted in the instance data dir; capability flags gate every engine-specific surface.
 - **omp sessions**: spawns `omp --mode rpc-ui` (NDJSON over stdio), one child per active session, negotiating RPC v2 with bounded chunk reassembly when available. Session history is omp's native JSONL, read directly and maintained (title/archive/delete) without racing live writes.
-- **Claude Code / Codex / Hermes sessions**: one long-lived process per session speaking the [Agent Client Protocol](https://agentclientprotocol.com) over stdio, translated server-side into the same event stream the UI renders. ACP is the only transport here with a real approval channel, so these engines can stop mid-turn and ask; abort cancels the turn, and resume uses the engine's native session id. The agent's own permission mode (Claude's Manual / Accept edits / Plan / Auto, Codex's approval levels, Hermes' Default / Accept Edits / Don't Ask) is a picker in the composer, next to the model.
+- **Claude Code / Codex sessions**: one long-lived process per session speaking the [Agent Client Protocol](https://agentclientprotocol.com) over stdio, translated server-side into the same event stream the UI renders. ACP is the only transport here with a real approval channel, so these engines can stop mid-turn and ask; abort cancels the turn, and resume uses the engine's native session id. The agent's own permission mode (Claude's Manual / Accept edits / Plan / Auto, Codex's approval levels) is a picker in the composer, next to the model.
 - **Engine install/update**: npm against a persistent prefix the runtime resolves first — install and update are the same operation, and updating the active engine restarts its live sessions.
 - **omp configuration surfaces**: models/`models.yml`, allow-listed `config.yml` settings, skills discovery, `omp plugin`, and project MCP servers (`.omp/mcp.json`) — all through the binary or its native files, all capability-gated.
 - **Terminals**: a custom Node launcher serves Next.js and same-origin terminal WebSockets on one port; each tab owns a server-side `node-pty` shell that survives browser disconnects.

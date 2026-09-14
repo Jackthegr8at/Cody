@@ -36,9 +36,9 @@ const locales = Object.fromEntries(
   ])),
 );
 
-/** The real option set Hermes offers — five options, two of which share a
+/** A realistic permission-request fixture — five options, two of which share a
  * kind. Anything that treats `kind` as an identity breaks on this exact list. */
-const HERMES_REQUEST = {
+const SAMPLE_REQUEST = {
   requestId: "perm-1",
   toolCall: { toolCallId: "call-1", title: "Run the tests: npm test", kind: "execute" },
   options: [
@@ -57,7 +57,7 @@ function render(request) {
 }
 
 test("every option the agent offered is rendered, in the order it sent them", () => {
-  const html = render(HERMES_REQUEST);
+  const html = render(SAMPLE_REQUEST);
   const names = [...html.matchAll(/>([^<>]*(?:Allow|Deny)[^<>]*)</g)].map((m) => m[1]);
   assert.deepEqual(names, ["Allow once", "Allow for session", "Allow always", "Deny", "Deny always"]);
   assert.equal((html.match(/<button/g) ?? []).length, 5, "one button per option, no more and no fewer");
@@ -67,14 +67,14 @@ test("two options sharing a kind stay two distinguishable buttons", () => {
   // "Allow for session" and "Allow always" both arrive as allow_always. Their
   // NAME is the only thing separating them, so the name must be present and
   // prominent on each — grouping or deduping by kind deletes a real grant.
-  const html = render(HERMES_REQUEST);
+  const html = render(SAMPLE_REQUEST);
   assert.match(html, /Allow for session/);
   assert.match(html, /Allow always/);
   assert.equal((html.match(/font-weight:600/g) ?? []).length >= 5, true, "every option label is weighted, not just the primary");
 });
 
 test("an always option is visually distinct from its once sibling", () => {
-  const html = render(HERMES_REQUEST);
+  const html = render(SAMPLE_REQUEST);
   // The durable badge appears on every *_always option and on no other:
   // allow_session, allow_always and deny_always, but never allow_once or deny.
   assert.equal((html.match(/Remembered/g) ?? []).length, 3);
@@ -102,19 +102,19 @@ test("refusal reads as the safe secondary choice, never as the primary", () => {
 });
 
 test("a tool call with no title still says something", () => {
-  const html = render({ requestId: "perm-3", toolCall: null, options: HERMES_REQUEST.options });
+  const html = render({ requestId: "perm-3", toolCall: null, options: SAMPLE_REQUEST.options });
   assert.match(html, /The agent is asking to use a tool\./);
   assert.equal((html.match(/<button/g) ?? []).length, 5, "an unreadable tool call must never hide the choices");
 });
 
 test("a known tool kind is translated; an agent-specific one is passed through", () => {
-  assert.match(render(HERMES_REQUEST), /Run command/);
+  assert.match(render(SAMPLE_REQUEST), /Run command/);
   const custom = render({
     requestId: "perm-4",
-    toolCall: { title: "Do a thing", kind: "hermes_routine" },
-    options: HERMES_REQUEST.options,
+    toolCall: { title: "Do a thing", kind: "custom_routine" },
+    options: SAMPLE_REQUEST.options,
   });
-  assert.match(custom, /hermes_routine/, "an unmapped kind renders verbatim, never as a missing key");
+  assert.match(custom, /custom_routine/, "an unmapped kind renders verbatim, never as a missing key");
   assert.doesNotMatch(custom, /permissionRequest\.kind/, "no raw i18n key ever reaches the page");
 });
 

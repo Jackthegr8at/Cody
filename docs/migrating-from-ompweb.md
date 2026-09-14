@@ -50,8 +50,8 @@ draggable grab handles. See the README feature list; design notes live in
 
 ## Project direction (for maintainers)
 
-Cody is a **standalone web UI that consumes agent harnesses** — omp today,
-Pi/Hermes/others as adapters tomorrow. It does not grow its own agent. In
+Cody is a **standalone web UI that consumes agent harnesses** — omp, pi,
+Claude Code and Codex today, more as adapters tomorrow. It does not grow its own agent. In
 practice:
 
 - New features default to the harness-neutral side (panels, git, terminals,

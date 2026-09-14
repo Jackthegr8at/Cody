@@ -28,7 +28,7 @@ export const SEARCH_ENTRIES: readonly SearchEntry[] = [
 ];
 
 /** One search row per engine in the cached roster (`engine-<id>`), so
- * "codex" or "hermes" finds its row under System › Agent engines. */
+ * "codex" finds its row under System › Agent engines. */
 export function useSystemSearchEntries(): SearchEntry[] {
   const roster = useSettingsRoute<EnginesPayload>(ENGINES_ROUTE);
   return useMemo(() => (roster.data?.engines ?? []).map((engine) => ({

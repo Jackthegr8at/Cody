@@ -64,8 +64,8 @@ export function SkillsStore({
 }: {
   cwd: string;
   /** Scopes the ACTIVE engine can actually install into, from GET /api/skills.
-   * Hermes has one skills root per home and no project-scoped dir at all, so
-   * offering "project" there would install globally under a project label. */
+   * Some engines have a single skills root and no project-scoped dir at all,
+   * so offering "project" there would install globally under a project label. */
   scopes: readonly SkillInstallScope[];
   installedPackages: Record<SkillInstallScope, ReadonlySet<string>>;
   onInstalled: () => void;
@@ -656,7 +656,7 @@ export function SkillsStore({
                     {/* Scope + install */}
                     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                       {/* One scope is not a choice: an engine with a single
-                          skills root (Hermes) gets no selector at all. */}
+                          skills root gets no selector at all. */}
                       {scopes.length > 1 && (
                         <div
                           style={{

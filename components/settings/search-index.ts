@@ -75,7 +75,6 @@ export const HUB_LABELS: Record<SettingsSectionId, string> = {
   models: "Models",
   engine: "Behavior",
   extensions: "Extensions",
-  memory: "Memory",
   system: "System",
 };
 
@@ -113,7 +112,6 @@ const STATIC_SOURCES: ReadonlyArray<{ tab: SettingsSectionId; load: () => Promis
   { tab: "models", load: () => import("./panels/ModelsPanel") },
   { tab: "engine", load: () => import("./panels/EnginePanel") },
   { tab: "extensions", load: () => import("./panels/ExtensionsPanel") },
-  { tab: "memory", load: () => import("./panels/MemoryPanel") },
   { tab: "system", load: () => import("./panels/SystemPanel") },
 ];
 

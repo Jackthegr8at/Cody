@@ -382,11 +382,9 @@ html[data-theme="zenburn-dark"] {
   --dur-med: 220ms;
   --dur-slow: 320ms;
   --dur-theme: 450ms;
-  /* Stream pacing animation tuning (lib/stream-tuning.ts). Defaults fall back to
-     the base timing variables above — override these to adjust reveal/block/collapse
-     feel without touching code. */
-  --stream-word-dur: var(--dur-med);
-  --stream-word-blur: 0px;
+  /* Chat appearance tokens */
+  --chat-font-size: 14px;
+  --chat-line-height: 1.6;
   --chat-block-enter-dur: var(--dur-med);
   --chat-block-rise: 7px;
   --collapse-dur: var(--dur-med);
@@ -510,8 +508,8 @@ pre, code {
 
 /* react-markdown output styles */
 .markdown-body {
-  font-size: 14px;
-  line-height: 1.7;
+  font-size: var(--chat-font-size);
+  line-height: var(--chat-line-height);
   color: var(--text);
   word-break: break-word;
 }
@@ -1734,39 +1732,6 @@ html.dark .dropdown-surface :is(select, option) {
   animation: none;
 }
 
-/* ── Paced streaming reveal ──
-   The live message's growing text splits into a markdown-rendered committed
-   prefix and a plain-text tail of the words that just arrived (MessageView's
-   PacedMarkdownText). Tail words fade in once — their keys are character
-   offsets, so an already-shown word never re-animates — and the global
-   prefers-reduced-motion block below collapses the fade to instant (the JS
-   pacing itself is also disabled under reduced motion).
-
-   The prefix's trailing margin is zeroed so the gap to the in-flight tail is
-   owned by the tail: paragraph-sized when a blank line precedes it,
-   line-sized when it continues a block (list item, quote line). Matching the
-   final layout keeps the column from bouncing when the line migrates into
-   the markdown prefix. */
-.stream-reveal-prefix > :last-child {
-  margin-bottom: 0;
-}
-.stream-reveal-tail {
-  margin: 2px 0 0;
-  white-space: pre-wrap;
-}
-.stream-reveal-tail--para {
-  margin-top: 10px;
-}
-.stream-word {
-  animation: stream-word-in var(--stream-word-dur) var(--stream-anim-ease) both;
-}
-/* Blur lives in the from-state only: `to` resolves to filter: none, so a
-   settled word carries no filter (no per-span layer/stacking context). At the
-   default --stream-word-blur: 0px this is a pure opacity fade, as shipped. */
-@keyframes stream-word-in {
-  from { opacity: 0; filter: blur(var(--stream-word-blur)); }
-  to   { opacity: 1; filter: none; }
-}
 
 /* ── Collapsible message boxes (tool call / bash / thinking / extension) ──
    Collapsed boxes hug their header (width: fit-content); expanded boxes grow
@@ -3351,4 +3316,26 @@ html.dark .dropdown-surface :is(select, option) {
 @keyframes compaction-progress-indeterminate {
   0% { transform: translateX(-100%); }
   100% { transform: translateX(250%); }
+}
+
+/* To-do list design tokens and styles */
+:root {
+  --todo-color-gray: color-mix(in srgb, var(--text-dim) 70%, var(--bg));
+  --todo-color-red: color-mix(in srgb, #e74c3c 60%, var(--text-dim));
+  --todo-color-orange: color-mix(in srgb, #f39c12 60%, var(--text-dim));
+  --todo-color-yellow: color-mix(in srgb, #f1c40f 50%, var(--text-dim));
+  --todo-color-green: color-mix(in srgb, #27ae60 60%, var(--text-dim));
+  --todo-color-blue: color-mix(in srgb, #3498db 60%, var(--text-dim));
+  --todo-color-purple: color-mix(in srgb, #9b59b6 60%, var(--text-dim));
+  --todo-color-pink: color-mix(in srgb, #e91e63 60%, var(--text-dim));
+}
+
+.todo-row:last-child { border-bottom: none; }
+.todo-row-action { opacity: 0; transition: opacity var(--dur-fast) var(--ease-out-warm); }
+.todo-row:hover .todo-row-action, .todo-row:focus-within .todo-row-action { opacity: 1; }
+.todo-row-delete:hover, .todo-row-delete:focus-visible { color: var(--status-error); }
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }

@@ -22,7 +22,7 @@ import {
  * invents Allow/Deny, never reorders, never groups: `optionId` is the
  * identity, `name` is the label, and `kind` is only a styling hint. Two
  * options may legitimately carry the SAME kind and mean different things
- * (Hermes sends "Allow for session" and "Allow always", both `allow_always`),
+ * (an agent may send "Allow for session" and "Allow always", both `allow_always`),
  * so the NAME is the prominent element on every button — the styling can only
  * ever say "this is a grant" and "this one outlives the request", never which
  * grant it is.

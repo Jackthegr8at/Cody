@@ -16,7 +16,7 @@ const { ALL_CAPABILITIES } = await jiti.import("../SettingsTabs.tsx");
  * The engine roster from a fixture: what GET /api/engines and GET
  * /api/engines/updates answer on a server with one engine of every shape —
  * active and verified, installed with a revert target, a two-package engine
- * running ahead of the audited major, one Cody can install, one it cannot.
+ * running ahead of the audited major, and one Cody can install.
  * `buildEngineRows` is the pure derivation every row renders from; the
  * rendered markup pins the chips and actions in both modes. Static markup
  * reads the route cache's SERVER snapshot (always empty), so the fixture
@@ -43,7 +43,6 @@ const ROSTER = {
     engine({ id: "pi", name: "Pi", shortName: "Pi", tagline: "Pi coding agent.", version: "0.61.0", binaryName: "pi" }),
     engine({ id: "claude", name: "Claude Code", shortName: "Claude", tagline: "Anthropic's CLI over an ACP adapter.", version: "2.1.5", adapterVersion: "0.70.0", verifiedVersion: "0.60.0", adapterLabel: "Claude Code ACP adapter", engineCliLabel: "Claude Code CLI", authHint: "Sign in with claude login.", binaryName: "claude-agent-acp" }),
     engine({ id: "codex", name: "Codex", shortName: "Codex", tagline: "OpenAI Codex.", installed: false, version: null, managed: false, experimental: true, binaryName: "codex-acp" }),
-    engine({ id: "hermes", name: "Hermes", shortName: "Hermes", tagline: "Hermes agent.", installed: false, version: null, installable: false, managed: false, binaryName: "hermes" }),
   ],
 };
 
@@ -92,8 +91,6 @@ test("buildEngineRows derives the number, the chips and the actions each row sho
   assert.equal(byId.codex.canInstall, true);
   assert.equal(byId.codex.canUse, false);
   assert.equal(byId.codex.updateAvailable, null);
-  assert.equal(byId.hermes.needsManualInstall, true, "an engine Cody cannot install says so");
-  assert.equal(byId.hermes.canInstall, false);
 
   // Members: no registry statuses, no install/switch/uninstall, only omp's
   // self check answers, and only while the engine supports it.
@@ -117,7 +114,7 @@ test("manage mode renders every engine with its chips, actions and the Danger zo
   resetSettingsRouteCache();
   const html = renderToStaticMarkup(React.createElement(EngineRoster, { mode: "manage", capabilities: ALL_CAPABILITIES, initial: ROSTER, initialStatuses: STATUSES.updates }));
 
-  for (const id of ["omp", "pi", "claude", "codex", "hermes"]) {
+ for (const id of ["omp", "pi", "claude", "codex"]) {
     assert.match(html, new RegExp(`data-search-id="engine-${id}"`), `${id} is a search target`);
   }
   assert.match(html, />Active</, "the active chip");
@@ -134,7 +131,6 @@ test("manage mode renders every engine with its chips, actions and the Danger zo
   assert.match(html, /Reinstall/);
   assert.match(html, /View changelog/);
   assert.match(html, />Install</, "an installable engine offers Install");
-  assert.match(html, /Install the hermes CLI on the host/, "an engine Cody cannot install says so");
   assert.match(html, /aria-label="Danger zone"/, "the Danger zone section renders");
   assert.match(html, /Uninstall/);
   assert.match(html, /Restart sessions/);
@@ -148,14 +144,13 @@ test("pick mode renders the onboarding cards with Install, Use and Continue and 
   resetSettingsRouteCache();
   const html = renderToStaticMarkup(React.createElement(EngineRoster, { mode: "pick", initial: ROSTER, onSelected: () => {} }));
   assert.match(html, /class="engine-grid"/);
-  assert.equal(html.split('class="engine-card"').length - 1, 5, "one card per engine");
+ assert.equal(html.split('class="engine-card"').length - 1, 4, "one card per engine");
   assert.match(html, /data-active="true"/);
   assert.match(html, /Continue with OMP/);
   assert.match(html, /Use Pi/);
   assert.match(html, /Use Claude/);
   assert.match(html, /Installed · v18\.1\.10/);
   assert.match(html, />Install</);
-  assert.match(html, /Install the hermes CLI on the host/);
   assert.match(html, /Decide later and keep using OMP/);
   assert.doesNotMatch(html, /aria-label="Danger zone"/, "the picker never offers uninstall or restart");
   assert.doesNotMatch(html, /role="dialog"/);

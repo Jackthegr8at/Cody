@@ -20,6 +20,8 @@ export const STORAGE_KEYS = {
   activityDisplayMode: "cody:activity-display-mode",
   /** Whether thinking blocks render expanded by default. */
   thinkingExpanded: "cody:thinking-expanded",
+  /** Chat text font size: 13, 14 (default), 15, or 16 px. */
+  chatFontSize: "cody:chat-font-size",
   /** Project folders left expanded in the session tree. */
   expandedProjects: "cody:expanded-projects",
   /** Session ids with unseen agent output. */
@@ -57,8 +59,6 @@ export const STORAGE_KEYS = {
   terminalSoftKeysVisible: "cody:terminal-soft-keys",
   /** Individual buttons shown in the terminal soft-key toolbar. */
   terminalSoftKeyIds: "cody:terminal-soft-key-ids",
-  /** Stream pacing parameters (JSON-serialized StreamTuning). */
-  streamTuning: "cody:stream-tuning",
   /** Distill preferences: reply verbosity + collapsed-thinking summaries
    * (JSON-serialized DistillPreferences from lib/distill-preferences). */
   distill: "cody:distill",
@@ -73,7 +73,7 @@ export const STORAGE_PREFIXES = {
 /**
  * Keys above whose value belongs to ONE engine's world and must not survive
  * an engine switch. Session ids are the engine's own (omp's ids mean nothing
- * to pi, and pi's mean nothing to Hermes), and a pinned model list written
+ * to pi, and pi's mean nothing to another engine), and a pinned model list written
  * against omp's catalog left the composer on pi showing "No models" for a
  * catalog that had loaded fine — with the Models settings tab hidden there,
  * so there was no way back.
@@ -128,7 +128,7 @@ export const STORAGE_EVENTS = {
   recentModelsChange: "cody:recent-models-change",
   soundPrefChange: "cody:sound-pref-change",
   terminalSoftKeysChange: "cody:terminal-soft-keys-change",
-  streamTuningChange: "cody:stream-tuning-change",
+  chatFontSizeChange: "cody:chat-font-size-change",
   distillChange: "cody:distill-change",
 } as const;
 

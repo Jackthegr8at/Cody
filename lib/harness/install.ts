@@ -52,9 +52,6 @@ export interface EngineInstallRequest {
   installSpec: string;
   /** Binary whose resolution cache must be dropped once the install finishes. */
   binaryName: string;
-  /** Which package manager installs the spec. Defaults to npm — every engine
-   * before Hermes was an npm package; Hermes is Python, on PyPI. */
-  installVia?: "npm" | "uv";
   /** Further npm specs the engine needs, installed into the same prefix by the
    * same job, one invocation each (HarnessAdapter.installAlso). */
   installAlso?: readonly string[];
@@ -427,30 +424,23 @@ export interface InstallStep {
  */
 export function installSteps(request: EngineInstallRequest): InstallStep[] {
   const primary: InstallStep = { spec: request.installSpec, skipNativeOptional: request.skipNativeOptional };
-  // uv has no equivalent, and no engine on it needs one.
-  if (request.installVia === "uv") return [primary];
   return [primary, ...(request.installAlso ?? []).map((spec) => ({ spec }))];
 }
 
 function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult> {
   const prefix = getToolsDir();
-  const viaUv = request.installVia === "uv";
-  const cacheDir = viaUv ? join(prefix, "uv-cache") : getNpmCacheDir();
+  const cacheDir = getNpmCacheDir();
   const steps = installSteps(request);
   const packageNames = steps.map((step) => packageNameFromSpec(step.spec));
-  const npmCli = viaUv ? null : findNpmCli();
-  const command = viaUv ? "uv" : (npmCli ? execPath : "npm");
-  // uv installs a Python tool into the same prefix npm uses, so both engines
-  // land in one `bin` that engine-bin already searches. --force makes a repeat
-  // install an UPDATE rather than a no-op, matching npm's `@latest` behavior.
+  const npmCli = findNpmCli();
+  const command = npmCli ? execPath : "npm";
+  // --prefix puts every engine in one `bin` that engine-bin already searches.
   const argsFor = (step: InstallStep): string[] => {
-    const args = viaUv
-      ? ["tool", "install", "--force", step.spec]
-      : [
-        "install", "-g", "--prefix", prefix,
-        ...(step.skipNativeOptional ? SKIP_NATIVE_OPTIONAL_ARGS : []),
-        step.spec,
-      ];
+    const args = [
+      "install", "-g", "--prefix", prefix,
+      ...(step.skipNativeOptional ? SKIP_NATIVE_OPTIONAL_ARGS : []),
+      step.spec,
+    ];
     return npmCli ? [npmCli, ...args] : args;
   };
   const startedAt = Date.now();
@@ -473,11 +463,10 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
     }
 
     // Sweep any tree a previous interrupted run renamed aside: npm would try
-    // to rename onto that exact path and fail with ENOTEMPTY every time. uv
-    // replaces a tool directory outright, so it has no equivalent leftover.
+    // to rename onto that exact path and fail with ENOTEMPTY every time.
     // Every package this job installs is swept, not just the first: a leftover
     // under a companion package blocks its update just as permanently.
-    const swept = viaUv ? [] : packageNames.flatMap((name) => cleanStaleInstallDirs(prefix, name));
+    const swept = packageNames.flatMap((name) => cleanStaleInstallDirs(prefix, name));
     for (const path of swept) {
       appendJobLog(job, `Removed leftover directory from an interrupted install: ${path}\n`);
     }
@@ -500,19 +489,9 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
       return;
     }
 
-    // Env is inherited: the package manager needs HOME, PATH, proxy and
-    // registry settings from the container exactly as the operator configured
-    // them. uv additionally gets its tool/bin/cache dirs pointed inside Cody's
-    // persistent prefix, so a Python engine survives an image update the same
-    // way an npm one does.
-    const env = viaUv
-      ? {
-        ...process.env,
-        UV_TOOL_DIR: join(prefix, "uv-tools"),
-        UV_TOOL_BIN_DIR: join(prefix, "bin"),
-        UV_CACHE_DIR: cacheDir,
-      }
-      : process.env;
+    // Env is inherited: npm needs HOME, PATH, proxy and registry settings from
+    // the container exactly as the operator configured them.
+    const env = process.env;
 
     let settled = false;
     const finish = (error: EngineInstallError | null, result?: EngineInstallResult): void => {
@@ -607,7 +586,7 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
 
       child.on("error", (error) => {
         clearTimers();
-        finish(new EngineInstallError(`Could not run ${command} to install ${step.spec}${viaUv ? " — is uv installed on this host?" : ""}.${halfInstalledNote(index)}`, String(error)));
+        finish(new EngineInstallError(`Could not run ${command} to install ${step.spec}.${halfInstalledNote(index)}`, String(error)));
       });
 
       child.on("close", (code, signal) => {
@@ -684,10 +663,8 @@ const UNINSTALL_TIMEOUT_MS = 60_000;
  * actually managed by Cody); this only runs the package manager and drops the
  * binary caches so the next probe sees the removal.
  *
- * The manager has to match the one that INSTALLED it. Running npm against a
- * uv-installed engine is not a loud failure — npm reports nothing to remove
- * and exits 0, so the route answered "uninstalled" while the engine sat
- * untouched on disk and kept running.
+ * npm is the only manager Cody installs with, so it is also the only one it
+ * uninstalls with.
  */
 export function uninstallEngine(request: {
   id: string;
@@ -697,36 +674,20 @@ export function uninstallEngine(request: {
    * nothing will ever offer to delete again. */
   alsoPackageNames?: readonly string[];
   binaryName: string;
-  installVia?: "npm" | "uv";
 }): Promise<void> {
   if (inFlight.has(request.id)) {
     return Promise.reject(new EngineInstallError(`An install of ${request.id} is still running; wait for it to finish.`, ""));
   }
   const prefix = getToolsDir();
-  const viaUv = request.installVia === "uv";
-  // The same directory overrides the install used, or uv would look for the
-  // tool in its default location and find nothing to remove.
-  const env = viaUv
-    ? {
-      ...process.env,
-      UV_TOOL_DIR: join(prefix, "uv-tools"),
-      UV_TOOL_BIN_DIR: join(prefix, "bin"),
-      UV_CACHE_DIR: join(prefix, "uv-cache"),
-    }
-    : process.env;
-  const npmCli = viaUv ? null : findNpmCli();
-  const command = viaUv ? "uv" : (npmCli ? execPath : "npm");
-  // uv has no companion packages (they are an npm-only mechanism), so its
-  // argv stays a single tool name.
-  const removing = viaUv ? [request.packageName] : [request.packageName, ...(request.alsoPackageNames ?? [])];
-  const commandArgs = viaUv
-    ? ["tool", "uninstall", request.packageName]
-    : (npmCli
-      ? [npmCli, "uninstall", "-g", "--prefix", prefix, ...removing]
-      : ["uninstall", "-g", "--prefix", prefix, ...removing]);
+  const npmCli = findNpmCli();
+  const command = npmCli ? execPath : "npm";
+  const removing = [request.packageName, ...(request.alsoPackageNames ?? [])];
+  const commandArgs = npmCli
+    ? [npmCli, "uninstall", "-g", "--prefix", prefix, ...removing]
+    : ["uninstall", "-g", "--prefix", prefix, ...removing];
 
   return new Promise<void>((resolve, reject) => {
-    const child = spawn(command, commandArgs, { env, stdio: ["ignore", "ignore", "pipe"] });
+    const child = spawn(command, commandArgs, { env: process.env, stdio: ["ignore", "ignore", "pipe"] });
     let stderr = "";
     let timedOut = false;
     let killTimer: NodeJS.Timeout | undefined;
@@ -758,7 +719,7 @@ export function uninstallEngine(request: {
         return;
       }
       const how = signal ? `was killed with ${signal}` : `exited with code ${code}`;
-      reject(new EngineInstallError(`${viaUv ? "uv tool" : "npm"} uninstall ${request.packageName} ${how}`, tail(stderr)));
+      reject(new EngineInstallError(`npm uninstall ${request.packageName} ${how}`, tail(stderr)));
     });
   });
 }

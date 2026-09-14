@@ -290,7 +290,7 @@ export function ModelCatalog({ catalog, panelId }: { catalog: ModelCatalogHandle
                 ? `${entry.enabled} of ${entry.total} · exact list`
                 : `none of ${entry.total}`;
             return (
-              <div key={entry.provider} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 12px", minHeight: 40, fontSize: 12, borderTop: "1px solid var(--border)" }}>
+              <div key={entry.provider} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", minHeight: 36, fontSize: 12, borderTop: "1px solid var(--border)" }}>
                 <ProviderIcon provider={entry.provider} size={13} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
                 <code style={{ color: "var(--text)", flexShrink: 0 }}>{entry.provider}</code>
                 <span style={{ flex: 1, minWidth: 0, color: mode === "exact" || mode === "none" ? "var(--status-warning)" : "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{summary}</span>
@@ -389,7 +389,7 @@ export function ModelCatalog({ catalog, panelId }: { catalog: ModelCatalogHandle
                 </span>
                 <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
                   <span style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", minWidth: 0 }}>
-                    <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "100%" }}>{formatModelDisplayName(row.id, row.name)}</span>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "100%" }}>{formatModelDisplayName(row.id, row.name)}</span>
                     {row.isNew && <span style={{ ...chipStyle, color: "var(--accent)" }}>New</span>}
                     {row.pinned && <span style={chipStyle}>Pinned</span>}
                     <StateChip row={row} />
@@ -398,7 +398,7 @@ export function ModelCatalog({ catalog, panelId }: { catalog: ModelCatalogHandle
                     {context && <span style={chipStyle}>{context}</span>}
                     {row.local && <span style={chipStyle}>Local</span>}
                   </span>
-                  <span style={{ fontSize: 10.5, fontFamily: "var(--font-mono)", color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  <span style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {row.source === "placeholder" ? `${row.provider} · no credentials` : row.key}
                   </span>
                 </span>

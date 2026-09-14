@@ -13,8 +13,8 @@
  * The one rule that outranks tidiness: **render the agent's own options, in
  * the order it sent them.** Cody never invents Allow/Deny buttons, never
  * reorders, never collapses two options into one. Only the agent knows which
- * grants it is offering — Hermes, for instance, sends five, two of which share
- * `kind: "allow_always"` ("Allow for session" and "Allow always") and differ
+ * grants it is offering — an agent, for instance, may send five options, two
+ * of which share `kind: "allow_always"` ("Allow for session" and "Allow always")
  * only by `optionId`/`name`. `optionId` is the identity, `name` is the label,
  * and `kind` is nothing but a styling hint.
  */
@@ -114,7 +114,7 @@ const TOOL_KINDS = new Set<string>([
   "other",
 ]);
 
-/** How long a tool title may be before the card truncates it. Hermes builds
+/** How long a tool title may be before the card truncates it. An agent may build
  * an execute title as `"<description>: <command>"`, and a command can be a
  * whole shell pipeline — long enough to push the buttons off screen. */
 const TITLE_LIMIT = 400;

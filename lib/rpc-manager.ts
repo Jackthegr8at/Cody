@@ -15,6 +15,7 @@ import { invalidateModelsCache } from "./models-cache";
 import { MAX_RPC_FRAME_BYTES } from "./omp/rpc-frame";
 import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame, type RpcProcessLaunch } from "./omp/rpc-process";
 import { readNativeSettings } from "./omp/settings-config";
+import { getSidebarChatsDir, getSessionDirNameForCwd } from "./omp/paths";
 import { captureLoopbackScreenshot, ScreenshotError } from "./preview-screenshot";
 import { ProjectTodoError, type TodoDocument, formatTodoForAgent, mutateProjectTodo, parseTodoAgentAction, readProjectTodo, todoAgentActionOperation } from "./project-todo";
 import { resolveProject } from "./worktree";
@@ -57,6 +58,11 @@ interface CompactionResultLike {
 
 const IDLE_DESTROY_MS = 10 * 60 * 1000;
 const READY_TIMEOUT_MS = 120_000;
+
+/** System prompt for sidebar chat sessions: short, no tools/file-editing, directs
+ * users to the main chat for capabilities. Sidebar chats run on omp with
+ * --no-tools --no-skills --no-extensions and this fixed prompt. */
+const SIDEBAR_CHAT_SYSTEM_PROMPT = "You are a concise, knowledgeable assistant in a side panel of Cody, a coding workspace. Answer in Markdown. You have no tools: you cannot read or edit files, run commands, or browse. When a request needs those, say so briefly and point the user to the main chat, which can.";
 
 /**
  * Host tools implemented by the Cody SERVER rather than the browser: they
@@ -271,7 +277,14 @@ type RpcSpawnFlags = Pick<RpcUiSpawn, "resumeFlag" | "supportsAdvisor">;
 const OMP_SPAWN_FLAGS: RpcSpawnFlags = { resumeFlag: "--resume", supportsAdvisor: true };
 
 /** Session CLI args for spawning an rpc-dialect engine (after the mode/cwd base). */
-export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[], advisor = false, flags: RpcSpawnFlags = OMP_SPAWN_FLAGS): string[] {
+export function buildSessionSpawnArgs(
+  sessionFile: string,
+  toolNames?: string[],
+  advisor = false,
+  kind?: "sidebar",
+  sidebarSessionDir?: string,
+  flags: RpcSpawnFlags = OMP_SPAWN_FLAGS,
+): string[] {
   const args: string[] = [];
   if (sessionFile) {
     // An absolute path (or anything containing "/") resolves deterministically:
@@ -292,6 +305,22 @@ export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[],
     }
   }
   if (flags.supportsAdvisor && advisor && !sessionFile) args.push("--advisor");
+  
+  // Sidebar chat: run on omp with no tools/skills/extensions/rules/prewalk, custom
+  // system prompt, and session directory outside the normal session tree.
+  if (kind === "sidebar" && sidebarSessionDir) {
+    args.push(
+      "--no-tools",
+      "--no-skills",
+      "--no-extensions",
+      "--no-rules",
+      "--no-prewalk",
+      "--no-title",
+      "--session-dir", sidebarSessionDir,
+      "--system-prompt", SIDEBAR_CHAT_SYSTEM_PROMPT
+    );
+  }
+  
   return args;
 }
 
@@ -305,6 +334,7 @@ export function buildEngineRpcLaunch(
     toolNames?: string[];
     advisor?: boolean;
     profile?: LocalModelProfileLaunch;
+    kind?: "sidebar";
   },
 ): RpcProcessLaunch {
   const spec = harness.rpcUi;
@@ -321,10 +351,11 @@ export function buildEngineRpcLaunch(
   const args = ["--mode", spec.mode];
   if (spec.supportsCwdFlag) args.push("--cwd", opts.cwd);
   const newSessionTools = opts.profile?.toolNames ?? opts.toolNames;
+  const sidebarSessionDir = opts.kind === "sidebar" ? path.join(getSidebarChatsDir(), getSessionDirNameForCwd(opts.cwd)) : undefined;
   // `--tools` alone is additive in OMP. The 8k profile must be a real
   // read+bash whitelist, while larger profiles retain OMP’s normal tool surface.
   if (opts.profile?.profileId === "minimal") args.push("--no-tools");
-  args.push(...buildSessionSpawnArgs(opts.sessionFile, newSessionTools, opts.advisor === true, spec));
+  args.push(...buildSessionSpawnArgs(opts.sessionFile, newSessionTools, opts.advisor === true, opts.kind, sidebarSessionDir, spec));
   // OMP accepts these flags with --resume. Existing session tool presets are
   // intentionally untouched unless a local profile explicitly replaces them.
   if (opts.sessionFile && opts.profile?.toolNames?.length) {
@@ -349,7 +380,7 @@ export function buildEngineRpcLaunch(
  * omp's semantics.
  *
  * An engine that does NOT speak the dialect at all (every ACP engine: claude,
- * codex, hermes) THROWS `unsupported` rather than returning `undefined`.
+ * codex) THROWS `unsupported` rather than returning `undefined`.
  *
  * That is the whole point of this function's contract, and the bug it exists
  * to make impossible: it used to answer `undefined` for those engines too, and
@@ -470,6 +501,8 @@ export interface WrapperEngineContext {
   initialResolution?: ResolvedLocalModelProfile;
   /** Rebuilds a launch. A profile is applied only to this child process. */
   relaunch: (sessionFile: string, profile?: LocalModelProfileLaunch) => RpcProcessLaunch;
+  /** Session kind: "sidebar" for sidebar chats, undefined for main/normal sessions. */
+  kind?: "sidebar";
 }
 
 export class AgentSessionWrapper {
@@ -532,8 +565,10 @@ export class AgentSessionWrapper {
     this.localProfileResolution = engine.initialResolution;
   }
 
-  /** The smallest local profile is deliberately limited to its two OMP tools. */
+  /** The smallest local profile is deliberately limited to its two OMP tools.
+   * Sidebar chats also skip all host tools (--no-tools/--no-skills). */
   private hostToolsForCurrentProfile() {
+    if (this.engine.kind === "sidebar") return [];
     return this.localProfileLaunch?.profileId === "minimal" ? [] : [...this.hostTools, ...SERVER_HOST_TOOLS];
   }
 
@@ -1023,7 +1058,6 @@ export class AgentSessionWrapper {
           doc = await mutateProjectTodo(
             projectRoot,
             todoAgentActionOperation(action),
-            { kind: "agent", label: this.engine.label },
           );
         }
         this.sendHostToolResult({
@@ -1991,6 +2025,7 @@ export async function startRpcSession(
   advisor = false,
   engineSessionId?: string,
   profileTarget?: ModelProfileTarget,
+  kind?: "sidebar",
 ): Promise<{ session: EngineSession; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
@@ -2016,7 +2051,7 @@ export async function startRpcSession(
     const holder: { wrapper?: AgentSessionWrapper } = {};
     const proc = new RpcProcess({
       cwd,
-      launch: buildEngineRpcLaunch(harness, { cwd, sessionFile, toolNames, advisor, profile: launchProfile }),
+      launch: buildEngineRpcLaunch(harness, { cwd, sessionFile, toolNames, advisor, profile: launchProfile, kind }),
       onExit: ({ stderrTail }) => holder.wrapper?.handleProcessExit(stderrTail),
     });
     const created = new AgentSessionWrapper(proc, cwd, {
@@ -2028,7 +2063,9 @@ export async function startRpcSession(
         cwd,
         sessionFile: file,
         profile: launchWithLocalRouting(profile, holder.wrapper?.sessionId || sessionId),
+        kind,
       }),
+      kind,
     });
     holder.wrapper = created;
     created.start();

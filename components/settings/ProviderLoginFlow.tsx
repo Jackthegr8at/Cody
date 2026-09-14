@@ -12,7 +12,7 @@ import { ShellContext } from "./shell-context";
  * route feeding back whatever the user pastes or picks, and a POST to
  * `/api/auth/logout/<id>` for sign-out. Every engine that declares
  * `providerLogins` (lib/harness/types.ts — omp, pi, Claude Code, Codex,
- * Hermes, each running its OWN login and keeping the credential in its OWN
+ * each running its OWN login and keeping the credential in its OWN
  * store) is driven through this exact wire shape, so this is the ONE sign-in
  * UI implementation in Cody: the Providers hub's detail drawer
  * (components/settings/providers/ProviderDetail.tsx) and the setup wizard

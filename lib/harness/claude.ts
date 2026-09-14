@@ -161,7 +161,7 @@ export const claudeHarness: HarnessAdapter = {
   // version, which is the package `installSpec` names and therefore the one
   // the update check compares against the registry.
   //
-  // It is the wrong HEALTH probe, for the reason Hermes taught. `--version` is
+  // It is the wrong HEALTH probe, for a lesson learned the hard way. `--version` is
   // answered from the adapter's own package.json before it looks at Claude at
   // all, so it reports a healthy 0.70.0 with no CLI underneath — which is
   // exactly the state `skipNativeOptional` creates on purpose, and exactly the
@@ -213,9 +213,6 @@ export const claudeHarness: HarnessAdapter = {
     advisor: false,
     // ACP has no subagent vocabulary, so the roster would stay empty.
     subagents: false,
-    // Claude Code's CLAUDE.md is project context the user writes, not memory
-    // the agent maintains and can hand back.
-    memory: false,
     // Provider sign-in with the engine's own login: `claude auth login` in a pseudo-terminal — a Claude subscription.
     providerLogin: true,
   },

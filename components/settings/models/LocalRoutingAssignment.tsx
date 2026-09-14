@@ -1,12 +1,15 @@
 "use client";
 
-import { Plus, Trash2 } from "lucide-react";
+import { Plus } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "@/components/ui/toast";
 import { useI18n } from "@/lib/i18n";
 import { setSettingsRouteData, useSettingsRoute } from "@/hooks/useSettingsData";
 import { nativeOptionStyle, nativeSelectStyle } from "../primitives";
 import { useSaveStatus } from "../SaveStatus";
+import { SettingsActions } from "../SettingsActions";
+import { SettingsSection, SettingsRow } from "../SettingsSection";
+import { ChainList, ChainRow } from "./ChainList";
 import { useSettingsShell } from "../shell-context";
 
 export interface LocalRoutingModelRef {
@@ -69,31 +72,64 @@ export function LocalRoutingAssignment({ panelId }: { panelId: string }) {
   };
 
   return (
-    <section style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <div>
-        <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>{t("localRouting.title")}</div>
-        <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>{t("localRouting.hint")}</p>
-      </div>
-      <div style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
-        <div style={{ padding: "10px 12px", background: "var(--bg-panel)", fontSize: 12, fontWeight: 600 }}>{t("localRouting.primary")}</div>
-        <div style={{ padding: 12 }}><ModelSelect body={body} value={config.primary} label={t("localRouting.primary")} onChange={(primary) => setDraft({ ...config, primary })} disabled={saving} /></div>
-      </div>
-      <div style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
-        <div style={{ padding: "10px 12px", background: "var(--bg-panel)", fontSize: 12, fontWeight: 600 }}>{t("localRouting.fallbacks")}</div>
-        {config.fallbacks.map((fallback, index) => (
-          <div key={`${refKey(fallback)}:${index}`} style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 8, alignItems: "center", padding: 12, borderTop: "1px solid var(--border)" }}>
-            <ModelSelect body={body} value={fallback} label={t("localRouting.fallback", { position: index + 1 })} onChange={(value) => setDraft({ ...config, fallbacks: config.fallbacks.map((entry, i) => i === index ? value : entry).filter((entry): entry is LocalRoutingModelRef => entry !== null) })} disabled={saving} />
-            <button type="button" className="ui-focus-ring" disabled={saving} aria-label={t("localRouting.removeFallback", { position: index + 1 })} title={t("localRouting.removeFallback", { position: index + 1 })} onClick={() => setDraft({ ...config, fallbacks: config.fallbacks.filter((_, i) => i !== index) })} style={{ width: 32, height: 32, padding: 0, border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: saving ? "wait" : "pointer" }}><Trash2 size={14} aria-hidden="true" /></button>
-          </div>
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <SettingsSection
+        title={t("localRouting.title")}
+        description={t("localRouting.hint")}
+      >
+        <div style={{ padding: "10px 14px" }}>
+          <ModelSelect body={body} value={config.primary} label={t("localRouting.primary")} onChange={(primary) => setDraft({ ...config, primary })} disabled={saving} />
+        </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title={t("localRouting.fallbacks")}
+      >
+        <ChainList>
+          {config.fallbacks.map((fallback, index) => (
+            <ChainRow
+              key={`${refKey(fallback)}:${index}`}
+              leading={<span style={{ color: "var(--text-muted)", fontSize: 12 }}>{index + 1}</span>}
+              onRemove={() => setDraft({ ...config, fallbacks: config.fallbacks.filter((_, i) => i !== index) })}
+              onMoveUp={index > 0 ? () => {
+                const newFallbacks = [...config.fallbacks];
+                [newFallbacks[index - 1], newFallbacks[index]] = [newFallbacks[index], newFallbacks[index - 1]];
+                setDraft({ ...config, fallbacks: newFallbacks });
+              } : undefined}
+              onMoveDown={index < config.fallbacks.length - 1 ? () => {
+                const newFallbacks = [...config.fallbacks];
+                [newFallbacks[index], newFallbacks[index + 1]] = [newFallbacks[index + 1], newFallbacks[index]];
+                setDraft({ ...config, fallbacks: newFallbacks });
+              } : undefined}
+            >
+              <ModelSelect body={body} value={fallback} label={t("localRouting.fallback", { position: index + 1 })} onChange={(value) => setDraft({ ...config, fallbacks: config.fallbacks.map((entry, i) => i === index ? value : entry).filter((entry): entry is LocalRoutingModelRef => entry !== null) })} disabled={saving} />
+            </ChainRow>
+          ))}
+        </ChainList>
+        <div style={{ padding: "10px 14px", borderTop: "1px solid var(--border)" }}>
+          <button type="button" className="ui-focus-ring" disabled={saving || !models.some((model) => ![refKey(config.primary), ...config.fallbacks.map(refKey)].includes(`${model.provider}/${model.modelId}`))} onClick={() => { const next = models.find((model) => ![refKey(config.primary), ...config.fallbacks.map(refKey)].includes(`${model.provider}/${model.modelId}`)); if (next) setDraft({ ...config, fallbacks: [...config.fallbacks, { provider: next.provider, modelId: next.modelId }] }); }} style={{ display: "inline-flex", alignItems: "center", gap: 6, minHeight: 30, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: saving || !models.some((model) => ![refKey(config.primary), ...config.fallbacks.map(refKey)].includes(`${model.provider}/${model.modelId}`)) ? "wait" : "pointer", fontSize: 11, fontWeight: 500, opacity: saving || !models.some((model) => ![refKey(config.primary), ...config.fallbacks.map(refKey)].includes(`${model.provider}/${model.modelId}`)) ? 0.55 : 1 }}><Plus size={14} aria-hidden="true" /> Add fallback</button>
+        </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title={t("localRouting.roles")}
+        description={t("localRouting.rolesFuture")}
+        variant="rows"
+      >
+        {body.roleIds.map((role) => (
+          <SettingsRow key={role} label={<code style={{ fontSize: 12, color: "var(--text-muted)" }}>{role}</code>}>
+            <ModelSelect body={body} value={config.roles[role] ?? null} label={t("localRouting.role", { role })} emptyLabel={t("localRouting.usePrimary")} onChange={(value) => setDraft({ ...config, roles: { ...config.roles, [role]: value } })} disabled={saving} />
+          </SettingsRow>
         ))}
-        <div style={{ padding: 12, borderTop: "1px solid var(--border)" }}><button type="button" className="ui-focus-ring" disabled={saving || !models.some((model) => ![refKey(config.primary), ...config.fallbacks.map(refKey)].includes(`${model.provider}/${model.modelId}`))} onClick={() => { const next = models.find((model) => ![refKey(config.primary), ...config.fallbacks.map(refKey)].includes(`${model.provider}/${model.modelId}`)); if (next) setDraft({ ...config, fallbacks: [...config.fallbacks, { provider: next.provider, modelId: next.modelId }] }); }} style={{ display: "inline-flex", alignItems: "center", gap: 6, minHeight: 30, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: saving ? "wait" : "pointer" }}><Plus size={13} aria-hidden="true" />{t("localRouting.addFallback")}</button></div>
-      </div>
-      <div style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
-        <div style={{ padding: "10px 12px", background: "var(--bg-panel)", fontSize: 12, fontWeight: 600 }}>{t("localRouting.roles")}</div>
-        <p style={{ margin: 0, padding: "8px 12px", borderTop: "1px solid var(--border)", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>{t("localRouting.rolesFuture")}</p>
-        {body.roleIds.map((role) => <div key={role} style={{ display: "grid", gridTemplateColumns: "minmax(82px, 0.25fr) minmax(0, 1fr)", gap: 10, alignItems: "center", padding: 12, borderTop: "1px solid var(--border)", fontSize: 12 }}><span style={{ color: "var(--text-muted)" }}>{role}</span><ModelSelect body={body} value={config.roles[role] ?? null} label={t("localRouting.role", { role })} emptyLabel={t("localRouting.usePrimary")} onChange={(value) => setDraft({ ...config, roles: { ...config.roles, [role]: value } })} disabled={saving} /></div>)}
-      </div>
-      <div style={{ display: "flex", justifyContent: "flex-end" }}><button type="button" className="ui-focus-ring" disabled={!dirty || saving} onClick={save} style={{ minHeight: 32, padding: "5px 12px", border: "none", borderRadius: "var(--radius-control)", background: dirty ? "var(--accent)" : "var(--bg-hover)", color: dirty ? "var(--accent-text)" : "var(--text-dim)", cursor: saving ? "wait" : dirty ? "pointer" : "default", fontSize: 12, fontWeight: 600, opacity: saving ? 0.65 : 1 }}>{saving ? t("localRouting.saving") : t("localRouting.save")}</button></div>
-    </section>
+      </SettingsSection>
+
+      <SettingsActions
+        dirty={dirty}
+        onSave={save}
+        saving={saving}
+        saveLabel={t("localRouting.save")}
+        savingLabel={t("localRouting.saving")}
+      />
+    </div>
   );
 }

@@ -57,7 +57,6 @@ async function main() {
   const todoEndpoint = process.env.CODY_TODO_ENDPOINT;
   const capability = process.env.CODY_DISPLAY_CAPABILITY;
   const sessionId = process.env.CODY_DISPLAY_SESSION_ID;
-  const engineLabel = process.env.CODY_ENGINE_LABEL || "Agent";
   if (!endpoint || !capability) throw new Error("Cody display capability is unavailable");
 
   const server = new McpServer({ name: "cody-display", version: "1.0.0" });
@@ -121,7 +120,6 @@ async function main() {
         headers: {
           Authorization: "Bearer " + capability,
           "Content-Type": "application/json",
-          "X-Cody-Engine-Label": engineLabel,
         },
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(5_000),

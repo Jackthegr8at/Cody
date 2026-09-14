@@ -19,8 +19,8 @@ interface RuntimeInfo {
    * version of whatever engine is ACTIVE. */
   ompVersion: string | null;
   /** Who that engine is. The version and agent dir below have always been the
-   * active engine's; only the labels around them said "OMP", so a Hermes
-   * user's pasted diagnostics read "OMP: 0.19.0". */
+   * active engine's; only the labels around them said "OMP", so a user under a
+   * non-founding engine's pasted diagnostics read "OMP: 0.19.0". */
   engineName: string;
   nodeVersion: string;
   platform: string;
@@ -203,8 +203,8 @@ export function InfoPanel({ cwd, active, gitBranch, gitRepoRoot }: InfoPanelProp
       "Cody diagnostics",
       `Cody: v${diagnosticValue(process.env.NEXT_PUBLIC_CODY_VERSION ?? info?.codyVersion)} (${PACKAGE_NAME})`,
       // The label follows the engine, never the founding one: a diagnostics
-      // paste that says "OMP" under Hermes sends the reader after the wrong
-      // changelog. Never localized — a paste lands in an English bug report.
+      // paste that says "OMP" under a non-founding engine sends the reader
+      // after the wrong changelog. Never localized — a paste lands in an English bug report.
       `Engine: ${info?.engineName ?? "unknown"} ${diagnosticValue(info?.ompVersion)}`,
       `Node: ${diagnosticValue(info?.nodeVersion)}`,
       `Platform: ${diagnosticValue(info?.platform)}`,

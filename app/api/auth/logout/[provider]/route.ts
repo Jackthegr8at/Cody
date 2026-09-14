@@ -10,12 +10,12 @@ export const dynamic = "force-dynamic";
 /**
  * Remove a provider credential. Most engines keep exactly one credential per
  * provider and disconnect it wholesale through their own non-interactive
- * logout (`claude auth logout`, `codex logout`, `hermes auth logout`, pi's
- * auth store). omp instead lets several accounts serve the same provider
- * (lib/omp/provider-login.ts, backed by lib/harness/omp-credentials.ts): a
- * JSON body naming `accountId` removes just that one stored credential
- * (`surface.removeAccount`) instead of every credential for the provider
- * (`surface.logout`, the no-body path below, unchanged).
+ * logout — `claude auth logout`, `codex logout`, pi's auth store. omp instead
+ * lets several accounts serve the same provider (lib/omp/provider-login.ts,
+ * backed by lib/harness/omp-credentials.ts): a JSON body naming `accountId`
+ * removes just that one stored credential (`surface.removeAccount`) instead of
+ * every credential for the provider (`surface.logout`, the no-body path below,
+ * unchanged).
  */
 export async function POST(
   req: Request,

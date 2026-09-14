@@ -59,7 +59,7 @@ export async function POST(req: Request) {
     }
 
     // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
-    const { provider, modelId, toolNames, thinkingLevel, advisor, localOnly, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: string; advisor?: boolean; localOnly?: boolean; [key: string]: unknown };
+    const { provider, modelId, toolNames, thinkingLevel, advisor, localOnly, kind, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: string; advisor?: boolean; localOnly?: boolean; kind?: "sidebar"; [key: string]: unknown };
     // A stale or forged sessionId must never reach the child RPC.
     delete promptCommand.sessionId;
     if (typeof promptCommand.type !== "string" || !promptCommand.type.trim()) {
@@ -109,6 +109,7 @@ export async function POST(req: Request) {
       advisor === true,
       engineMode ? "" : undefined,
       profileTarget,
+      kind,
     );
     if (localIntent) renameSessionLocalRouting(tempKey, realSessionId);
 
@@ -129,7 +130,7 @@ export async function POST(req: Request) {
       // cwd only, no title, because the transport never sees the prompt as a
       // title — and that happens inside startRpcSession above, BEFORE this
       // line. So the row usually exists already, and seeding only a missing
-      // row left every Claude, Codex and Hermes session labelled
+      // row left every Claude Code and Codex session labelled
       // "(no messages)" in the sidebar for good. Seed the title whenever the
       // row has none; an `ensure_session` (no prompt) still gets its row.
       const existingRow = getEngineSession(realSessionId);

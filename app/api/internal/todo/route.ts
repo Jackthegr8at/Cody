@@ -6,7 +6,6 @@ import { getEngineSession } from "@/lib/harness/engine-sessions";
 import {
   ProjectTodoError,
   mutateProjectTodo,
-  parseTodoActor,
   parseTodoOperation,
   readProjectTodo,
 } from "@/lib/project-todo";
@@ -89,9 +88,7 @@ export async function POST(request: Request) {
     }
 
     const operation = parseTodoOperation(body);
-    const label = request.headers.get("x-cody-engine-label")?.trim() || "Agent";
-    const actor = parseTodoActor({ kind: "agent", label });
-    const doc = await mutateProjectTodo(projectRoot, operation, actor);
+    const doc = await mutateProjectTodo(projectRoot, operation);
     return NextResponse.json({ doc }, { headers: NO_STORE });
   } catch (error) {
     return todoErrorResponse(error);

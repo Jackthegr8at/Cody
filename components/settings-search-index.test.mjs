@@ -48,7 +48,6 @@ const PANEL_TABS = {
   "ModelsPanel.tsx": "models",
   "EnginePanel.tsx": "engine",
   "ExtensionsPanel.tsx": "extensions",
-  "MemoryPanel.tsx": "memory",
   "SystemPanel.tsx": "system",
 };
 
@@ -229,8 +228,8 @@ test("a schema row a curated card owns trails the card's home, and the schema li
   assert.equal(withCards[0].tab, "engine");
   assert.deepEqual({ tab: withCards[1].tab, sub: withCards[1].sub, trail: withCards[1].breadcrumb }, { tab: "extensions", sub: "mcp", trail: ["OMP", "Extensions", "MCP"] }, "an MCP-bound card renders under Extensions");
 
-  const schemaOnly = buildSchemaSearchEntries(schemaRowsFromBody(body), "Hermes", { ...ALL_CAPABILITIES, configEditor: false });
-  assert.deepEqual(schemaOnly[0].breadcrumb, ["Hermes", "Behavior", "Tools", "Approvals"], "no card on this engine: the row is the key's only home");
+  const schemaOnly = buildSchemaSearchEntries(schemaRowsFromBody(body), "Codex", { ...ALL_CAPABILITIES, configEditor: false });
+  assert.deepEqual(schemaOnly[0].breadcrumb, ["Codex", "Behavior", "Tools", "Approvals"], "no card on this engine: the row is the key's only home");
   assert.equal(schemaOnly[1].tab, "engine");
   assert.deepEqual(buildSchemaSearchEntries(schemaRowsFromBody(body), "OMP")[0].breadcrumb, ["OMP", "Behavior", "Tools", "Approvals"], "without capabilities nothing is assumed");
 });

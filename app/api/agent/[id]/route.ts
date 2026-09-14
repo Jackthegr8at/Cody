@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createCheckpoint } from "@/lib/checkpoints";
-import { readSessionHeader } from "@/lib/session-reader";
+import { readSessionHeader, isSidebarSessionPath } from "@/lib/session-reader";
 import { apiErrorResponse, resolveEngineSessionOr404, resolveSessionPathOr404 } from "@/lib/api-utils";
 import { startRpcSession, getRpcSession, resolveSpawnCwd, WebRpcError } from "@/lib/rpc-manager";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
@@ -83,10 +83,11 @@ export async function POST(
     const resolved = await resolveSessionPathOr404(id, req);
     if ("response" in resolved) return resolved.response;
     const filePath = resolved.filePath;
+    const kind = isSidebarSessionPath(filePath) ? "sidebar" as const : undefined;
 
     const cwd = resolveSpawnCwd(readSessionHeader(filePath)?.cwd);
 
-    const { session } = await startRpcSession(id, filePath, cwd);
+    const { session } = await startRpcSession(id, filePath, cwd, undefined, false, undefined, undefined, kind);
     await checkpointBeforePrompt(cwd, body);
     const result = await session.send(body);
 

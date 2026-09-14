@@ -11,17 +11,16 @@ import type { EngineSettingValue, EngineSettingsSchema } from "@/lib/harness/typ
  * so an upstream addition shows up in its declared tab and group without a
  * Cody release.
  *
- * Engine-NEUTRAL, and neutral by construction: the engine supplies both
- * halves through `HarnessAdapter.settings` (omp from its TypeScript schema,
- * Hermes from its Python DEFAULT_CONFIG, pi from the settings tables in its
- * shipped docs), and this route only dispatches. It used to switch on engine
- * ids — `active.id === "hermes" ? … : ompBranch` — which made "no branch of
- * mine" mean "omp's branch": every other engine fell through and got omp's
- * ~550-key schema and omp's config.yml values back, stamped with its OWN id
- * and shortName ("All Pi Settings" over omp's settings). PUT was worse than
- * misleading: it wrote omp's config.yml while another engine was active and
- * reported success. An adapter hook cannot do that — an engine either
- * implements the surface or the route refuses it.
+ * Engine-NEUTRAL, and neutral by construction: the engine supplies both halves
+ * through `HarnessAdapter.settings` (omp from its TypeScript schema, pi from
+ * the settings tables in its shipped docs), and this route only dispatches. It
+ * used to switch on engine ids — `active.id === someOtherEngineId ? … :
+ * ompBranch` — which made "no branch of mine" mean "omp's branch": every other
+ * engine fell through and got omp's ~550-key schema and omp's config.yml values
+ * back, stamped with its OWN id and shortName ("All Pi Settings" over omp's
+ * settings). PUT was worse than misleading: it wrote omp's config.yml while
+ * another engine was active and reported success. An adapter hook cannot do
+ * that — an engine either implements the surface or the route refuses it.
  *
  * The capability flag stays the outer gate (it is what hides the tab), and
  * the hook is the inner one, so an engine that declares `nativeSettings`
@@ -49,7 +48,7 @@ function noSurface(shortName: string) {
 }
 
 /** Strip every secret leaf's value, reporting only which are set. A secret
- * counts as set when a non-empty string is persisted: Hermes declares its
+ * counts as set when a non-empty string is persisted: an engine declares its
  * keys with `""` as the default, and an empty override is the same as none. */
 function redactSecrets(schema: EngineSettingsSchema | null, values: Record<string, EngineSettingValue>): { values: Record<string, EngineSettingValue>; secretsSet: string[] } {
   const secretKeys = new Set((schema?.settings ?? []).filter((setting) => setting.secret).map((setting) => setting.key));

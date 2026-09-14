@@ -20,6 +20,7 @@ import { readTerminalSoftKeyIds, TERMINAL_SOFT_KEYS, writeTerminalSoftKeyIds, ty
 import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-preset-preference";
 import type { ToolPreset } from "@/lib/tool-presets";
 import { THEMES, type ThemeId } from "@/lib/theme-catalog";
+import { readChatFontSize, writeChatFontSize, type FontSize } from "@/lib/chat-font-size";
 import { useTheme } from "@/hooks/useTheme";
 import type { EngineCapabilities } from "../../SettingsTabs";
 import type { ActivityDisplayMode } from "@/lib/types";
@@ -43,6 +44,7 @@ export interface PreferenceCard {
 export const PREFERENCE_CARDS: readonly PreferenceCard[] = [
   { id: "theme", label: "Theme", description: "Colour theme for this account, applied on every device you sign in from. The title-bar picker changes the same setting.", scope: "Cody only", keywords: ["dark", "light", "colour", "color"] },
   { id: "language", label: "Language", description: "Interface language. Auto-detected from the browser until chosen here.", scope: "Cody only", keywords: ["locale", "english", "japanese", "chinese"] },
+  { id: "chat-font-size", label: "Chat text size", description: "Font size for transcript text, thinking blocks, and tool results. Applies only to chat content, not the interface.", scope: "Cody only", keywords: ["font", "size", "text", "zoom", "readable"] },
   { id: "activity", label: "Tool and background activity", description: "Choose whether tool calls, results and structured background work stay compact, open in full, or disappear from the transcript. User and assistant conversation and thinking are unchanged.", scope: "Cody only", keywords: ["tools", "results", "async", "background", "transcript", "compact", "full", "hidden"] },
   { id: "thinking", label: "Expand thinking blocks", description: "Show the model's reasoning open by default instead of behind a collapsed header.", scope: "Cody only" },
   { id: "sound", label: "Completion sound", description: "Play a tone when the agent completes a run.", scope: "Cody only", keywords: ["notification", "chime"] },
@@ -127,6 +129,7 @@ export function PreferencesPanel() {
   const planKeeperEnabled = planKeeperConfig.data?.enabled === true;
   const [planKeeperSaving, setPlanKeeperSaving] = useState(false);
   const { themeId, setTheme } = useTheme();
+  const [chatFontSize, setChatFontSize] = useState<FontSize>(() => readChatFontSize());
   const { track } = useSaveStatus(PREFERENCES_PANEL_ID);
   const [submitBehavior, setSubmitBehavior] = useState<SubmitDuringRunBehavior>(() => getSubmitDuringRunBehavior());
   const [toolPreset, setToolPreset] = useState<ToolPreset>(() => getPreferredToolPreset());
@@ -209,6 +212,23 @@ export function PreferencesPanel() {
             {LOCALES.map((item) => (
               <option key={item.value} value={item.value} style={nativeOptionStyle}>{item.label}</option>
             ))}
+          </select>
+        </NativeSetting>
+        <NativeSetting label={card("chat-font-size").label} description={card("chat-font-size").description} scope="Cody only">
+          <select
+            style={nativeSelectStyle}
+            value={chatFontSize}
+            aria-label="Chat text size"
+            onChange={(event) => {
+              const newSize = event.target.value as FontSize;
+              setChatFontSize(newSize);
+              saved(() => writeChatFontSize(newSize));
+            }}
+          >
+            <option value="13" style={nativeOptionStyle}>Small (13px)</option>
+            <option value="14" style={nativeOptionStyle}>Default (14px)</option>
+            <option value="15" style={nativeOptionStyle}>Large (15px)</option>
+            <option value="16" style={nativeOptionStyle}>Extra large (16px)</option>
           </select>
         </NativeSetting>
       </div>

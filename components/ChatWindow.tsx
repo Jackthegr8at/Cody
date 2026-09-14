@@ -21,8 +21,6 @@ import { useAgentSession, type AgentPhase, type NoticeItem, type RunningToolInfo
 import { ALL_CAPABILITIES, type ActiveEngineInfo, type EngineCapabilities } from "./SettingsTabs";
 import { loadEngineInfo } from "@/lib/engine-capabilities";
 import { useAudio } from "@/hooks/useAudio";
-import { useStreamTuning } from "@/hooks/useStreamTuning";
-import { streamTuningCssVars } from "@/lib/stream-tuning";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { SessionStatsInfo } from "@/lib/pi-types";
@@ -45,7 +43,7 @@ interface Props {
   /** Everything the ACTIVE engine can serve, straight from AppShell's one
    * `/api/info` read. The whole flag set travels together rather than as a
    * hand-picked subset: a control gated on the wrong neighbouring flag is
-   * exactly how omp-only surfaces leaked onto pi and Hermes. */
+   * exactly how omp-only surfaces leaked onto pi. */
   capabilities?: EngineCapabilities;
   /** Who the active engine is, for labels that used to say "omp" whatever
    * was running. Null until `/api/info` answers. */
@@ -545,6 +543,13 @@ const CommittedTranscript = memo(function CommittedTranscript({
     return callback;
   };
 
+  // Row identity follows the persisted ENTRY, not the array index. A
+  // completion reload replaces `messages` wholesale; index keys would remount
+  // every row above the viewport and the browser's scroll anchoring would have
+  // nothing to hold on to. The optimistic user bubble and the streamed tail
+  // have no entry id yet, so they key by index until the reload gives them one
+  // — those rows are AT the bottom, so remounting them never moves a reader.
+  const turnKeyOf = (idx: number) => entryIds[idx] ?? `idx-${idx}`;
   const renderMessage = (idx: number, options: { keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean } = {}): ReactNode => {
     const msg = options.messageOverride ?? messages[idx];
     const prevAssistantEntryId =
@@ -568,7 +573,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
     if (options.showTimestamp !== undefined) showTimestamp = options.showTimestamp;
     return (
       <MessageView
-        key={`${keyPrefix}-view-${idx}`}
+        key={`${keyPrefix}-${turnKeyOf(idx)}`}
         message={msg}
         toolResults={toolResultsMap}
         modelNames={modelNames}
@@ -605,7 +610,8 @@ const CommittedTranscript = memo(function CommittedTranscript({
         ?? (unit.hasAnswer ? undefined : visibleRefIndexByMessage.get(unit.finalAssistantIdx));
       return (
         <div
-          key={`process-group-${unit.userIdx}-${unit.finalAssistantIdx}`}
+          key={`process-${turnKeyOf(unit.userIdx)}-${turnKeyOf(unit.finalAssistantIdx)}`}
+          data-turn-key={turnKeyOf(unit.finalAssistantIdx)}
           className={turnClassName(live, true)}
           style={turnStyle}
           ref={processRefIdx === undefined ? undefined : messageRefCallback(processRefIdx)}
@@ -627,7 +633,8 @@ const CommittedTranscript = memo(function CommittedTranscript({
     const isUserTurn = unit.kind === "message" && messages[unit.idx].role === "user";
     return (
       <div
-        key={`turn-${unit.idx}`}
+        key={`turn-${turnKeyOf(unit.idx)}`}
+        data-turn-key={turnKeyOf(unit.idx)}
         className={turnClassName(live, isUserTurn)}
         style={turnStyle}
         ref={refIdx === undefined ? undefined : messageRefCallback(refIdx)}
@@ -715,8 +722,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
   const advisorEnabled = capabilities.advisor && advisorPreferred;
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
-  const tuning = useStreamTuning();
-  const tuningCssVars = useMemo(() => streamTuningCssVars(tuning), [tuning]);
 
   // Wrap onAgentEnd to play the completion sound. This is more reliable than
   // wrapping handleAgentEventRef because useAgentSession overwrites that ref
@@ -1363,7 +1368,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
         {/* Hide the Firefox scrollbar on desktop only: ChatMinimap provides the
             position indicator there, but on mobile there is no minimap and
             users need the scrollbar (Chrome's overlay scrollbar still shows). */}
-        <div ref={scrollContainerRef} className={`chat-scroll-region flex-1 overflow-y-auto pt-6` + (isMobile ? "" : " [scrollbar-width:none]")} style={tuningCssVars}>
+        <div ref={scrollContainerRef} className={`chat-scroll-region flex-1 overflow-y-auto pt-6` + (isMobile ? "" : " [scrollbar-width:none]")}>
           <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
             <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
               <ExtensionStatusBar statuses={extensionStatuses} />
