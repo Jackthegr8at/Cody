@@ -5,6 +5,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { Dialog, DialogContent } from "@/components/ui/primitives";
+import { Select } from "@/components/ui/Select";
 import { ConfirmDialog } from "@/components/ui/field";
 import { toast } from "@/components/ui/toast";
 import {
@@ -515,25 +516,13 @@ export function PluginMarketplace({
               }}
             />
             {marketplaces.length > 1 && (
-              <select
+              <Select
                 value={marketplaceFilter}
-                onChange={(e) => setMarketplaceFilter(e.target.value)}
-                aria-label={t("pluginMarket.marketplaceAll")}
-                style={{
-                  padding: "8px 10px",
-                  fontSize: 12,
-                  background: "var(--bg-panel)",
-                  border: "1px solid var(--border)",
-                  borderRadius: "var(--radius-control)",
-                  color: "var(--text)",
-                  outline: "none",
-                }}
-              >
-                <option value="">{t("pluginMarket.marketplaceAll")}</option>
-                {marketplaces.map((marketplace) => (
-                  <option key={marketplace.name} value={marketplace.name}>{marketplace.name}</option>
-                ))}
-              </select>
+                onChange={(v) => setMarketplaceFilter(v)}
+                options={[{ value: "", label: t('pluginMarket.marketplaceAll') }, ...marketplaces.map((m) => ({ value: m.name, label: m.name }))]}
+                size="sm"
+                aria-label={t('pluginMarket.marketplaceAll')}
+              />
             )}
           </div>
 

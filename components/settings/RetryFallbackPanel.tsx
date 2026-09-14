@@ -3,11 +3,12 @@
 import { useContext, useEffect, useState, type CSSProperties } from "react";
 import { AlertCircle, Plus, Sparkles, Trash2 } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/field";
+import { Select } from "@/components/ui/Select";
 import { toast } from "@/components/ui/toast";
 import { useConfigWriter, useNativeSettings, type NativeSettings } from "@/hooks/useConfigWriter";
 import { invalidateSettingsRoutes, useSettingsRoute } from "@/hooks/useSettingsData";
 import { DEFAULT_HARNESS_LABEL } from "../SettingsTabs";
-import { NativeSetting, ToggleSwitch, nativeSelectStyle, nativeOptionStyle } from "./primitives";
+import { NativeSetting, ToggleSwitch } from "./primitives";
 import { useSaveStatus } from "./SaveStatus";
 import { ShellContext } from "./shell-context";
 import { SettingsSection, SettingsRow } from "./SettingsSection";
@@ -172,18 +173,14 @@ function ChainCard({ chainKey, roleNames, entries, modelOptions, candidate, onCa
         </ChainList>
       )}
       <div style={{ display: "flex", gap: 8, padding: 10, borderTop: "1px solid var(--border)" }}>
-        <select
-          value={candidate}
-          onChange={(event) => onCandidateChange(event.target.value)}
-          style={{ ...nativeSelectStyle, flex: 1, minWidth: 0, width: "100%" }}
-        >
-          <option value="">Add a model...</option>
-          {unused.map((option) => (
-            <option key={option.selector} value={option.selector} style={nativeOptionStyle}>
-              {option.name}
-            </option>
-          ))}
-        </select>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <Select
+            value={candidate || null}
+            onChange={onCandidateChange}
+            options={unused.map((option) => ({ value: option.selector, label: option.name }))}
+            placeholder="Add a model..."
+          />
+        </div>
         <button type="button" disabled={!candidate} onClick={onAdd} style={{ padding: "6px 10px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "var(--on-accent)", fontSize: 12, cursor: candidate ? "pointer" : "default", opacity: candidate ? 1 : 0.6, display: "inline-flex", alignItems: "center", gap: 4 }}><Plus size={13} /> Add</button>
       </div>
     </SettingsSection>
@@ -333,19 +330,13 @@ export function RetryFallbackPanel({ models, onOpenModelPlan, panelId = "models"
       <SettingsSection
         title="Retry attempts"
         variant="plain"
+        searchId="schema-retry.maxRetries"
       >
-        <select
-          value={retry.maxRetries ?? 10}
-          onChange={(event) => setRetry({ maxRetries: Number(event.target.value) })}
-          style={{ ...nativeSelectStyle, width: "100%" }}
-          data-search-id="schema-retry.maxRetries"
-        >
-          {RETRY_ATTEMPT_OPTIONS.map((count) => (
-            <option key={count} value={count} style={nativeOptionStyle}>
-              {retryAttemptLabel(count, engineName)}
-            </option>
-          ))}
-        </select>
+        <Select
+          value={String(retry.maxRetries ?? 10)}
+          onChange={(value) => setRetry({ maxRetries: Number(value) })}
+          options={RETRY_ATTEMPT_OPTIONS.map((count) => ({ value: String(count), label: retryAttemptLabel(count, engineName) }))}
+        />
       </SettingsSection>
 
       <SettingsSection
@@ -353,17 +344,11 @@ export function RetryFallbackPanel({ models, onOpenModelPlan, panelId = "models"
         description={revertPolicy.description}
         variant="plain"
       >
-        <select
+        <Select
           value={retry.fallbackRevertPolicy ?? "cooldown-expiry"}
-          onChange={(event) => setRetry({ fallbackRevertPolicy: event.target.value as FallbackRevertPolicy })}
-          style={{ ...nativeSelectStyle, width: "100%" }}
-        >
-          {REVERT_POLICIES.map((entry) => (
-            <option key={entry.value} value={entry.value} style={nativeOptionStyle}>
-              {entry.label}
-            </option>
-          ))}
-        </select>
+          onChange={(value) => setRetry({ fallbackRevertPolicy: value })}
+          options={REVERT_POLICIES}
+        />
       </SettingsSection>
 
       <NativeSetting
@@ -386,17 +371,11 @@ export function RetryFallbackPanel({ models, onOpenModelPlan, panelId = "models"
             title="Reserve margin"
             variant="plain"
           >
-            <select
-              value={retry.usageReservePct ?? 10}
-              onChange={(event) => setRetry({ usageReservePct: Number(event.target.value) })}
-              style={{ ...nativeSelectStyle, width: "100%" }}
-            >
-              {RESERVE_PCT_OPTIONS.map((pct) => (
-                <option key={pct} value={pct} style={nativeOptionStyle}>
-                  {pct}%{pct === 10 ? ` (${engineName} default)` : ""}
-                </option>
-              ))}
-            </select>
+            <Select
+              value={String(retry.usageReservePct ?? 10)}
+              onChange={(value) => setRetry({ usageReservePct: Number(value) })}
+              options={RESERVE_PCT_OPTIONS.map((pct) => ({ value: String(pct), label: `${pct}%${pct === 10 ? ` (${engineName} default)` : ""}` }))}
+            />
           </SettingsSection>
 
           <SettingsSection
@@ -404,17 +383,11 @@ export function RetryFallbackPanel({ models, onOpenModelPlan, panelId = "models"
             description={reservePolicy.description}
             variant="plain"
           >
-            <select
+            <Select
               value={retry.usageReservePolicy ?? "confirm"}
-              onChange={(event) => setRetry({ usageReservePolicy: event.target.value as UsageReservePolicy })}
-              style={{ ...nativeSelectStyle, width: "100%" }}
-            >
-              {RESERVE_POLICIES.map((entry) => (
-                <option key={entry.value} value={entry.value} style={nativeOptionStyle}>
-                  {entry.label}
-                </option>
-              ))}
-            </select>
+              onChange={(value) => setRetry({ usageReservePolicy: value })}
+              options={RESERVE_POLICIES}
+            />
           </SettingsSection>
         </>
       )}
@@ -478,25 +451,20 @@ export function RetryFallbackPanel({ models, onOpenModelPlan, panelId = "models"
         )}
 
         <div style={{ display: "flex", gap: 8, alignItems: "center", padding: 10, borderTop: "1px solid var(--border)", flexWrap: "wrap" }}>
-          <select
-            value={addChainSelect}
-            onChange={(event) => {
-              const value = event.target.value;
-              setAddChainSelect(value);
-              if (value && value !== "__custom__") {
-                addChainCard(value);
-                setAddChainSelect("");
-              }
+          <Select
+            value={addChainSelect || null}
+            onChange={(value) => {
+              if (value === "__custom__") setAddChainSelect(value);
+              else addChainCard(value);
             }}
-            style={{ ...nativeSelectStyle }}
-          >
-            <option value="">Add chain for...</option>
-            {unconfiguredRoles.length > 0 && <optgroup label="Role">{unconfiguredRoles.map((role) => <option key={role} value={role}>{role}</option>)}</optgroup>}
-            {unconfiguredWildcards.length > 0 && <optgroup label="Provider">{unconfiguredWildcards.map((wildcard) => <option key={wildcard} value={wildcard}>{wildcard}</option>)}</optgroup>}
-            <optgroup label="Model">
-              <option value="__custom__">Custom key...</option>
-            </optgroup>
-          </select>
+            options={[
+              ...(unconfiguredRoles.length > 0 ? [{ label: "Role", options: unconfiguredRoles.map((role) => ({ value: role, label: role })) }] : []),
+              ...(unconfiguredWildcards.length > 0 ? [{ label: "Provider", options: unconfiguredWildcards.map((wildcard) => ({ value: wildcard, label: wildcard })) }] : []),
+              { label: "Model", options: [{ value: "__custom__", label: "Custom key..." }] },
+            ]}
+            placeholder="Add chain for..."
+            width="200px"
+          />
           {addChainSelect === "__custom__" && (
             <>
               <input

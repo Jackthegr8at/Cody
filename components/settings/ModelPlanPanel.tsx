@@ -5,7 +5,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "@/lib/i18n";
 import { formatModelDisplayName } from "@/lib/model-display";
 import { toast } from "@/components/ui/toast";
-import { NativeSetting, ToggleSwitch, nativeSelectStyle } from "./primitives";
+import { Select } from "@/components/ui/Select";
+import { NativeSetting, ToggleSwitch } from "./primitives";
 import { SettingsSection } from "./SettingsSection";
 
 /**
@@ -58,6 +59,8 @@ type Phase = "loading" | "failed" | "consent" | "planning" | "review";
 
 /** Sentinel select value: propose without calling a model at all. */
 const HEURISTIC = "heuristic";
+/** Sentinel select value: clear a role's model assignment. */
+const UNSET_ROLE = "__unset__";
 
 /** The plan can name a role Cody has no blurb for (omp gains roles over time);
  * only roles listed here get a description, the rest render bare. */
@@ -448,18 +451,17 @@ export function ModelPlanPanel({ onApplied, onSkip, compact }: {
 
           <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 12, color: "var(--text)" }}>
             <span style={{ fontWeight: 600 }}>{t("modelPlan.plannerLabel")}</span>
-            <select
+            <Select
               value={planner}
-              onChange={(event) => setPlanner(event.target.value)}
-              style={{ ...nativeSelectStyle, minHeight: 34, width: "100%" }}
-            >
-              {candidates.map((candidate) => (
-                <option key={candidate.selector} value={candidate.selector}>
-                  {formatModelDisplayName(candidate.selector.slice(candidate.selector.indexOf("/") + 1), candidate.label)} ({candidate.selector})
-                </option>
-              ))}
-              <option value={HEURISTIC}>{t("modelPlan.plannerHeuristic")}</option>
-            </select>
+              onChange={setPlanner}
+              options={[
+                ...candidates.map((candidate) => ({
+                  value: candidate.selector,
+                  label: `${formatModelDisplayName(candidate.selector.slice(candidate.selector.indexOf("/") + 1), candidate.label)} (${candidate.selector})`,
+                })),
+                { value: HEURISTIC, label: t("modelPlan.plannerHeuristic") },
+              ]}
+            />
           </label>
           <p className="setup-wizard-note">
             {candidates.length === 0 ? t("modelPlan.plannerNone") : t("modelPlan.plannerNote")}
@@ -524,18 +526,16 @@ export function ModelPlanPanel({ onApplied, onSkip, compact }: {
                   <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.45, marginTop: 2 }}>{t(`modelPlan.role.${role}`)}</div>
                 )}
               </div>
-              <select
-                value={base}
+              <Select
+                value={base || UNSET_ROLE}
                 aria-label={role}
-                onChange={(event) => setRole(role, event.target.value)}
-                style={{ ...nativeSelectStyle, minHeight: 32, width: "100%" }}
-              >
-                <option value="">{t("modelPlan.roleUnset")}</option>
-                {!known && <option value={base}>{t("modelPlan.roleUnavailable", { selector: base })}</option>}
-                {rosterSelectors.map((entry) => (
-                  <option key={entry.selector} value={entry.selector}>{entry.name} ({entry.selector})</option>
-                ))}
-              </select>
+                onChange={(value) => setRole(role, value === UNSET_ROLE ? "" : value)}
+                options={[
+                  { value: UNSET_ROLE, label: t("modelPlan.roleUnset") },
+                  ...(!known ? [{ value: base, label: t("modelPlan.roleUnavailable", { selector: base }) }] : []),
+                  ...rosterSelectors.map((entry) => ({ value: entry.selector, label: `${entry.name} (${entry.selector})` })),
+                ]}
+              />
             </div>
           );
         })}

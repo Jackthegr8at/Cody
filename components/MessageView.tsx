@@ -11,7 +11,7 @@ import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
 import { Tooltip, Collapsible, CollapsibleTrigger, CollapsiblePanel } from "./ui/primitives";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { StreamingMarkdown } from "./StreamingMarkdown";
-import { splitMarkdownReveal, splitPlainReveal } from "@/lib/stream-reveal-split";
+
 import { requestDistill, retryDistill, useDistillChatSettings, useDistillState, useSeenOnScreen, type DistillRequest, type DistillState } from "@/hooks/useDistill";
 import { SubagentStatusIcon } from "./SubagentStatusIcon";
 import { formatCost, formatDuration, formatTokens, shortModel } from "@/lib/subagent-format";
@@ -973,6 +973,7 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
       ref={summary.ref}
       className="collapse-box chat-block-in"
       data-expanded={expanded ? "" : undefined}
+      data-streaming={isStreaming === true && isActiveStreamBlock === true ? "" : undefined}
       style={{
         border: "1px solid var(--border)",
         borderRadius: 6,

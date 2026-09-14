@@ -22,11 +22,11 @@ import {
   TextInput,
   NumInput,
   SecretInput,
-  Select as FormSelect,
   Check as FormCheck,
   ConfirmDialog,
   useFieldValidation,
 } from "@/components/ui/field";
+import { Select, type SelectOption } from "@/components/ui/Select";
 import { Trash2, RefreshCw, AlertCircle, Cpu, Settings, Sparkles, Check as CheckIcon } from "lucide-react";
 import { toast } from "@/components/ui/toast";
 // Color icons (have their own fill colors — no background needed)
@@ -164,7 +164,7 @@ type ModelTestState =
   | { phase: "error"; message: string; latencyMs?: number; status?: number };
 
 // omp's models.yml ApiSchema (config/models-config-schema.ts)
-const API_OPTIONS = [
+const API_OPTIONS: SelectOption[] = [
   "openai-completions",
   "openai-responses",
   "openai-codex-responses",
@@ -174,7 +174,7 @@ const API_OPTIONS = [
   "google-generative-ai",
   "google-gemini-cli",
   "google-vertex",
-] as const;
+].map((value) => ({ value, label: value }));
 
 // ── Form field helpers ────────────────────────────────────────────────────────
 
@@ -404,12 +404,11 @@ export function ProviderEntryEditor({ name, provider, onChange, onRename }: {
         />
 
         <FormField label={t("modelsConfig.api")}>
-          <FormSelect
+          <Select
             value={provider.api ?? "openai-completions"}
             onChange={(v) => set("api", v)}
             options={API_OPTIONS}
-            required
-            placeholder={t("modelsConfig.inheritNone")}
+            size="md"
           />
         </FormField>
       </FieldGroup>
@@ -699,11 +698,11 @@ export function ModelEntryEditor({
         </div>
 
         <FormField label={t("modelsConfig.apiOverride")}>
-          <FormSelect
+          <Select
             value={model.api ?? ""}
             onChange={(v) => set("api", v || undefined)}
-            options={API_OPTIONS}
-            placeholder={t("modelsConfig.inheritNone")}
+            options={[{ value: "", label: t("modelsConfig.inheritNone") }, ...API_OPTIONS]}
+            size="md"
           />
         </FormField>
 

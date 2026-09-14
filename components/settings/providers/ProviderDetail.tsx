@@ -20,6 +20,7 @@ import { AlertCircle, AlertTriangle, Check, ChevronDown, ChevronRight, KeyRound,
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { ModelCatalogPicker } from "@/components/ModelCatalogPicker";
 import { ModelEntryEditor, ProviderEntryEditor, type ModelEntry, type ModelsFileData, type ProviderEntry } from "@/components/ModelsConfig";
+import { Select, type SelectOption } from "@/components/ui/Select";
 import { ConfirmDialog } from "@/components/ui/field";
 import { toast } from "@/components/ui/toast";
 import { useNativeSettings } from "@/hooks/useConfigWriter";
@@ -759,6 +760,10 @@ export function ProviderDetail({ row, response, open, onClose, initialLoginId = 
   const isOpenRouter = row.id === "openrouter" && !custom;
   const [selectedLogin, setSelectedLogin] = useState<string>(() => initialLoginId ?? loginMethods.find((method) => method.state === "connected")?.loginId ?? loginMethods[0]?.loginId ?? "");
   const currentLogin = loginMethods.find((method) => method.loginId === selectedLogin) ?? loginMethods[0];
+  const loginOptions: SelectOption<string>[] = loginMethods.map((method) => ({
+    value: method.loginId as string,
+    label: method.name ?? (method.loginId as string),
+  }));
   const status = describeWinning(row, shortName);
   const models = describeModels(row);
   const hint = missingOptionalHint(row);
@@ -886,9 +891,13 @@ export function ProviderDetail({ row, response, open, onClose, initialLoginId = 
         <Section
           title="Subscription"
           aside={loginMethods.length > 1 && (
-            <select value={currentLogin?.loginId} onChange={(event) => setSelectedLogin(event.target.value)} aria-label="Sign-in variant" style={{ minHeight: 32, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12, maxWidth: 220 }}>
-              {loginMethods.map((method) => <option key={method.loginId} value={method.loginId}>{method.name ?? method.loginId}</option>)}
-            </select>
+            <Select
+              value={currentLogin?.loginId ?? null}
+              onChange={setSelectedLogin}
+              options={loginOptions}
+              aria-label="Sign-in variant"
+              width="220px"
+            />
           )}
         >
           {currentLogin && (

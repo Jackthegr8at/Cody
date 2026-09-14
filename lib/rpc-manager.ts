@@ -1,4 +1,4 @@
-import { existsSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import path from "path";
 import { getSessionOwner, renameSessionOwner, setSessionOwner } from "./auth/session-owners";
@@ -63,6 +63,25 @@ const READY_TIMEOUT_MS = 120_000;
  * users to the main chat for capabilities. Sidebar chats run on omp with
  * --no-tools --no-skills --no-extensions and this fixed prompt. */
 const SIDEBAR_CHAT_SYSTEM_PROMPT = "You are a concise, knowledgeable assistant in a side panel of Cody, a coding workspace. Answer in Markdown. You have no tools: you cannot read or edit files, run commands, or browse. When a request needs those, say so briefly and point the user to the main chat, which can.";
+
+/** The config overlay every sidebar session loads: no memory recall, no
+ * autolearn, no advisor, no prewalk — the same four switches the one-shot
+ * runner uses (lib/model-plan/one-shot.ts), for the same reason: with the
+ * operator's ambient config a single turn pulled 14k tokens of injected
+ * context. Written once into the sidebar-chats dir; rewritten if its
+ * content ever changes. */
+const SIDEBAR_OVERLAY_YAML = "memory.backend: off\nautolearn.enabled: false\nadvisor.enabled: false\nprewalk.enabled: false\n";
+function sidebarOverlayPath(): string {
+  const dir = getSidebarChatsDir();
+  const file = path.join(dir, "overlay.yml");
+  let current: string | null = null;
+  try { current = readFileSync(file, "utf8"); } catch { /* absent */ }
+  if (current !== SIDEBAR_OVERLAY_YAML) {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(file, SIDEBAR_OVERLAY_YAML, { mode: 0o600 });
+  }
+  return file;
+}
 
 /**
  * Host tools implemented by the Cody SERVER rather than the browser: they
@@ -292,7 +311,7 @@ export function buildSessionSpawnArgs(
     // without any interactive resume/fork prompts (main.ts resume handling).
     // pi's --session flag has the same SessionManager.open semantics.
     args.push(flags.resumeFlag, sessionFile);
-  } else if (toolNames !== undefined) {
+  } else if (toolNames !== undefined && kind !== "sidebar") {
     const presetKey = toolNames.map((n) => n.toLowerCase()).sort().join(",");
     if (toolNames.length === 0) {
       args.push("--no-tools");
@@ -306,8 +325,13 @@ export function buildSessionSpawnArgs(
   }
   if (flags.supportsAdvisor && advisor && !sessionFile) args.push("--advisor");
   
-  // Sidebar chat: run on omp with no tools/skills/extensions/rules/prewalk, custom
-  // system prompt, and session directory outside the normal session tree.
+  // Sidebar chat: a conversation, not an agent. No tools, skills, extensions,
+  // rules or prewalk, a short fixed system prompt, and its own session dir
+  // outside the normal tree. The overlay switches off memory recall,
+  // autolearn and the advisor so the request carries nothing but the prompt
+  // and the conversation — on a small local model the full context would
+  // swamp the window before the first reply (`--config=` form: with a space
+  // the overlay never loads, see lib/model-plan/one-shot.ts).
   if (kind === "sidebar" && sidebarSessionDir) {
     args.push(
       "--no-tools",
@@ -316,8 +340,9 @@ export function buildSessionSpawnArgs(
       "--no-rules",
       "--no-prewalk",
       "--no-title",
+      `--config=${sidebarOverlayPath()}`,
       "--session-dir", sidebarSessionDir,
-      "--system-prompt", SIDEBAR_CHAT_SYSTEM_PROMPT
+      "--system-prompt", SIDEBAR_CHAT_SYSTEM_PROMPT,
     );
   }
   

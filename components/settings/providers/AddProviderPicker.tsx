@@ -20,6 +20,7 @@ import type { LocalAiScanResult } from "@/hooks/useLocalAiScan";
 import { pickerRowsForGroup, type ProviderRow } from "@/lib/provider-directory";
 import { GROUP_ORDER, type ProviderGroup } from "./provider-groups";
 import { ProviderTile, primaryButtonStyle } from "./controls";
+import { Select, type SelectOption } from "@/components/ui/Select";
 
 export interface PickChoice {
   row: ProviderRow;
@@ -100,6 +101,7 @@ function PickerCard({ card, variants, found, keyLabel, variantLabel, methodLabel
   const choices = useMemo(() => choicesOf(card, variants, keyLabel), [card, variants, keyLabel]);
   const [selected, setSelected] = useState(choices[0]?.key ?? "");
   const current = choices.find((choice) => choice.key === selected) ?? choices[0];
+  const options: SelectOption<string>[] = choices.map((choice) => ({ value: choice.key, label: choice.label }));
   const selectLabel = variants.length > 0 || choices.filter((choice) => choice.loginId).length > 1 ? variantLabel : methodLabel;
   const subtitle = card.modelCount !== null && card.modelCount > 0 ? `${card.modelCount} models` : card.methods.find((method) => method.loginId)?.hint ?? null;
   const chip = found ? <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 4, background: "color-mix(in srgb, var(--status-success) 14%, transparent)", color: "var(--status-success)", fontWeight: 600 }}>{foundChip}</span> : null;
@@ -132,14 +134,12 @@ function PickerCard({ card, variants, found, keyLabel, variantLabel, methodLabel
       </span>
       <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--text-muted)", flex: "1 1 200px", minWidth: 0 }}>
         <span style={{ whiteSpace: "nowrap" }}>{selectLabel}</span>
-        <select
-          value={current?.key}
-          onChange={(event) => setSelected(event.target.value)}
+        <Select
+          value={current?.key ?? null}
+          onChange={setSelected}
+          options={options}
           aria-label={`${card.name}: ${selectLabel}`}
-          style={{ flex: 1, minWidth: 0, minHeight: 32, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12 }}
-        >
-          {choices.map((choice) => <option key={choice.key} value={choice.key}>{choice.label}</option>)}
-        </select>
+        />
       </label>
       <button type="button" className="ui-focus-ring" onClick={() => { if (current) onPick(current); }} style={primaryButtonStyle}>
         <Plus size={13} aria-hidden="true" /> {addLabel}

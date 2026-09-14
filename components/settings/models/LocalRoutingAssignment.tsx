@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { toast } from "@/components/ui/toast";
 import { useI18n } from "@/lib/i18n";
 import { setSettingsRouteData, useSettingsRoute } from "@/hooks/useSettingsData";
-import { nativeOptionStyle, nativeSelectStyle } from "../primitives";
+import { Select, type SelectOption } from "@/components/ui/Select";
 import { useSaveStatus } from "../SaveStatus";
 import { SettingsActions } from "../SettingsActions";
 import { SettingsSection, SettingsRow } from "../SettingsSection";
@@ -39,7 +39,25 @@ function fromKey(key: string): LocalRoutingModelRef | null {
 function modelLabel(model: LocalRoutingBody["models"][number]): string {
   return model.name || model.label || model.modelId;
 }
-function ModelSelect({ body, value, label, emptyLabel, onChange, disabled }: { body: LocalRoutingBody; value: LocalRoutingModelRef | null; label: string; emptyLabel?: string; onChange: (value: LocalRoutingModelRef | null) => void; disabled?: boolean; }) { const { t } = useI18n(); return <select disabled={disabled} value={refKey(value)} aria-label={label} onChange={(event) => onChange(fromKey(event.target.value))} style={{ ...nativeSelectStyle, minWidth: 0, width: "100%", opacity: disabled ? 0.55 : 1 }}><option value="" style={nativeOptionStyle}>{emptyLabel ?? t("localRouting.unset")}</option>{body.models.map((model) => <option key={`${model.provider}/${model.modelId}`} value={`${model.provider}/${model.modelId}`} style={nativeOptionStyle}>{modelLabel(model)} ({model.provider})</option>)}</select>; }
+function ModelSelect({ body, value, label, emptyLabel, onChange, disabled }: { body: LocalRoutingBody; value: LocalRoutingModelRef | null; label: string; emptyLabel?: string; onChange: (value: LocalRoutingModelRef | null) => void; disabled?: boolean; }) {
+  const { t } = useI18n();
+  const options: SelectOption<string>[] = [
+    { value: "", label: emptyLabel ?? t("localRouting.unset") },
+    ...body.models.map((model) => ({
+      value: `${model.provider}/${model.modelId}`,
+      label: `${modelLabel(model)} (${model.provider})`,
+    })),
+  ];
+  return (
+    <Select
+      value={value ? refKey(value) : ""}
+      onChange={(key) => onChange(fromKey(key))}
+      options={options}
+      disabled={disabled}
+      aria-label={label}
+    />
+  );
+}
 export function useLocalRoutingConfig(enabled = true) {
   const route = useSettingsRoute<LocalRoutingBody>(LOCAL_ROUTING_ROUTE, { enabled, ttlMs: 60_000 });
   return { route, available: route.data?.engineSupported === true };

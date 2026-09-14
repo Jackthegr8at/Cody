@@ -22,9 +22,10 @@
 import { AlertCircle, Check, ChevronDown, ChevronRight, Copy, RotateCcw } from "lucide-react";
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { SecretInput } from "@/components/ui/field";
+import { Select } from "@/components/ui/Select";
 import { useSchemaIndex, type SchemaGroup, type SchemaIndex, type SchemaRow, type SchemaSetting, type SchemaTab, type SchemaValue } from "@/hooks/useSchemaIndex";
 import { Directory } from "../Directory";
-import { NativeSetting, READ_ONLY_BADGE, SettingsHighlightContext, TERMINAL_ONLY_BADGE, ToggleSwitch, chipStyle, nativeInputStyle, nativeOptionStyle, nativeSelectStyle } from "../primitives";
+import { NativeSetting, READ_ONLY_BADGE, SettingsHighlightContext, TERMINAL_ONLY_BADGE, ToggleSwitch, chipStyle, nativeInputStyle } from "../primitives";
 import { useSaveStatus } from "../SaveStatus";
 import { useSettingsShell } from "../shell-context";
 import { ALSO_UNDER, ENGINE_PANEL_ID, cardOwner, cardSurfaceAvailable, rowSearchIdBesideCard, searchIdForKey, type CardSurface } from "./recommended-cards";
@@ -168,18 +169,15 @@ export function SchemaControl({ setting, value, onChange }: {
     const selected = options.find((choice) => choice.value === current);
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 5, minWidth: 0, width: inline ? undefined : "100%" }}>
-        <select
+        <Select
           aria-label={setting.label}
-          value={current}
-          onChange={(event) => onChange(setting.type === "number" ? Number(event.target.value) : event.target.value)}
+          value={current === "" ? null : current}
+          onChange={(next) => onChange(setting.type === "number" ? Number(next) : next)}
+          options={options}
           // A select never grows past its card: long option labels ellipsize
           // in the closed state instead of pushing the layout open.
-          style={{ ...nativeSelectStyle, width: inline ? undefined : "100%", maxWidth: "100%", minWidth: 0, textOverflow: "ellipsis" }}
-        >
-          {options.map((choice) => (
-            <option key={choice.value} value={choice.value} style={nativeOptionStyle}>{choice.label}</option>
-          ))}
-        </select>
+          width={inline ? "fit-content" : undefined}
+        />
         {!inline && selected?.description && (
           // The closed select can only show so much of a long label; the
           // schema's own note for the chosen value says what it actually does.
@@ -666,17 +664,17 @@ export function SchemaSettingsList() {
         {query ? (
           <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{matches.length} matching setting{matches.length === 1 ? "" : "s"} across every tab</span>
         ) : singleTab && tab ? (
-          <select
+          <Select
             aria-label={`Jump to a ${shortName} settings section`}
-            value=""
-            onChange={(event) => { if (event.target.value) jumpToGroup(event.target.value); }}
-            style={{ ...nativeSelectStyle, maxWidth: 320 }}
-          >
-            <option value="" style={nativeOptionStyle}>Jump to section… ({tab.groups.length + tab.ungrouped.length})</option>
-            {[...tab.groups, ...tab.ungrouped].map((group) => (
-              <option key={group.id} value={group.id} style={nativeOptionStyle}>{group.label}{group.changed > 0 ? ` · ${group.changed} changed` : ""}</option>
-            ))}
-          </select>
+            value={null}
+            onChange={jumpToGroup}
+            options={[...tab.groups, ...tab.ungrouped].map((group) => ({
+              value: group.id,
+              label: `${group.label}${group.changed > 0 ? ` · ${group.changed} changed` : ""}`,
+            }))}
+            placeholder={`Jump to section… (${tab.groups.length + tab.ungrouped.length})`}
+            width="min(320px, 100%)"
+          />
         ) : (
           <nav aria-label={`${shortName} settings tabs`} role="tablist" style={{ display: "flex", gap: 3, flexWrap: "wrap" }}>
             {tabs.map((entry) => {

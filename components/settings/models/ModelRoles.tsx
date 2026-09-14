@@ -21,12 +21,13 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { ConfirmDialog } from "@/components/ui/field";
+import { Select, type SelectOption } from "@/components/ui/Select";
 import { toast } from "@/components/ui/toast";
 import { useConfigWriter } from "@/hooks/useConfigWriter";
 import { invalidateSettingsRoutes, useSettingsRoute } from "@/hooks/useSettingsData";
 import { formatModelDisplayName } from "@/lib/model-display";
 import { isRecognizedThinkingSuffix } from "@/lib/model-plan/derive";
-import { nativeOptionStyle, nativeSelectStyle, UNAVAILABLE_BADGE, chipStyle } from "../primitives";
+import { UNAVAILABLE_BADGE, chipStyle } from "../primitives";
 import { useSaveStatus } from "../SaveStatus";
 import { SettingsActions } from "../SettingsActions";
 import { SettingsSection, SettingsRow } from "../SettingsSection";
@@ -147,6 +148,25 @@ export function ModelRoles({ models, panelId }: { models: RoleModelOption[]; pan
               : !modelKnown
                 ? "not currently available — still used until changed"
                 : null;
+            const modelOptions: SelectOption<string>[] = [
+              { value: "", label: "No override" },
+              ...(selectedModel && (!modelKnown || assignedHidden)
+                ? [{
+                    value: selectedModel,
+                    label: `${assigned ? formatModelDisplayName(assigned.id, assigned.name) : selectedModel} (${assignedHidden ? "hidden" : "not currently available"})`,
+                  }]
+                : []),
+              ...visibleModels.map((item) => ({
+                value: item.provider + "/" + item.id,
+                label: `${formatModelDisplayName(item.id, item.name)} (${item.provider}/${item.id})`,
+              })),
+            ];
+            const thinkingOptions: SelectOption<string>[] = [
+              { value: "", label: "Model default" },
+              ...(assigned?.thinkingLevels ?? [])
+                .filter((level) => level !== "off")
+                .map((level) => ({ value: level, label: level })),
+            ];
             return (
               <SettingsRow
                 key={role}
@@ -163,19 +183,19 @@ export function ModelRoles({ models, panelId }: { models: RoleModelOption[]; pan
                 }
               >
                 <div data-search-id={`model-role-${role}`} className="model-role-row" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(168px, 0.4fr)", gap: 8, flex: 1, minWidth: 0 }}>
-                  <select value={selectedModel} aria-label={`${role} model`} onChange={(event) => update(role, { model: event.target.value })} style={{ ...nativeSelectStyle, minWidth: 0, width: "100%" }}>
-                    <option value="" style={nativeOptionStyle}>No override</option>
-                    {selectedModel && (!modelKnown || assignedHidden) && (
-                      <option value={selectedModel} style={nativeOptionStyle}>{assigned ? formatModelDisplayName(assigned.id, assigned.name) : selectedModel} ({assignedHidden ? "hidden" : "not currently available"})</option>
-                    )}
-                    {visibleModels.map((item) => (
-                      <option key={item.provider + "/" + item.id} value={item.provider + "/" + item.id} style={nativeOptionStyle}>{formatModelDisplayName(item.id, item.name)} ({item.provider}/{item.id})</option>
-                    ))}
-                  </select>
-                  <select value={selectedThinking} aria-label={`${role} reasoning level`} disabled={!assigned} onChange={(event) => update(role, { effort: event.target.value })} style={{ ...nativeSelectStyle, minWidth: 0, width: "100%", opacity: assigned ? 1 : 0.55 }}>
-                    <option value="" style={nativeOptionStyle}>Model default</option>
-                    {(assigned?.thinkingLevels ?? []).filter((level) => level !== "off").map((level) => <option key={level} value={level} style={nativeOptionStyle}>{level}</option>)}
-                  </select>
+                  <Select
+                    value={selectedModel}
+                    onChange={(model) => update(role, { model })}
+                    options={modelOptions}
+                    aria-label={`${role} model`}
+                  />
+                  <Select
+                    value={selectedThinking}
+                    onChange={(effort) => update(role, { effort })}
+                    options={thinkingOptions}
+                    disabled={!assigned}
+                    aria-label={`${role} reasoning level`}
+                  />
                 </div>
               </SettingsRow>
             );

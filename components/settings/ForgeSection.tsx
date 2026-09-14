@@ -16,11 +16,12 @@
 import { AlertCircle, Check, GitBranch, Loader2, Plus, RefreshCw, Star, Trash2 } from "lucide-react";
 import { useCallback, useState, type ReactNode } from "react";
 import { ConfirmDialog } from "@/components/ui/field";
+import { Select, type SelectOption } from "@/components/ui/Select";
 import { invalidateSettingsRoutes, setSettingsRouteData, useSettingsRoute } from "@/hooks/useSettingsData";
 import { useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { dangerButtonStyle, primaryButtonStyle, smallButtonStyle } from "./account-controls";
-import { chipStyle, nativeInputStyle, nativeOptionStyle, nativeSelectStyle, NativeSetting } from "./primitives";
+import { chipStyle, nativeInputStyle, NativeSetting } from "./primitives";
 import { useSettingsShell } from "./shell-context";
 
 export const FORGE_ROUTE = "/api/forge";
@@ -106,6 +107,11 @@ interface HostDraft {
   token: string;
 }
 
+const KIND_OPTIONS: SelectOption<"github" | "gitea">[] = [
+  { value: "github", label: "GitHub" },
+  { value: "gitea", label: "Gitea" },
+];
+
 function HostForm({ draft, existing, onCancel, onSaved }: {
   draft: HostDraft;
   /** The saved host this form edits, or null when it creates one. */
@@ -150,16 +156,14 @@ function HostForm({ draft, existing, onCancel, onSaved }: {
     <div style={{ ...cardStyle, borderColor: "var(--accent)" }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
         <label htmlFor={`${idPrefix}-kind`} style={{ fontSize: 12, fontWeight: 600 }}>{t("forge.field.kind")}</label>
-        <select
+        <Select
           id={`${idPrefix}-kind`}
           value={kind}
-          onChange={(event) => setKind(event.target.value === "gitea" ? "gitea" : "github")}
+          onChange={setKind}
+          options={KIND_OPTIONS}
           disabled={busy || existing?.builtin === true}
-          style={{ ...nativeSelectStyle, alignSelf: "flex-start" }}
-        >
-          <option value="github" style={nativeOptionStyle}>GitHub</option>
-          <option value="gitea" style={nativeOptionStyle}>Gitea</option>
-        </select>
+          width="140px"
+        />
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
@@ -434,17 +438,14 @@ function UpdateSourceCard({ payload, canEdit, onChanged }: {
       control={
         <div style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 0 }}>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-            <select
+            <Select
               aria-label={t("forge.updateSource.host")}
               value={hostId}
-              onChange={(event) => setHostId(event.target.value)}
+              onChange={setHostId}
+              options={payload.hosts.map((host) => ({ value: host.id, label: host.label }))}
               disabled={!canEdit || busy}
-              style={nativeSelectStyle}
-            >
-              {payload.hosts.map((host) => (
-                <option key={host.id} value={host.id} style={nativeOptionStyle}>{host.label}</option>
-              ))}
-            </select>
+              width="160px"
+            />
             <input
               aria-label={t("forge.updateSource.repo")}
               value={repo}

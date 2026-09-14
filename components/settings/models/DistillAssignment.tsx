@@ -20,10 +20,11 @@
 import { AlertCircle } from "lucide-react";
 import { useMemo, useState, type CSSProperties } from "react";
 import { toast } from "@/components/ui/toast";
+import { Select, type SelectOption } from "@/components/ui/Select";
 import { invalidateSettingsRoutes, setSettingsRouteData, useSettingsRoute, type SettingsRouteResult } from "@/hooks/useSettingsData";
 import { useI18n } from "@/lib/i18n";
 import { formatModelDisplayName } from "@/lib/model-display";
-import { chipStyle, nativeOptionStyle, nativeSelectStyle, UNAVAILABLE_BADGE } from "../primitives";
+import { chipStyle, UNAVAILABLE_BADGE } from "../primitives";
 import { useSaveStatus } from "../SaveStatus";
 import { SettingsActions } from "../SettingsActions";
 import { SettingsSection } from "../SettingsSection";
@@ -87,31 +88,37 @@ function DistillChainRowContent({ selector, models, selectors, disabled, onModel
   const levels = (assigned?.thinkingLevels ?? []).filter((level) => level !== "off");
   const visible = models.filter((item) => !item.hidden);
   const flag = missing ? t("distillSettings.unavailable") : hidden ? t("distillSettings.hidden") : null;
+  const modelOptions: SelectOption<string>[] = [
+    { value: "", label: t("distillSettings.engineDefault") },
+    ...((missing || hidden) && model
+      ? [{
+          value: model,
+          label: assigned
+            ? t("distillSettings.optionHidden", { model: formatModelDisplayName(assigned.id, assigned.name) })
+            : t("distillSettings.optionUnavailable", { model }),
+        }]
+      : []),
+    ...visible.map((item) => ({
+      value: item.provider + "/" + item.id,
+      label: `${formatModelDisplayName(item.id, item.name)} (${item.provider}/${item.id})`,
+    })),
+  ];
+  const effortOptions: SelectOption<string>[] = [
+    { value: "", label: t("distillSettings.modelDefault") },
+    ...(effort && !levels.includes(effort) ? [{ value: effort, label: effort }] : []),
+    ...levels.map((level) => ({ value: level, label: level })),
+  ];
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(104px, 0.35fr)", gap: 8, flex: 1, minWidth: 0 }}>
       <div>
-        <select
+        <Select
           value={model}
-          aria-label={t("distillSettings.modelAria", { position: selector })}
+          onChange={onModel}
+          options={modelOptions}
           disabled={disabled}
-          onChange={(event) => onModel(event.target.value)}
-          style={{ ...nativeSelectStyle, minWidth: 0, width: "100%", opacity: disabled ? 0.55 : 1 }}
-        >
-          <option value="" style={nativeOptionStyle}>{t("distillSettings.engineDefault")}</option>
-          {(missing || hidden) && model && (
-            <option value={model} style={nativeOptionStyle}>
-              {assigned
-                ? t("distillSettings.optionHidden", { model: formatModelDisplayName(assigned.id, assigned.name) })
-                : t("distillSettings.optionUnavailable", { model })}
-            </option>
-          )}
-          {visible.map((item) => (
-            <option key={item.provider + "/" + item.id} value={item.provider + "/" + item.id} style={nativeOptionStyle}>
-              {formatModelDisplayName(item.id, item.name)} ({item.provider}/{item.id})
-            </option>
-          ))}
-        </select>
+          aria-label={t("distillSettings.modelAria", { position: selector })}
+        />
         {flag && (
           <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginTop: 3 }}>
             <span style={{ ...chipStyle, color: "var(--status-warning)", fontSize: 11 }}>{UNAVAILABLE_BADGE}</span>
@@ -119,17 +126,13 @@ function DistillChainRowContent({ selector, models, selectors, disabled, onModel
           </div>
         )}
       </div>
-      <select
+      <Select
         value={effort}
-        aria-label={t("distillSettings.thinkingAria", { position: selector })}
+        onChange={onEffort}
+        options={effortOptions}
         disabled={disabled || levels.length === 0}
-        onChange={(event) => onEffort(event.target.value)}
-        style={{ ...nativeSelectStyle, minWidth: 0, width: "100%", opacity: disabled || levels.length === 0 ? 0.55 : 1 }}
-      >
-        <option value="" style={nativeOptionStyle}>{t("distillSettings.modelDefault")}</option>
-        {effort && !levels.includes(effort) && <option value={effort} style={nativeOptionStyle}>{effort}</option>}
-        {levels.map((level) => <option key={level} value={level} style={nativeOptionStyle}>{level}</option>)}
-      </select>
+        aria-label={t("distillSettings.thinkingAria", { position: selector })}
+      />
     </div>
   );
 }
@@ -293,24 +296,17 @@ export function DistillAssignment({ models, panelId }: { models: RoleModelOption
                 </ChainList>
                 {full && <p style={{ ...noteStyle, borderTop: 0, paddingTop: 0 }}>{t("distillSettings.chainFull", { max: MAX_CHAIN })}</p>}
                 <div style={{ padding: "8px 12px", borderTop: "1px solid var(--border)" }}>
-                  <select
-                    value={candidate}
-                    aria-label={t("distillSettings.addFallback")}
+                  <Select
+                    value={candidate || null}
+                    onChange={(value) => { setCandidate(""); setDraft([...chain, value]); }}
+                    options={addable.map((item) => ({
+                      value: item.provider + "/" + item.id,
+                      label: `${formatModelDisplayName(item.id, item.name)} (${item.provider}/${item.id})`,
+                    }))}
+                    placeholder={t("distillSettings.addFallback")}
                     disabled={!editable || addable.length === 0}
-                    onChange={(event) => {
-                      const value = event.target.value;
-                      setCandidate("");
-                      if (value) setDraft([...chain, value]);
-                    }}
-                    style={{ ...nativeSelectStyle, maxWidth: "100%", opacity: !editable || addable.length === 0 ? 0.55 : 1 }}
-                  >
-                    <option value="" style={nativeOptionStyle}>{t("distillSettings.addFallback")}</option>
-                    {addable.map((item) => (
-                      <option key={item.provider + "/" + item.id} value={item.provider + "/" + item.id} style={nativeOptionStyle}>
-                        {formatModelDisplayName(item.id, item.name)} ({item.provider}/{item.id})
-                      </option>
-                    ))}
-                  </select>
+                    aria-label={t("distillSettings.addFallback")}
+                  />
                 </div>
               </div>
             )}

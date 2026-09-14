@@ -22,9 +22,10 @@ import type { ToolPreset } from "@/lib/tool-presets";
 import { THEMES, type ThemeId } from "@/lib/theme-catalog";
 import { readChatFontSize, writeChatFontSize, type FontSize } from "@/lib/chat-font-size";
 import { useTheme } from "@/hooks/useTheme";
+import { Select, type SelectGroup, type SelectOption } from "@/components/ui/Select";
 import type { EngineCapabilities } from "../../SettingsTabs";
 import type { ActivityDisplayMode } from "@/lib/types";
-import { NativeSetting, ToggleSwitch, nativeOptionStyle, nativeSelectStyle, slugify } from "../primitives";
+import { NativeSetting, ToggleSwitch, slugify } from "../primitives";
 import { SaveStatusCorner, useSaveStatus } from "../SaveStatus";
 import type { SearchEntry } from "../search-index";
 import { useSettingsShell } from "../shell-context";
@@ -177,6 +178,31 @@ export function PreferencesPanel() {
 
   const light = THEMES.filter((theme) => theme.mode === "light");
   const dark = THEMES.filter((theme) => theme.mode === "dark");
+  const themeOptions: SelectGroup<ThemeId>[] = [
+    { label: "Light", options: light.map((theme) => ({ value: theme.id, label: theme.name })) },
+    { label: "Dark", options: dark.map((theme) => ({ value: theme.id, label: theme.name })) },
+  ];
+  const localeOptions: SelectOption<Locale>[] = LOCALES.map((item) => ({ value: item.value, label: item.label }));
+  const fontSizeOptions: SelectOption<FontSize>[] = [
+    { value: "13", label: "Small (13px)" },
+    { value: "14", label: "Default (14px)" },
+    { value: "15", label: "Large (15px)" },
+    { value: "16", label: "Extra large (16px)" },
+  ];
+  const activityOptions: SelectOption<ActivityDisplayMode>[] = [
+    { value: "compact", label: "Compact" },
+    { value: "full", label: "Full" },
+    { value: "hidden", label: "Hidden" },
+  ];
+  const submitOptions: SelectOption<SubmitDuringRunBehavior>[] = [
+    { value: "steer", label: "Steer current run" },
+    { value: "queue", label: "Queue follow-up" },
+  ];
+  const toolPresetOptions: SelectOption<ToolPreset>[] = [
+    { value: "full", label: "All built-in tools" },
+    { value: "default", label: "Core" },
+    { value: "none", label: "No tools" },
+  ];
   const grid = { display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2, minmax(0, 1fr))", gap: 10 } as const;
 
   return (
@@ -188,62 +214,26 @@ export function PreferencesPanel() {
       </div>
       <div style={grid}>
         <NativeSetting label={card("theme").label} description={card("theme").description} scope="Cody only">
-          <select
-            style={nativeSelectStyle}
-            value={themeId}
-            aria-label="Theme"
-            onChange={(event) => saved(() => setTheme(event.target.value as ThemeId))}
-          >
-            <optgroup label="Light">
-              {light.map((theme) => <option key={theme.id} value={theme.id} style={nativeOptionStyle}>{theme.name}</option>)}
-            </optgroup>
-            <optgroup label="Dark">
-              {dark.map((theme) => <option key={theme.id} value={theme.id} style={nativeOptionStyle}>{theme.name}</option>)}
-            </optgroup>
-          </select>
+          <Select value={themeId} onChange={(next) => saved(() => setTheme(next))} options={themeOptions} aria-label="Theme" />
         </NativeSetting>
         <NativeSetting label={card("language").label} description={card("language").description} scope="Cody only">
-          <select
-            style={nativeSelectStyle}
-            value={locale}
-            aria-label="Language"
-            onChange={(event) => saved(() => setLocale(event.target.value as Locale))}
-          >
-            {LOCALES.map((item) => (
-              <option key={item.value} value={item.value} style={nativeOptionStyle}>{item.label}</option>
-            ))}
-          </select>
+          <Select value={locale} onChange={(next) => saved(() => setLocale(next))} options={localeOptions} aria-label="Language" />
         </NativeSetting>
         <NativeSetting label={card("chat-font-size").label} description={card("chat-font-size").description} scope="Cody only">
-          <select
-            style={nativeSelectStyle}
+          <Select
             value={chatFontSize}
-            aria-label="Chat text size"
-            onChange={(event) => {
-              const newSize = event.target.value as FontSize;
-              setChatFontSize(newSize);
-              saved(() => writeChatFontSize(newSize));
+            onChange={(next) => {
+              setChatFontSize(next);
+              saved(() => writeChatFontSize(next));
             }}
-          >
-            <option value="13" style={nativeOptionStyle}>Small (13px)</option>
-            <option value="14" style={nativeOptionStyle}>Default (14px)</option>
-            <option value="15" style={nativeOptionStyle}>Large (15px)</option>
-            <option value="16" style={nativeOptionStyle}>Extra large (16px)</option>
-          </select>
+            options={fontSizeOptions}
+            aria-label="Chat text size"
+          />
         </NativeSetting>
       </div>
       <div style={grid}>
         <NativeSetting label={card("activity").label} description={card("activity").description} scope="Cody only">
-          <select
-            style={nativeSelectStyle}
-            value={prefs.activityDisplayMode}
-            aria-label="Tool and background activity"
-            onChange={(event) => saved(() => prefs.setActivityDisplayMode(event.target.value as ActivityDisplayMode))}
-          >
-            <option value="compact" style={nativeOptionStyle}>Compact</option>
-            <option value="full" style={nativeOptionStyle}>Full</option>
-            <option value="hidden" style={nativeOptionStyle}>Hidden</option>
-          </select>
+          <Select value={prefs.activityDisplayMode} onChange={(next) => saved(() => prefs.setActivityDisplayMode(next))} options={activityOptions} aria-label="Tool and background activity" />
         </NativeSetting>
         <NativeSetting label={card("thinking").label} description={card("thinking").description} scope="Cody only">
           <ToggleSwitch checked={prefs.thinkingDefaultExpanded} onChange={(next) => saved(() => prefs.setThinkingDefaultExpanded(next))} />
@@ -266,37 +256,28 @@ export function PreferencesPanel() {
             left as a setting that does nothing. */}
         {capabilities.chatExtras && (
           <NativeSetting label={card("submit").label} description={card("submit").description} scope="Cody only">
-            <select
-              style={nativeSelectStyle}
+            <Select
               value={submitBehavior}
-              aria-label="Message during active run"
-              onChange={(event) => {
-                const next = event.target.value as SubmitDuringRunBehavior;
+              onChange={(next) => {
                 setSubmitBehavior(next);
                 saved(() => setSubmitDuringRunBehavior(next));
               }}
-            >
-              <option value="steer" style={nativeOptionStyle}>Steer current run</option>
-              <option value="queue" style={nativeOptionStyle}>Queue follow-up</option>
-            </select>
+              options={submitOptions}
+              aria-label="Message during active run"
+            />
           </NativeSetting>
         )}
         {capabilities.chatExtras && (
           <NativeSetting label={card("agent-tools").label} description={agentToolsDescription(capabilities.subagents)} scope="Cody only">
-            <select
-              style={nativeSelectStyle}
+            <Select
               value={toolPreset}
-              aria-label="Agent tools"
-              onChange={(event) => {
-                const next = event.target.value as ToolPreset;
+              onChange={(next) => {
                 setToolPreset(next);
                 saved(() => setPreferredToolPreset(next));
               }}
-            >
-              <option value="full" style={nativeOptionStyle}>All built-in tools</option>
-              <option value="default" style={nativeOptionStyle}>Core</option>
-              <option value="none" style={nativeOptionStyle}>No tools</option>
-            </select>
+              options={toolPresetOptions}
+              aria-label="Agent tools"
+            />
           </NativeSetting>
         )}
       </div>

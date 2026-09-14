@@ -20,9 +20,10 @@
  */
 import { AlertCircle, ArrowDown, ArrowUp, RotateCcw, Sparkles, X } from "lucide-react";
 import { useCallback, type CSSProperties, type ReactNode } from "react";
+import { Select } from "@/components/ui/Select";
 import { useConfigWriter, useNativeSettings, type CompactionMethod, type NativeSettings, type NativeSettingsHandle } from "@/hooks/useConfigWriter";
 import { useSchemaIndex, type SchemaIndex, type SchemaRow, type SchemaValue } from "@/hooks/useSchemaIndex";
-import { NativeSetting, TERMINAL_ONLY_BADGE, ToggleSwitch, chipStyle, nativeOptionStyle, nativeSelectStyle } from "../primitives";
+import { NativeSetting, TERMINAL_ONLY_BADGE, ToggleSwitch, chipStyle } from "../primitives";
 import { useSaveStatus } from "../SaveStatus";
 import { useSettingsShell } from "../shell-context";
 import { ENGINE_PANEL_ID, RECOMMENDED_CARDS, RECOMMENDED_GROUPS, curatedOnly, searchIdForKey, type CuratedOnlySetting, type RecommendedCard, type RecommendedGroup } from "./recommended-cards";
@@ -78,15 +79,15 @@ export function CompactionMethodOrderEditor({ value, onChange }: {
       ))}
       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
         {remaining.length > 0 && (
-          <select
-            style={{ ...nativeSelectStyle, minHeight: 28, fontSize: 11.5 }}
-            value=""
+          <Select
+            size="sm"
+            width="fit-content"
+            value={null}
+            onChange={(method) => onChange([...order, method])}
+            options={remaining.map((method) => ({ value: method, label: COMPACTION_METHOD_LABELS[method] }))}
+            placeholder="Add method…"
             aria-label="Add compaction method"
-            onChange={(event) => { if (event.target.value) onChange([...order, event.target.value as CompactionMethod]); }}
-          >
-            <option value="" style={nativeOptionStyle}>Add method…</option>
-            {remaining.map((method) => <option key={method} value={method} style={nativeOptionStyle}>{COMPACTION_METHOD_LABELS[method]}</option>)}
-          </select>
+          />
         )}
         {!isDefault && (
           <button
@@ -225,9 +226,13 @@ function CuratedCard({ card, meta, native, onAfterChange }: { card: RecommendedC
     control = <ToggleSwitch checked={effective === true} onChange={change} />;
   } else if (meta.type === "enum") {
     control = (
-      <select aria-label={meta.label} value={String(effective)} onChange={(event) => change(event.target.value)} style={nativeSelectStyle}>
-        {(meta.options ?? []).map((option) => <option key={option.value} value={option.value} style={nativeOptionStyle}>{option.label}</option>)}
-      </select>
+      <Select
+        aria-label={meta.label}
+        value={String(effective)}
+        onChange={change}
+        options={(meta.options ?? []).map((option) => ({ value: option.value, label: option.label }))}
+        width="fit-content"
+      />
     );
   } else {
     control = <NumberField label={meta.label} value={typeof effective === "number" ? effective : undefined} onCommit={change} min={meta.min} max={meta.max} step={meta.step} />;

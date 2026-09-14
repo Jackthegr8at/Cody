@@ -2,11 +2,12 @@
 
 import { Check, Cpu, Loader2, LogOut, ShieldCheck, Trash2, Upload, UserRoundPlus, X } from "lucide-react";
 import { useCallback, useContext, useEffect, useRef, useState } from "react";
-import { chipStyle, nativeInputStyle, nativeOptionStyle, nativeSelectStyle, NativeSetting, SettingsHighlightContext } from "./primitives";
+import { chipStyle, nativeInputStyle, NativeSetting, SettingsHighlightContext } from "./primitives";
 import { dangerButtonStyle, ErrorNote, primaryButtonStyle, requestJson, smallButtonStyle, useAsyncAction } from "./account-controls";
 import { AccessTokensSection } from "./AccessTokensSection";
 import { DangerZone } from "./DangerZone";
 import { ConfirmDialog, PromptDialog } from "@/components/ui/field";
+import { Select, type SelectOption } from "@/components/ui/Select";
 import { toast } from "@/components/ui/toast";
 import { useI18n } from "@/lib/i18n";
 
@@ -43,6 +44,15 @@ interface AccountStateInfo {
 
 const AVATAR_TARGET_PX = 256;
 const MIN_PASSWORD_LENGTH = 8;
+
+const ROSTER_ROLE_OPTIONS: SelectOption<"admin" | "member">[] = [
+  { value: "admin", label: "Admin" },
+  { value: "member", label: "Member" },
+];
+const ADD_ROLE_OPTIONS: SelectOption<"member" | "admin">[] = [
+  { value: "member", label: "Member" },
+  { value: "admin", label: "Admin" },
+];
 
 function avatarUrl(user: PublicUser): string | null {
   return user.hasAvatar ? `/api/accounts/avatar/${user.id}?v=${user.avatarKey ?? ""}` : null;
@@ -445,16 +455,15 @@ export function AccountSettings({ isMobile, onOpenSystem }: { isMobile: boolean;
                   </div>
                   {user.envManaged && <span style={chipStyle}>Managed by Docker</span>}
                   {rosterBusy === user.id && <Loader2 size={13} aria-hidden style={{ animation: "spin 0.9s linear infinite", color: "var(--text-dim)" }} />}
-                  <select
+                  <Select
                     value={user.role}
-                    onChange={(event) => changeRole(user, event.target.value as "admin" | "member")}
+                    onChange={(value) => changeRole(user, value)}
+                    options={ROSTER_ROLE_OPTIONS}
                     disabled={user.envManaged || rosterBusy === user.id}
                     aria-label={`Role for ${user.username}`}
-                    style={{ ...nativeSelectStyle, minHeight: 28, fontSize: 11.5, opacity: user.envManaged ? 0.6 : 1 }}
-                  >
-                    <option value="admin" style={nativeOptionStyle}>Admin</option>
-                    <option value="member" style={nativeOptionStyle}>Member</option>
-                  </select>
+                    size="sm"
+                    width="100px"
+                  />
                   {!user.envManaged && (
                     <button type="button" onClick={() => setResetTarget(user)} disabled={rosterBusy === user.id} style={{ ...smallButtonStyle, minHeight: 28, fontSize: 11.5 }}>
                       Reset password
@@ -478,10 +487,12 @@ export function AccountSettings({ isMobile, onOpenSystem }: { isMobile: boolean;
                       <input placeholder="Username" aria-label="Username" autoCapitalize="none" spellCheck={false} value={addUsername} onChange={(event) => setAddUsername(event.target.value)} style={nativeInputStyle} />
                       <input placeholder="Full name" aria-label="Full name for the new account" value={addFullName} onChange={(event) => setAddFullName(event.target.value)} style={nativeInputStyle} />
                       <input type="password" placeholder={`Password (at least ${MIN_PASSWORD_LENGTH} characters)`} aria-label="Password for the new account" autoComplete="new-password" value={addPassword} onChange={(event) => setAddPassword(event.target.value)} style={nativeInputStyle} />
-                      <select value={addRole} onChange={(event) => setAddRole(event.target.value as "member" | "admin")} aria-label="Role for the new account" style={nativeSelectStyle}>
-                        <option value="member" style={nativeOptionStyle}>Member</option>
-                        <option value="admin" style={nativeOptionStyle}>Admin</option>
-                      </select>
+                      <Select
+                        value={addRole}
+                        onChange={setAddRole}
+                        options={ADD_ROLE_OPTIONS}
+                        aria-label="Role for the new account"
+                      />
                     </div>
                     <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                       <button type="button" onClick={addUser} disabled={addBusy || !addUsername || !addPassword} style={{ ...primaryButtonStyle, opacity: addBusy || !addUsername || !addPassword ? 0.6 : 1 }}>
@@ -513,18 +524,16 @@ export function AccountSettings({ isMobile, onOpenSystem }: { isMobile: boolean;
                 description: "Their sessions remain on disk but lose their owner. Docker-managed accounts and your own cannot be deleted here.",
                 action: (
                   <>
-                    <select
-                      value={deleteChoice}
-                      onChange={(event) => setDeleteChoice(event.target.value)}
+                    <Select
+                      value={deleteChoice || null}
+                      onChange={setDeleteChoice}
+                      options={deletable.map((user) => ({ value: user.id, label: `@${user.username}` }))}
+                      placeholder={deletable.length === 0 ? "No other accounts" : "Choose an account…"}
                       aria-label="Account to delete"
                       disabled={deletable.length === 0 || rosterBusy !== null}
-                      style={{ ...nativeSelectStyle, minHeight: 30, fontSize: 11.5, maxWidth: 220 }}
-                    >
-                      <option value="" style={nativeOptionStyle}>{deletable.length === 0 ? "No other accounts" : "Choose an account…"}</option>
-                      {deletable.map((user) => (
-                        <option key={user.id} value={user.id} style={nativeOptionStyle}>@{user.username}</option>
-                      ))}
-                    </select>
+                      size="sm"
+                      width="220px"
+                    />
                     <button
                       type="button"
                       onClick={() => setConfirmDelete(true)}

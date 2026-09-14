@@ -1,14 +1,23 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
-import { History, MessageSquarePlus, Send, Square, Trash2 } from "lucide-react";
-import { useAgentSession } from "@/hooks/useAgentSession";
+import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type CSSProperties, type KeyboardEvent } from "react";
+import { History, MessageSquarePlus, Paperclip, Send, Square, Trash2, X } from "lucide-react";
+import { useAgentSession, type AttachedImage } from "@/hooks/useAgentSession";
+import { useDragDrop } from "@/hooks/useDragDrop";
 import { useI18n } from "@/lib/i18n";
+import { MAX_ATTACHED_IMAGE_BYTES, MAX_ATTACHED_IMAGES } from "@/lib/image-attachments";
+import {
+  prepareImageBatchForAttachment,
+  prepareImageForAttachment,
+  SUPPORTED_IMAGE_FORMAT_LABEL,
+  UnsupportedImageError,
+} from "@/lib/image-compress";
 import { formatModelDisplayName } from "@/lib/model-display";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import type { AgentMessage, SessionInfo } from "@/lib/types";
 import { MessageView } from "./MessageView";
 import { LiveDot } from "./ui/LiveDot";
+import { Select, type SelectGroup, type SelectOption } from "./ui/Select";
 import { toast } from "./ui/toast";
 
 /**
@@ -26,24 +35,19 @@ interface SidebarChatSummary {
   updatedAt: string;
 }
 
+interface SidebarDraftImage {
+  file: File;
+  data: string;
+  mimeType: string;
+  previewUrl: string;
+  name: string;
+}
+
 const SIDEBAR_CHATS_ROUTE = "/api/sidebar-chats";
 
-const toolbarSelectStyle: CSSProperties = {
-  minWidth: 0,
-  flex: 1,
-  height: 26,
-  padding: "0 22px 0 8px",
-  fontSize: 12,
-  color: "var(--text)",
-  background: "var(--bg-panel)",
-  border: "1px solid var(--border)",
-  borderRadius: "var(--radius-control)",
-  appearance: "none",
-  backgroundImage: "linear-gradient(45deg, transparent 50%, var(--text-muted) 50%), linear-gradient(135deg, var(--text-muted) 50%, transparent 50%)",
-  backgroundPosition: "calc(100% - 12px) 11px, calc(100% - 8px) 11px",
-  backgroundSize: "4px 4px",
-  backgroundRepeat: "no-repeat",
-};
+function revokeImagePreview(image: SidebarDraftImage): void {
+  if (image.previewUrl.startsWith("blob:")) URL.revokeObjectURL(image.previewUrl);
+}
 
 const iconButtonStyle: CSSProperties = {
   display: "inline-flex",
@@ -116,8 +120,8 @@ export function SidebarChatPanel({ cwd, active = true }: { cwd: string; active?:
       <div className="workspace-subtitle-bar" style={{ display: "flex", alignItems: "center", gap: 6, borderBottom: "1px solid var(--border)", color: "var(--text-muted)", fontSize: 11, fontWeight: 600 }}>
         <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t("sidebarChat.title")}</span>
         <div ref={historyRef} style={{ position: "relative" }}>
-          <button type="button" className="ui-focus-ring" style={{ ...iconButtonStyle, width: 22, height: 20 }} title={t("sidebarChat.history")} aria-label={t("sidebarChat.history")} aria-expanded={historyOpen} onClick={() => setHistoryOpen((open) => !open)}>
-            <History size={12} />
+          <button type="button" className="ui-focus-ring" style={{ ...iconButtonStyle, width: 22, height: 20, padding: 0, lineHeight: 0 }} title={t("sidebarChat.history")} aria-label={t("sidebarChat.history")} aria-expanded={historyOpen} onClick={() => setHistoryOpen((open) => !open)}>
+            <History size={13} />
           </button>
           {historyOpen && (
             <div role="menu" style={{ position: "absolute", right: 0, top: "calc(100% + 4px)", zIndex: 30, width: 260, maxHeight: 280, overflowY: "auto", padding: 4, background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", boxShadow: "var(--shadow-pop)" }}>
@@ -141,7 +145,8 @@ export function SidebarChatPanel({ cwd, active = true }: { cwd: string; active?:
             </div>
           )}
         </div>
-        <button type="button" className="ui-focus-ring" style={{ ...iconButtonStyle, width: 22, height: 20 }} title={t("sidebarChat.newChat")} aria-label={t("sidebarChat.newChat")} onClick={() => { setChosenId(null); setCreatedId(null); setChosenNonce((n) => n + 1); setHistoryOpen(false); }}>
+        <button type="button" className="ui-focus-ring" style={{ ...iconButtonStyle, width: 22, height: 20, padding: 0, lineHeight: 0 }} title={t("sidebarChat.newChat")} aria-label={t("sidebarChat.newChat")} onClick={() => { setChosenId(null); setCreatedId(null); setChosenNonce((n) => n + 1); setHistoryOpen(false); }}>
+          <MessageSquarePlus size={13} />
         </button>
       </div>
       <SidebarChatSession
@@ -163,7 +168,14 @@ function SidebarChatSession({ session, cwd, onSessionCreated, onTurnEnd }: {
 }) {
   const { t } = useI18n();
   const [draft, setDraft] = useState("");
+  const [images, setImages] = useState<SidebarDraftImage[]>([]);
+  const [preparingImages, setPreparingImages] = useState(false);
+  const imagesRef = useRef<SidebarDraftImage[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  imagesRef.current = images;
+
+  useEffect(() => () => { imagesRef.current.forEach(revokeImagePreview); }, []);
 
   const {
     messages, entryIds, streamState, agentRunning, loading,
@@ -181,16 +193,144 @@ function SidebarChatSession({ session, cwd, onSessionCreated, onTurnEnd }: {
     onSessionCreated: (created) => onSessionCreated(created.id),
   });
 
-  const modelValue = currentModel ? `${currentModel.provider}:${currentModel.modelId}` : "";
-  const thinkingOptions = currentModel ? modelThinkingLevels[`${currentModel.provider}:${currentModel.modelId}`] ?? [] : [];
+  const modelValue = currentModel ? `${currentModel.provider}:${currentModel.modelId}` : null;
+
+  const modelGroups = useMemo<SelectGroup<string>[]>(() => {
+    const byProvider = new Map<string, SelectOption<string>[]>();
+    for (const model of modelList) {
+      const key = `${model.provider}:${model.id}`;
+      const option: SelectOption<string> = {
+        value: key,
+        label: formatModelDisplayName(model.id, modelNames[key] ?? model.name),
+      };
+      const existing = byProvider.get(model.provider);
+      if (existing) existing.push(option);
+      else byProvider.set(model.provider, [option]);
+    }
+    return Array.from(byProvider.entries(), ([provider, options]) => ({ label: provider, options }));
+  }, [modelList, modelNames]);
+
+  const thinkingOptions = useMemo(
+    () => currentModel ? modelThinkingLevels[`${currentModel.provider}:${currentModel.modelId}`] ?? [] : [],
+    [currentModel, modelThinkingLevels],
+  );
+
+  // `auto` is a real choice, not an absence: an unset level means "use the
+  // model's own default", which is exactly what the main composer shows and
+  // sends. Without it the trigger renders blank whenever nothing is pinned.
+  const thinkingSelectOptions = useMemo<SelectOption<string>[]>(
+    () => [
+      { value: "auto", label: thinkingLevelLabel("auto", t) },
+      ...thinkingOptions.filter((level) => level !== "auto").map((level) => ({ value: level, label: thinkingLevelLabel(level, t) })),
+    ],
+    [thinkingOptions, t],
+  );
+
+  const unsupportedImageMessage = useCallback(
+    (fileName: string) => t("sidebarChat.imageUndecodable", { name: fileName, formats: SUPPORTED_IMAGE_FORMAT_LABEL }),
+    [t],
+  );
+
+  const addImageFiles = useCallback(async (files: File[]) => {
+    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+    if (!imageFiles.length) return;
+    const remaining = Math.max(0, MAX_ATTACHED_IMAGES - imagesRef.current.length);
+    const sized = imageFiles.filter((file) => file.size <= MAX_ATTACHED_IMAGE_BYTES);
+    const accepted = sized.slice(0, remaining);
+    if (!accepted.length) {
+      toast.error(remaining === 0
+        ? t("sidebarChat.maxImagesReached", { max: MAX_ATTACHED_IMAGES })
+        : t("sidebarChat.imagesTooLargeSkipped", { count: imageFiles.length, mb: Math.round(MAX_ATTACHED_IMAGE_BYTES / (1024 * 1024)) }));
+      return;
+    }
+    setPreparingImages(true);
+    const prepared: SidebarDraftImage[] = [];
+    const failures: string[] = [];
+    try {
+      for (const file of accepted) {
+        try {
+          const result = await prepareImageForAttachment(file, unsupportedImageMessage);
+          prepared.push({ file, data: result.data, mimeType: result.mimeType, previewUrl: URL.createObjectURL(file), name: file.name });
+        } catch (error) {
+          failures.push(error instanceof UnsupportedImageError
+            ? error.message
+            : t("sidebarChat.imageReadFailed", { name: file.name }));
+        }
+      }
+    } finally {
+      setPreparingImages(false);
+    }
+    if (prepared.length) {
+      setImages((prev) => {
+        const room = Math.max(0, MAX_ATTACHED_IMAGES - prev.length);
+        const keep = prepared.slice(0, room);
+        prepared.slice(room).forEach(revokeImagePreview);
+        return [...prev, ...keep];
+      });
+    }
+    if (failures.length) toast.error(failures.join("\n"));
+  }, [t, unsupportedImageMessage]);
+
+  const removeImage = useCallback((index: number) => {
+    setImages((prev) => {
+      const next = [...prev];
+      const [removed] = next.splice(index, 1);
+      if (removed) revokeImagePreview(removed);
+      return next;
+    });
+  }, []);
+
+  const { isDragOver, handleDragEnter, handleDragOver, handleDragLeave, handleDrop } = useDragDrop(
+    useCallback((files: File[]) => { void addImageFiles(files); }, [addImageFiles]),
+  );
+
+  const onPaste = useCallback((event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = Array.from(event.clipboardData?.items ?? []);
+    const imageItems = items.filter((item) => item.type.startsWith("image/"));
+    if (!imageItems.length) return;
+    event.preventDefault();
+    const files = imageItems.map((item) => item.getAsFile()).filter((file): file is File => file !== null);
+    void addImageFiles(files);
+  }, [addImageFiles]);
 
   const submit = useCallback(async () => {
     const text = draft.trim();
-    if (!text) return;
+    if (!text && !images.length) return;
+    if (preparingImages) return;
+    let outgoing: AttachedImage[] | undefined;
+    if (images.length) {
+      setPreparingImages(true);
+      try {
+        const batch = await prepareImageBatchForAttachment({
+          files: images.map((image) => image.file),
+          message: text,
+          unsupportedMessage: unsupportedImageMessage,
+        });
+        outgoing = images.map((image, index) => ({
+          data: batch[index].data,
+          mimeType: batch[index].mimeType,
+          previewUrl: image.previewUrl,
+        }));
+      } catch (error) {
+        toast.error(error instanceof Error
+          ? error.message
+          : t("sidebarChat.imageReadFailed", { name: images[0]?.name ?? t("sidebarChat.attachFile") }));
+        setPreparingImages(false);
+        return;
+      }
+      setPreparingImages(false);
+    }
     setDraft("");
-    const accepted = agentRunning ? (await handleSteer(text), true) : await handleSend(text);
-    if (!accepted) setDraft(text);
-  }, [agentRunning, draft, handleSend, handleSteer]);
+    const sentImages = images;
+    setImages([]);
+    const accepted = agentRunning ? (await handleSteer(text, outgoing), true) : await handleSend(text, outgoing);
+    if (!accepted) {
+      setDraft(text);
+      setImages(sentImages);
+    } else {
+      sentImages.forEach(revokeImagePreview);
+    }
+  }, [agentRunning, draft, handleSend, handleSteer, images, preparingImages, t, unsupportedImageMessage]);
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
@@ -206,34 +346,32 @@ function SidebarChatSession({ session, cwd, onSessionCreated, onTurnEnd }: {
   return (
     <>
       <div style={{ display: "flex", gap: 6, padding: "6px 8px", borderBottom: "1px solid var(--border)", background: "var(--bg)" }}>
-        <select
-          className="ui-focus-ring"
-          aria-label={t("sidebarChat.model")}
-          style={{ ...toolbarSelectStyle, flex: 2 }}
-          value={modelValue}
-          disabled={agentRunning || modelList.length === 0}
-          onChange={(event) => {
-            const [provider, ...rest] = event.target.value.split(":");
-            if (provider && rest.length) void handleModelChange(provider, rest.join(":"));
-          }}
-        >
-          {!modelValue && <option value="">{t("sidebarChat.selectModel")}</option>}
-          {modelList.map((model) => (
-            <option key={`${model.provider}:${model.id}`} value={`${model.provider}:${model.id}`}>
-              {formatModelDisplayName(model.id, modelNames[`${model.provider}:${model.id}`] ?? model.name)}
-            </option>
-          ))}
-        </select>
-        <select
-          className="ui-focus-ring"
-          aria-label={t("sidebarChat.thinking")}
-          style={{ ...toolbarSelectStyle, flex: 1, opacity: thinkingOptions.length ? 1 : 0.55 }}
-          value={thinkingLevel ?? ""}
-          disabled={!thinkingOptions.length || thinkingLevelPending}
-          onChange={(event) => void handleThinkingLevelChange(event.target.value)}
-        >
-          {thinkingOptions.map((level) => <option key={level} value={level}>{thinkingLevelLabel(level, t)}</option>)}
-        </select>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <Select
+            size="sm"
+            value={modelValue}
+            onChange={(value) => {
+              const [provider, ...rest] = value.split(":");
+              if (provider && rest.length) void handleModelChange(provider, rest.join(":"));
+            }}
+            options={modelGroups}
+            placeholder={t("sidebarChat.selectModel")}
+            disabled={agentRunning || modelList.length === 0}
+            aria-label={t("sidebarChat.model")}
+            data-testid="Model"
+          />
+        </div>
+        <div style={{ flexBasis: 112, flexGrow: 0, flexShrink: 0, minWidth: 0 }}>
+          <Select
+            size="sm"
+            value={thinkingLevel ?? "auto"}
+            onChange={(value) => void handleThinkingLevelChange(value)}
+            options={thinkingSelectOptions}
+            disabled={!thinkingOptions.length || thinkingLevelPending}
+            aria-label={t("sidebarChat.thinking")}
+            data-testid="Thinking"
+          />
+        </div>
       </div>
 
       <div ref={scrollContainerRef} className="chat-scroll-region" style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "10px 10px 4px" }}>
@@ -260,7 +398,71 @@ function SidebarChatSession({ session, cwd, onSessionCreated, onTurnEnd }: {
       </div>
 
       <div style={{ borderTop: "1px solid var(--border)", padding: "8px 8px calc(8px + var(--safe-bottom))", background: "var(--bg)" }}>
-        <div style={{ display: "flex", alignItems: "flex-end", gap: 6, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", padding: 6 }}>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          style={{ display: "none" }}
+          onChange={(event) => {
+            const files = Array.from(event.target.files ?? []);
+            void addImageFiles(files);
+            event.target.value = "";
+          }}
+        />
+        {images.length > 0 && (
+          <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
+            {images.map((image, index) => (
+              <div key={index} style={{ position: "relative", flexShrink: 0 }}>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={image.previewUrl}
+                  alt=""
+                  style={{ width: 48, height: 48, objectFit: "cover", borderRadius: 6, border: "1px solid var(--border)", display: "block" }}
+                />
+                <button
+                  type="button"
+                  className="ui-focus-ring"
+                  onClick={() => removeImage(index)}
+                  title={t("sidebarChat.removeImage")}
+                  aria-label={t("sidebarChat.removeImage")}
+                  style={{
+                    position: "absolute", top: -5, right: -5,
+                    width: 16, height: 16, borderRadius: "50%",
+                    background: "var(--bg-panel)", border: "1px solid var(--border)",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    cursor: "pointer", padding: 0, color: "var(--text-muted)",
+                  }}
+                >
+                  <X size={9} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div
+          onDragEnter={handleDragEnter}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          style={{
+            display: "flex", alignItems: "flex-end", gap: 6,
+            border: `1px solid ${isDragOver ? "var(--accent)" : "var(--border)"}`,
+            borderRadius: "var(--radius-card)", background: "var(--bg-panel)", padding: 6,
+            transition: "border-color var(--dur-fast) var(--ease-out-warm)",
+          }}
+        >
+          <button
+            type="button"
+            className="ui-focus-ring"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={preparingImages}
+            title={preparingImages ? t("sidebarChat.imagePreparing") : t("sidebarChat.attachFile")}
+            aria-label={preparingImages ? t("sidebarChat.imagePreparing") : t("sidebarChat.attachFile")}
+            style={{ ...iconButtonStyle, width: 30, height: 30, border: 0, background: "transparent", color: images.length ? "var(--accent)" : "var(--text-muted)" }}
+          >
+            <Paperclip size={14} />
+          </button>
           <textarea
             ref={textareaRef}
             value={draft}
@@ -268,6 +470,7 @@ function SidebarChatSession({ session, cwd, onSessionCreated, onTurnEnd }: {
             placeholder={agentRunning ? t("sidebarChat.steerPlaceholder") : t("sidebarChat.placeholder")}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={onKeyDown}
+            onPaste={onPaste}
             style={{ flex: 1, minWidth: 0, minHeight: 34, maxHeight: 160, padding: "7px 8px", resize: "none", border: 0, outline: "none", background: "transparent", color: "var(--text)", fontSize: "var(--chat-font-size)", lineHeight: 1.5, fieldSizing: "content" } as CSSProperties}
           />
           {agentRunning ? (
@@ -275,7 +478,7 @@ function SidebarChatSession({ session, cwd, onSessionCreated, onTurnEnd }: {
               <Square size={13} />
             </button>
           ) : null}
-          <button type="button" className="ui-focus-ring" onClick={() => void submit()} disabled={!draft.trim()} title={t("sidebarChat.send")} aria-label={t("sidebarChat.send")} style={{ ...iconButtonStyle, width: 30, height: 30, border: 0, background: draft.trim() ? "var(--accent)" : "var(--bg-hover)", color: draft.trim() ? "var(--accent-contrast, #fff)" : "var(--text-dim)" }}>
+          <button type="button" className="ui-focus-ring" onClick={() => void submit()} disabled={(!draft.trim() && !images.length) || preparingImages} title={t("sidebarChat.send")} aria-label={t("sidebarChat.send")} style={{ ...iconButtonStyle, width: 30, height: 30, border: 0, background: (draft.trim() || images.length) ? "var(--accent)" : "var(--bg-hover)", color: (draft.trim() || images.length) ? "var(--accent-contrast, #fff)" : "var(--text-dim)" }}>
             <Send size={13} />
           </button>
         </div>

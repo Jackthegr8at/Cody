@@ -1592,24 +1592,20 @@ span.linenumber {
   transition: background-color var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm);
 }
 .dropdown-item:hover,
-.dropdown-item:focus-visible {
+.dropdown-item:focus-visible,
+.dropdown-item[data-highlighted] {
   background: var(--bg-hover);
   color: var(--text);
   outline: none;
 }
 .dropdown-item[aria-current="true"],
 .dropdown-item[aria-selected="true"],
+.dropdown-item[data-selected],
 .dropdown-item[data-active="true"] {
   background: var(--bg-selected);
   color: var(--text);
 }
 
-.dropdown-surface :is(select, option) {
-  color-scheme: light;
-}
-html.dark .dropdown-surface :is(select, option) {
-  color-scheme: dark;
-}
 
 /* Conversational motion: new turns settle into place while an active turn
    gets a quiet accent pulse on the unboxed message. These classes only
@@ -1783,6 +1779,14 @@ html.dark .dropdown-surface :is(select, option) {
    modifier off on transitionend (useCollapseMotion in MessageView). */
 .collapse-box-panel--motion {
   will-change: height, max-width;
+}
+/* While a thinking box is actively streaming, its content grows every token.
+   The height/max-width transition is meant for open/close toggles, not for
+   per-token growth — animating each delta is what made streamed thinking
+   read as janky — so suppress it for the streaming box; a real toggle still
+   sets .collapse-box-panel--motion and re-enables it for that transition. */
+.collapse-box[data-streaming] > * > .collapse-box-panel:not(.collapse-box-panel--motion) {
+  transition: none;
 }
 /* min-width: 100% keeps section borders/backgrounds spanning the full box
    even when the header is wider than the content; the percentage is ignored

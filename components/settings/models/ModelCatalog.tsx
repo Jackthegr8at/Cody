@@ -29,7 +29,8 @@ import type { CatalogRow, ModelCatalogHandle } from "@/hooks/useModelCatalog";
 import { curationModeFor, allowListActive } from "@/lib/model-allow-list";
 import { formatModelDisplayName } from "@/lib/model-display";
 import { Drawer } from "../Drawer";
-import { chipStyle, nativeOptionStyle, nativeSelectStyle, READ_ONLY_BADGE } from "../primitives";
+import { Select } from "@/components/ui/Select";
+import { chipStyle, READ_ONLY_BADGE } from "../primitives";
 import { useSaveStatus } from "../SaveStatus";
 import { useSettingsShell } from "../shell-context";
 import { ModelCurationDialog } from "./ModelCurationDialog";
@@ -324,10 +325,13 @@ export function ModelCatalog({ catalog, panelId }: { catalog: ModelCatalogHandle
             style={{ flex: "1 1 220px", minWidth: 0, padding: "7px 10px", minHeight: 32, border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12 }}
           />
           {catalog.providers.length > 1 && (
-            <select value={provider} onChange={(event) => setProvider(event.target.value)} aria-label="Provider" style={{ ...nativeSelectStyle, minHeight: 32, maxWidth: 200 }}>
-              <option value="" style={nativeOptionStyle}>All providers</option>
-              {catalog.providers.map((name) => <option key={name} value={name} style={nativeOptionStyle}>{name}</option>)}
-            </select>
+            <Select
+              value={provider}
+              onChange={setProvider}
+              options={[{ value: "", label: "All providers" }, ...catalog.providers.map((name) => ({ value: name, label: name }))]}
+              aria-label="Provider"
+              width={200}
+            />
           )}
           {catalog.catalogSource === "global" && (
             <button type="button" onClick={() => { void catalog.refresh(); }} disabled={catalog.refreshing} aria-label="Refresh the catalog" title="Re-read the catalog from the engine" style={{ ...toolbarButton, minHeight: 32, opacity: catalog.refreshing ? 0.6 : 1 }}>

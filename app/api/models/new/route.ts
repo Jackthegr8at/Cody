@@ -1,7 +1,10 @@
+import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { getAgentDir } from "@/lib/omp/paths";
 import { getHarness, type HarnessAdapter } from "@/lib/harness";
 import { modelKey } from "@/lib/model-allow-list";
 import { type CatalogModel, compareModelEntries, FULL_CATALOG_CACHE_KEY, loadFullCatalog } from "@/lib/model-catalog-full";
-import { diffNewModels, readSeenLedger } from "@/lib/model-catalog-seen";
+import { diffNewModels, readSeenLedger, type SeenLedger } from "@/lib/model-catalog-seen";
 import { loadCatalogWithCache, peekCatalogCache } from "@/lib/models-cache";
 import { type OmpModel, runUtilityCommand } from "@/lib/omp/rpc-utility";
 import { utilityRpcLaunchFor } from "@/lib/rpc-manager";
@@ -40,8 +43,45 @@ interface NewModelsResponse {
   firstRun: boolean;
   catalogSource: "global" | "session";
   modelError?: string;
-  /** `?cached=1` only: the catalog cache was cold, so nothing was compared. */
+  /** `?cached=1` only: the catalog cache was cold AND nothing was ever
+   *  remembered for this engine, so there is no count to show yet. */
   pending?: true;
+  /** `?cached=1` only: the catalog cache was cold, so `total` is the last
+   *  count this instance showed (persisted) and `newModels` was not compared;
+   *  a background load is already warming the cache for the next read. */
+  stale?: true;
+}
+
+/** The last catalog count per engine, persisted so the Settings rail can say
+ * "566 models" the instant it opens instead of blanking until the utility
+ * child has answered (a minute after every server start, and again every
+ * hour when the full-catalog cache expires). */
+const SUMMARY_FILE = "cody-model-catalog-summary.json";
+type SummaryFile = Record<string, { total: number; at: string }>;
+function readSummary(): SummaryFile {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path.join(getAgentDir(), SUMMARY_FILE), "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as SummaryFile : {};
+  } catch {
+    return {};
+  }
+}
+function writeSummary(engineId: string, total: number): void {
+  const file = path.join(getAgentDir(), SUMMARY_FILE);
+  const next = { ...readSummary(), [engineId]: { total, at: new Date().toISOString() } };
+  try {
+    const temporary = `${file}.${process.pid}.tmp`;
+    writeFileSync(temporary, JSON.stringify(next), { mode: 0o600 });
+    renameSync(temporary, file);
+  } catch {
+    // A summary that fails to persist costs one blank rail line, never a request.
+  }
+}
+
+/** Warm the catalog cache without making the caller wait. `loadCatalogWithCache`
+ * dedupes in-flight loads, so repeated rail polls never stack utility children. */
+function warmCatalog(harness: HarnessAdapter): void {
+  void (harness.id === "omp" ? loadFullCatalog() : loadEffectiveCatalog(harness)).catch(() => {});
 }
 
 const EFFECTIVE_CATALOG_KEY = (engineId: string) => `catalog:${engineId}`;
@@ -62,9 +102,10 @@ function loadEffectiveCatalog(harness: HarnessAdapter): Promise<CatalogModel[]> 
   });
 }
 
-function diffResponse(catalog: CatalogModel[], ledger: ReturnType<typeof readSeenLedger>): NewModelsResponse {
+function diffResponse(harnessId: string, catalog: CatalogModel[], ledger: SeenLedger): NewModelsResponse {
   const { newKeys, firstRun } = diffNewModels(catalog.map(modelKey), ledger);
   const fresh = new Set(newKeys);
+  writeSummary(harnessId, catalog.length);
   return {
     newModels: catalog
       .filter((model) => fresh.has(modelKey(model)))
@@ -89,14 +130,20 @@ export async function GET(request: Request) {
   if (cachedOnly) {
     const cached = peekCatalogCache<CatalogModel[]>(harness.id === "omp" ? FULL_CATALOG_CACHE_KEY : EFFECTIVE_CATALOG_KEY(harness.id));
     if (!cached) {
-      const pending: NewModelsResponse = { newModels: [], total: 0, seenAt: ledger.seenAt, firstRun: ledger.seenAt === null, catalogSource: "global", pending: true };
-      return Response.json(pending);
+      warmCatalog(harness);
+      const remembered = readSummary()[harness.id];
+      if (!remembered) {
+        const pending: NewModelsResponse = { newModels: [], total: 0, seenAt: ledger.seenAt, firstRun: ledger.seenAt === null, catalogSource: "global", pending: true };
+        return Response.json(pending);
+      }
+      const stale: NewModelsResponse = { newModels: [], total: remembered.total, seenAt: ledger.seenAt, firstRun: ledger.seenAt === null, catalogSource: "global", stale: true };
+      return Response.json(stale);
     }
-    return Response.json(diffResponse(cached, ledger));
+    return Response.json(diffResponse(harness.id, cached, ledger));
   }
   try {
     const catalog = harness.id === "omp" ? await loadFullCatalog() : await loadEffectiveCatalog(harness);
-    return Response.json(diffResponse(catalog, ledger));
+    return Response.json(diffResponse(harness.id, catalog, ledger));
   } catch (error) {
     const failed: NewModelsResponse = {
       newModels: [],

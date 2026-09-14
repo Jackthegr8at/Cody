@@ -119,7 +119,14 @@ app/api/
   models/new/route.ts             GET models in the catalog never shown before (the
                                    seen ledger); `?cached=1` answers from the catalog
                                    cache only and never spawns an engine — for a
-                                   status line, never the hub's own open
+                                   status line, never the hub's own open. A COLD cache
+                                   answers `stale: true` with the last count this
+                                   instance showed (`cody-model-catalog-summary.json`)
+                                   and warms the catalog in the background, so the
+                                   Models rail says "568 models" on the first open
+                                   after a restart instead of nothing until a manual
+                                   Refresh; `pending: true` only before any count was
+                                   ever recorded
   models/seen/route.ts            GET/POST the seen ledger
                                    (`cody-model-catalog-seen.json`) that makes "new"
                                    a fact instead of a guess; POST is admin-only
@@ -355,8 +362,15 @@ components/
   SessionSidebar.tsx  session tree + FileExplorer
   ChatWindow.tsx      chat composition + completion sound wrapper
   ChatInput.tsx       input bar + model/thinking/tools/compact controls
-  SidebarChatPanel.tsx sidebar chat: rpc-managed session, model picker, thinking level,
-                      message display, composer (no file editing, no tools)
+  SidebarChatPanel.tsx sidebar chat: rpc-managed session, model picker (grouped by
+                      provider) + thinking level, message display, composer (no file
+                      editing, no tools). Image attachments go through the MAIN
+                      composer's engine — `prepareImageBatchForAttachment`
+                      (lib/image-compress.ts), same 900 KiB prompt-frame budget and
+                      WebP fallback — by click, drop or paste. `auto` is a real
+                      thinking OPTION, not an absence: unset means "the model's own
+                      default", which is what the main composer shows and sends, and
+                      without the row the trigger rendered blank
   ComposerPanels.tsx  composer-attached todo + subagent panels (collapsible, live states)
   TodoList.tsx        todo phase grid with preview/show-all (used by ComposerPanels)
   SubagentTranscriptDialog.tsx  task + final output summary dialog (wide, screen-adaptive)
@@ -1726,6 +1740,17 @@ handled or safely ignored.
   engine upgrade or switch cannot lose or rewrite them. Under an ACP engine
   the routes answer `unsupported` and every Distill surface hides.
 - **Smoothness.** The distilled reply streams through the coalescer, which reparses the full buffer on each animation frame, giving smooth multi-token reveals without a typewriter pacer. Thinking blocks auto-expand while streaming and collapse when finished, providing clear context hierarchy without jarring motion.
+- **Trap — a collapse box must not animate its own growth.**
+  `.collapse-box-panel` carries a `height` transition (with
+  `interpolate-size: allow-keywords`, so `auto` is animatable) for open/close
+  toggles. A thinking box grows on EVERY streamed token, so that transition
+  re-targeted itself per delta and the box visibly lurched the whole time it
+  streamed — the "janky thinking text" report. `ThinkingBlock` now marks the
+  actively streaming box `data-streaming`, and `globals.css` drops the
+  transition for exactly that box while the modifier class
+  (`.collapse-box-panel--motion`, set by `useCollapseMotion` on a real
+  toggle) is absent. Measured mid-stream afterwards: `transition-property:
+  none`, p95 frame 18.6 ms, one frame over 32 ms in 1119.
 - **Cancel subtask** (`SubagentTranscriptDialog` `CancelSubtaskButton`): omp's
   RPC has no per-subagent abort (only whole-turn `abort`), so the button
   STEERS the parent through the existing `steer` path with an instruction to
@@ -2161,9 +2186,31 @@ edges:  --safe-top --safe-right --safe-bottom --safe-left
 
 `components/ui/` holds the shared primitives (built on `@base-ui/react`):
 `primitives.tsx` (Dialog/Tooltip/Collapsible), `field.tsx` (form fields +
-ConfirmDialog), `toast.tsx` (`toast.success/error/info`, mounted in AppShell).
+ConfirmDialog), `Select.tsx` (**the** dropdown), `toast.tsx`
+(`toast.success/error/info`, mounted in AppShell).
 Icons come from `lucide-react` — do not add new inline SVGs. The command
 palette (`components/CommandPalette.tsx`, ⌘K/Ctrl+K) is built on `cmdk`.
+
+### One dropdown, and a placeholder is not a choice
+- **`components/ui/Select.tsx` is the only dropdown.** A native `<select>` is
+  painted by the browser — a different popup per platform, ignoring the theme
+  — so there are ZERO of them left in `components/`/`app/` and a new one is a
+  regression. It renders on the same `dropdown-surface` / `dropdown-item`
+  classes the composer's own menus use, so every menu in the app looks alike,
+  and it inherits keyboard nav, typeahead, edge flipping, focus return and a
+  portal that escapes `overflow: hidden` from base-ui's Select.
+- **`placeholder` is NOT selectable — an "unset / default / all" row is a real
+  option.** `<option value="">All providers</option>` is a value the user can
+  come back to; a placeholder is only the empty state of a control whose
+  choices are all real (a "Add a model…" action trigger, say). Translating the
+  first kind into `placeholder` silently deletes the reset: the migration did
+  exactly that to eight controls (All providers, All marketplaces, No
+  override, Model default, Distill's engine/model default, local routing's
+  unset, the model-level API override), each of which is now an explicit
+  `{ value: "", label }` at the head of its option list. When a `""` value
+  must persist as absent, keep the transform (`onChange={(v) => set("api", v
+  || undefined)}`) — the sweep dropped that too and would have written `""`
+  into `models.yml`.
 
 ### Standalone immersion and the safe-area variables
 - An installed Cody uses the WHOLE screen: `appleWebApp.statusBarStyle` is
