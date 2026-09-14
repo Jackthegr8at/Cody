@@ -1016,24 +1016,27 @@ test("a missing key hides the credit section instead of showing an error", () =>
 });
 
 
-test("renders distinct Fast status semantics without conflating metadata and engine state", () => {
-  const renderFast = (fast) => renderToStaticMarkup(
-    React.createElement(ChatInput, {
-      onSend() {},
-      onAbort() {},
-      isStreaming: false,
-      fastModeCapable: true,
-      onFastModeChange() {},
-      ...fast,
-    }),
-  );
+test("renders distinct Fast status semantics without conflating metadata and engine state", async () => {
+  // The control moved into the model dropdown (a click away from SSR), so the
+  // semantics are pinned where they now live: the shared derivation. The one
+  // rule worth a test beyond the state table is that an unavailable Fast is
+  // rendered as NOTHING rather than as a disabled control that explains itself.
+  const { deriveFastModeState } = await import("../lib/fast-mode-state.ts");
+  const fast = (input) => deriveFastModeState({ capable: true, ...input });
 
-  assert.match(renderFast({ fastModeSupported: true }), /aria-label="Fast off"/);
-  assert.match(renderFast({ fastModeEnabled: true, fastModeActive: true, fastModeSupported: false, fastModeUnavailable: true }), /aria-label="Fast requested"/);
-  assert.match(renderFast({ fastModeEnabled: true, fastModeActive: false, fastModeSupported: true }), /aria-label="Fast inactive"/);
-  assert.match(renderFast({ fastModeSupported: false }), /aria-label="Fast unavailable"/);
-  assert.match(renderFast({ fastModeEnabled: true }), /aria-label="Fast unverified"/);
-  assert.match(renderFast({ fastModePending: true }), /aria-label="Checking"/);
+  assert.equal(fast({ supported: true }), "off");
+  assert.equal(fast({ enabled: true, active: true, supported: false, unavailable: true }), "unavailable");
+  assert.equal(fast({ enabled: true, active: false, supported: true }), "inactive");
+  assert.equal(fast({ supported: false }), "unavailable");
+  assert.equal(fast({ enabled: true }), "unverified");
+  assert.equal(fast({ pending: true }), "checking");
+  assert.equal(deriveFastModeState({ capable: false, supported: true }), "unavailable");
+
+  // The composer row no longer carries it.
+  const html = renderToStaticMarkup(
+    React.createElement(ChatInput, { onSend() {}, onAbort() {}, isStreaming: false, fastModeCapable: true, fastModeSupported: true, onFastModeChange() {} }),
+  );
+  assert.doesNotMatch(html, /data-testid="fast-mode-toggle"/);
 });
 
 test("keeps Smart model selection free of engine and model suffixes", () => {

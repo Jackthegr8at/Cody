@@ -100,3 +100,83 @@ export function applyCredentialOrder(
 
   return { ...snapshot, accounts };
 }
+
+/**
+ * A rate-limit BLOCK is a harder fact than a quota percentage, and until now
+ * nothing in Cody could see it.
+ *
+ * omp records a block against the credential (`auth_credential_blocks`) when
+ * a provider answers with a limit, and refuses to send on that credential
+ * until it expires. The usage API is a different source and does not know
+ * about it — measured on this machine: an Anthropic account reporting **4%
+ * used** was blocked until 03:20Z, so the composer ring showed plenty of
+ * headroom while every turn fell back to another provider. Same for the
+ * Token Plan key, blocked for six days while its plan reported fine.
+ *
+ * A block is therefore folded in as an exhausted, untiered window on the
+ * account: the ring shows it, `resolveModelAvailability` reports the model
+ * exhausted, the blackout registry remembers it until `blockedUntil`, and
+ * the role binder routes around it. One source of truth means the blocks
+ * have to be IN it.
+ */
+export function applyCredentialBlocks(
+  snapshot: UsageSnapshot,
+  credentials: readonly OmpCredentialRow[],
+  now = Date.now(),
+): UsageSnapshot {
+  if (!snapshot.available || credentials.length === 0) return snapshot;
+  const blocked = new Map<number, string>();
+  for (const row of credentials) {
+    if (!row.blockedUntil) continue;
+    const until = Date.parse(row.blockedUntil);
+    // An expired block is not a block; the helper already filters, but the
+    // snapshot may be served from cache across the expiry.
+    if (Number.isFinite(until) && until > now) blocked.set(row.id, row.blockedUntil);
+  }
+  if (blocked.size === 0) return snapshot;
+
+  const blockWindow = (provider: string, credentialId: number | null, until: string) => ({
+    id: `${provider}:blocked:${credentialId ?? "credential"}`,
+    label: "rate-limit block",
+    utilization: 100,
+    resetsAt: until,
+    state: "exhausted" as const,
+    windowMs: null,
+    tier: null,
+    shared: true,
+  });
+
+  const claimed = new Set<number>();
+  const accounts = snapshot.accounts.map((account) => {
+    const until = account.credentialId === null ? undefined : blocked.get(account.credentialId);
+    if (!until || account.credentialId === null) return account;
+    claimed.add(account.credentialId);
+    return { ...account, windows: [...(account.windows ?? []), blockWindow(account.provider, account.credentialId, until)] };
+  });
+
+  // A blocked credential whose provider reports no usage at all — an API key
+  // (OpenRouter, the Alibaba Token Plan) rather than a coding plan — would
+  // otherwise stay invisible and keep being chosen as a fallback while omp
+  // refuses to send on it. Measured: the Token Plan key blocked for six days
+  // still read as "unknown", i.e. usable.
+  for (const row of credentials) {
+    const until = blocked.get(row.id);
+    if (!until || claimed.has(row.id)) continue;
+    if (accounts.some((account) => account.provider === row.provider && account.credentialId === row.id)) continue;
+    // Only synthesize when the provider has NO account: an unmatched
+    // credential beside a reporting sibling is an identity join Cody could
+    // not make, not proof that the reporting account is blocked.
+    if (accounts.some((account) => account.provider === row.provider)) continue;
+    accounts.push({
+      provider: row.provider,
+      id: `${row.provider}#${row.id}`,
+      identity: row.identity ?? null,
+      credentialId: row.id,
+      label: row.provider,
+      planType: null,
+      unlimited: false,
+      windows: [blockWindow(row.provider, row.id, until)],
+    });
+  }
+  return { ...snapshot, accounts };
+}

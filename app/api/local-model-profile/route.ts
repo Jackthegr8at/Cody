@@ -52,6 +52,7 @@ function answer(request: Request, target?: ModelProfileTarget): NextResponse {
       selection: {
         provider: target.provider,
         modelId: target.modelId,
+        isLocal: resolved.isLocal,
         override: resolved.override,
         resolvedProfile: resolved.profile.id,
         toolNames: resolved.profile.toolNames ?? null,

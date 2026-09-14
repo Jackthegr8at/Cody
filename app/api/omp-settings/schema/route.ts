@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { disposeUtilityRpc } from "@/lib/omp/rpc-utility";
+import { restartIdleRpcSessions } from "@/lib/rpc-manager";
 import { requireCapability } from "@/lib/engine-guard";
 import type { EngineSettingValue, EngineSettingsSchema } from "@/lib/harness/types";
 
@@ -65,7 +66,13 @@ function redactSecrets(schema: EngineSettingsSchema | null, values: Record<strin
   return { values: shown, secretsSet };
 }
 
-export function GET() {
+/**
+ * `?values=a.b,c.d` answers with those persisted values ALONE. The full
+ * payload is the engine's whole schema (~550 keys for omp) — fine for the
+ * settings dialog, far too much for a composer control that needs two
+ * booleans on every chat load.
+ */
+export function GET(request: Request) {
   try {
     const gate = requireCapability("nativeSettings", SURFACE);
     if ("response" in gate) return gate.response;
@@ -78,6 +85,21 @@ export function GET() {
     // (ui.condition "macOS") resolve from the server's own platform.
     const host = { platform: process.platform };
     if (!active.settings) return noSurface(shortName);
+    // Next's generated route types require the Request parameter, but the
+    // handler is also called directly (route-guard tests) with none — so the
+    // projection is read defensively rather than assumed present.
+    const url: string | undefined = request?.url;
+    const wanted = url ? new URL(url).searchParams.get("values") : null;
+    if (wanted !== null) {
+      const paths = wanted.split(",").map((entry) => entry.trim()).filter(Boolean);
+      const { schema, values } = active.settings.readSchema();
+      const redacted = redactSecrets(schema, values);
+      const picked: Record<string, EngineSettingValue> = {};
+      for (const path of paths) {
+        if (path in redacted.values) picked[path] = redacted.values[path];
+      }
+      return NextResponse.json({ harness, values: picked });
+    }
     const { path, schema, values, reason } = active.settings.readSchema();
     if (!schema) {
       return NextResponse.json({
@@ -99,8 +121,11 @@ export function GET() {
 
 export async function PUT(request: Request) {
   try {
-    const body = (await request.json()) as { patch?: unknown };
+    const body = (await request.json()) as { patch?: unknown; applyNow?: unknown };
     const patch = body.patch;
+    // A settings panel writes for NEXT time; a composer control claims to
+    // change the conversation in front of the user. Only the latter asks.
+    const applyNow = body.applyNow === true;
     if (typeof patch !== "object" || patch === null || Array.isArray(patch)) {
       return NextResponse.json({ error: "patch must be an object of setting paths" }, { status: 400 });
     }
@@ -114,6 +139,7 @@ export async function PUT(request: Request) {
     // installed package, so this costs a config-file parse at most.
     const { schema } = active.settings.readSchema();
     const { written, rejected, values } = active.settings.write(patch as Record<string, unknown>);
+    let applied: { restarted: number; active: number } | undefined;
     if (written.length > 0) {
       // Settings decide which models an engine offers and how its helper child
       // behaves, and the shared utility process caches both for its lifetime.
@@ -122,9 +148,13 @@ export async function PUT(request: Request) {
       // model-visibility settings do.
       invalidateModelsCache();
       disposeUtilityRpc();
+      // An engine child reads its config at spawn, so a live session keeps
+      // the old value until it is respawned. Idle children reconnect on
+      // demand; a running turn finishes on the config it started with.
+      if (applyNow) applied = await restartIdleRpcSessions();
     }
     const redacted = redactSecrets(schema, values);
-    if (rejected.length === 0) return NextResponse.json({ success: true, written, values: redacted.values, secretsSet: redacted.secretsSet });
+    if (rejected.length === 0) return NextResponse.json({ success: true, written, values: redacted.values, secretsSet: redacted.secretsSet, ...applied });
     // A save that did not happen is never reported as one. The panel shows
     // `error`, so the keys the engine would not take are named there.
     return NextResponse.json({

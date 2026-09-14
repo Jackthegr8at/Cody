@@ -291,13 +291,18 @@ export function patchSettingsTop(partial: Partial<NativeSettings>): Promise<void
 }
 
 let pendingSchemaPatch: Record<string, unknown> = {};
+/** ORed across a coalesced batch: one caller asking for the change to reach
+ * live sessions must not be silently dropped by a neighbouring write. */
+let pendingSchemaApplyNow = false;
 let schemaTimer: ReturnType<typeof setTimeout> | null = null;
 let schemaWaiters: Array<{ resolve: () => void; reject: (error: unknown) => void }> = [];
 
 async function flushSchemaPatch(): Promise<void> {
   const patch = pendingSchemaPatch;
+  const applyNow = pendingSchemaApplyNow;
   const waiters = schemaWaiters;
   pendingSchemaPatch = {};
+  pendingSchemaApplyNow = false;
   schemaWaiters = [];
   schemaTimer = null;
   if (Object.keys(patch).length === 0) {
@@ -306,7 +311,7 @@ async function flushSchemaPatch(): Promise<void> {
   }
   try {
     await enqueueConfigWrite("schema", async () => {
-      const response = await fetch(SCHEMA_ROUTE, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ patch }) });
+      const response = await fetch(SCHEMA_ROUTE, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(applyNow ? { patch, applyNow: true } : { patch }) });
       const body = (await response.json().catch(() => ({}))) as { error?: string; rejected?: string[] };
       if (!response.ok || body.error) throw new Error(body.error || `HTTP ${response.status}`);
     });
@@ -319,12 +324,20 @@ async function flushSchemaPatch(): Promise<void> {
 /** Queue `{path: value}` pairs for PUT /api/omp-settings/schema, coalescing
  * everything that arrives within 350 ms into one request (a slider or a
  * text field fires many). Resolves when the request carrying this patch
- * settles; `null` values reset a key to the engine's default. */
-export function patchSettingsSchema(patch: Record<string, unknown>): Promise<void> {
+ * settles; `null` values reset a key to the engine's default.
+ *
+ * `applyNow` additionally restarts idle engine children so the change
+ * reaches the session the user is looking at, instead of only the next one
+ * they start. Settings panels leave it off; a composer control that claims
+ * to change THIS conversation must set it. */
+export function patchSettingsSchema(patch: Record<string, unknown>, options?: { applyNow?: boolean }): Promise<void> {
   pendingSchemaPatch = { ...pendingSchemaPatch, ...patch };
-  if (schemaTimer) clearTimeout(schemaTimer);
+  if (options?.applyNow) pendingSchemaApplyNow = true;
+  clearTimeout(schemaTimer ?? undefined);
   schemaTimer = setTimeout(() => { void flushSchemaPatch(); }, SCHEMA_COALESCE_MS);
-  return new Promise((resolve, reject) => schemaWaiters.push({ resolve, reject }));
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  schemaWaiters.push({ resolve, reject });
+  return promise;
 }
 
 export interface ConfigWriter {

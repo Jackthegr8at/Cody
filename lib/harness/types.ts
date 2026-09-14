@@ -176,6 +176,10 @@ export interface EngineSetting {
    * while working in a browser. Labelled rather than hidden: the same file
    * still drives the CLI the user runs in a Cody terminal. */
   terminalOnly?: boolean;
+  /** A caveat about how THIS front end changes the setting's behaviour: the
+   * engine takes a different path when driven over RPC than from its own
+   * terminal. Rendered beside the control, in warning colour. */
+  codyNote?: string;
   /** A credential-shaped leaf (api_key, token, secret, password). The schema
    * route never sends its value — only whether one is set — and the panel
    * renders it write-only, masked. Never echoed back to a browser. */

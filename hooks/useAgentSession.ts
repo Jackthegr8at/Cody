@@ -71,6 +71,7 @@ import {
   parseSubagentProgress,
   parseSubagentProgressEvent,
   parseSubagentSnapshot,
+  withModelHandoff,
   type SubagentActivityEvent,
   type SubagentInfo,
   type SubagentSnapshotLike,
@@ -612,6 +613,11 @@ const AUTO_NAME_MAX_ATTEMPTS = 2;
 /** Model-switch toasts explain a mid-run change of engine behavior — worth a
  * slow read, so they stay up far longer than the 4s default. */
 const MODEL_SWITCH_TOAST_MS = 10_000;
+/** How long routing events are collected before they are delivered as one
+ * message. Long enough to catch a retry and the fallback it caused (and
+ * several subagents failing together), short enough that the notice still
+ * arrives while the user is looking at the turn that caused it. */
+const ROUTING_BURST_MS = 1_500;
 const BASH_STATE_RECONCILE_MS = 1_000;
 // A cold `omp --mode rpc-ui` spawn (extension + skill + LSP discovery) can take
 // far longer than a few seconds, and the SSE route may only answer once the
@@ -1295,7 +1301,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           byId.set(entry.id, entry);
           continue;
         }
-        byId.set(entry.id, { ...existing, ...entry });
+        byId.set(entry.id, withModelHandoff(existing, entry));
       }
       // Preserve insertion order (chronological): live frames arrive as they
       // happen and existing entries keep their position on update. Sorting by
@@ -2327,6 +2333,40 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [addNotice, clearSmartModelProvenance, refreshLiveModelState, setSmartModelProvenance, writeModelSwitchPending]);
   dispatchPendingModelSwitchRef.current = () => { void dispatchPendingModelSwitch(); };
 
+  // Routing events arrive in bursts — a retry, its fallback, a second job's
+  // fallback, three subagents recovering at once — and each one used to
+  // raise its own toast. Six toasts in ten seconds is not six pieces of
+  // information; it is none. They are collected briefly and delivered as
+  // ONE message. A lone event still reads exactly as it did before.
+  const routingBurstRef = useRef<{ timer: ReturnType<typeof setTimeout> | null; entries: { message: string; kind: "info" | "success"; silent: boolean }[] }>({ timer: null, entries: [] });
+
+  const flushRoutingBurst = useCallback(() => {
+    const burst = routingBurstRef.current;
+    burst.timer = null;
+    const entries = burst.entries;
+    burst.entries = [];
+    if (entries.length === 0) return;
+    if (entries.length === 1) {
+      const [only] = entries;
+      if (!only.silent) toast[only.kind](only.message, undefined, { durationMs: MODEL_SWITCH_TOAST_MS, clamp: true });
+      addNotice({ type: only.kind, message: only.message });
+      return;
+    }
+    const message = entries.map((entry) => entry.message).join("\n");
+    const summary = translate("agentSession.routingSummary", { count: String(entries.length) });
+    // The detail stays in the transcript, where it can be read at leisure;
+    // the toast only says how much happened and points at it.
+    if (entries.some((entry) => !entry.silent)) toast.info(summary, undefined, { durationMs: MODEL_SWITCH_TOAST_MS, clamp: true });
+    addNotice({ type: "info", message: `${summary}\n${message}` });
+  }, [addNotice]);
+
+  const queueRoutingNotice = useCallback((message: string, kind: "info" | "success", silent: boolean) => {
+    const burst = routingBurstRef.current;
+    burst.entries.push({ message, kind, silent });
+    clearTimeout(burst.timer ?? undefined);
+    burst.timer = setTimeout(() => flushRoutingBurst(), ROUTING_BURST_MS);
+  }, [flushRoutingBurst]);
+
   const announceFallbackApplied = useCallback((attribution: ModelFallbackAttribution, from: string, to: string) => {
     const reason = retryErrorByJobRef.current.get(fallbackJobKey(attribution.job));
     const message = fallbackAppliedMessage(attribution, from, to, reason);
@@ -2334,16 +2374,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setAutoModelSwitch({ from, to, role: attribution.role, reason, job: attribution.job, forSession: sessionIdRef.current });
       setSmartPinnedModel(null);
     }
-    toast.info(message, undefined, { durationMs: MODEL_SWITCH_TOAST_MS, clamp: true });
-    addNotice({ type: "info", message });
-  }, [addNotice]);
+    // A subagent's switch already has a home in the subagent panel; it is
+    // recorded in the transcript but never interrupts.
+    queueRoutingNotice(message, "info", attribution.job.kind !== "main");
+  }, [queueRoutingNotice]);
 
   const announceFallbackSucceeded = useCallback((attribution: ModelFallbackAttribution, model: string) => {
     retryErrorByJobRef.current.delete(fallbackJobKey(attribution.job));
-    const message = fallbackSucceededMessage(attribution, model);
-    toast.success(message, undefined, { durationMs: MODEL_SWITCH_TOAST_MS });
-    addNotice({ type: "success", message });
-  }, [addNotice]);
+    queueRoutingNotice(fallbackSucceededMessage(attribution, model), "success", attribution.job.kind !== "main");
+  }, [queueRoutingNotice]);
 
   // Declared after addNotice: the dependency array below is evaluated during
   // render, so addNotice must already be initialized.

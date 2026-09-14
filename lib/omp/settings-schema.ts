@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { findOmpPackageRoot, loadOmpPackageSource, ompPackageVersion } from "./package-source";
-import { isTerminalOnlySetting } from "./settings-surface";
+import { isTerminalOnlySetting, settingNoteFor } from "./settings-surface";
 
 /**
  * Cody renders OMP's settings from OMP's own schema rather than a hand-kept
@@ -60,6 +60,9 @@ export interface OmpSetting {
   /** Configures the harness's terminal UI only, so changing it does nothing
    * while working in Cody. See ./settings-surface.ts. */
   terminalOnly?: boolean;
+  /** A Cody-specific caveat: the engine behaves differently when driven over
+   * RPC than it does from its own terminal. See ./settings-surface.ts. */
+  codyNote?: string;
 }
 
 export interface OmpSettingsSchema {
@@ -162,6 +165,7 @@ function normalize(schemaModule: Record<string, unknown>, source: OmpSettingsSch
       ...(uiMeta.ordered === true ? { ordered: true } : {}),
       ...(typeof uiMeta.condition === "string" ? { condition: uiMeta.condition } : {}),
       ...(isTerminalOnlySetting(key) ? { terminalOnly: true } : {}),
+      ...(settingNoteFor(key) ? { codyNote: settingNoteFor(key) } : {}),
     });
   }
   if (settings.length === 0) return null;

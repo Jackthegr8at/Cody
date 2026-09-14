@@ -1,6 +1,7 @@
 import { listOmpCredentials } from "../harness/omp-credentials";
-import { applyCredentialOrder } from "./credential-order";
+import { applyCredentialBlocks, applyCredentialOrder } from "./credential-order";
 import { fetchOmpUsageSnapshot, unavailableUsageSnapshot } from "./omp-usage";
+import { ALIBABA_TOKEN_PLAN_PROVIDER, fetchAlibabaTokenPlanUsage, type AlibabaUsageResult } from "./alibaba-usage";
 import type { UsageSnapshot } from "./types";
 
 /**
@@ -9,17 +10,44 @@ import type { UsageSnapshot } from "./types";
  * Settings naming the same account "Primary"). The store read is best-effort
  * and adds one helper spawn per cache refresh, not per request; a failure
  * leaves the engine's own ordering exactly as it was.
+ *
+ * Providers the ENGINE cannot report are merged in here, so every consumer
+ * — ring, popup, availability, routing — keeps reading exactly one snapshot.
+ * Alibaba's Token Plan is the first: omp has no usage provider for it, but
+ * the plan itself reports a 5-hour and a weekly window through Alibaba's
+ * own CLI (see alibaba-usage.ts). Its absence is carried as a REASON rather
+ * than silence, so the UI can offer to connect it instead of showing a gap.
  */
 async function loadUsageSnapshot(): Promise<UsageSnapshot> {
-  const snapshot = await fetchOmpUsageSnapshot();
-  if (!snapshot.available) return snapshot;
-  try {
-    const stored = await listOmpCredentials();
-    if (stored.available) return applyCredentialOrder(snapshot, stored.credentials);
-  } catch {
-    // Ordering is a nicety; quota numbers are the point of this read.
+  const [engine, alibaba] = await Promise.all([
+    fetchOmpUsageSnapshot(),
+    fetchAlibabaTokenPlanUsage().catch((): AlibabaUsageResult => ({ unavailable: true, reason: "failed" })),
+  ]);
+  let snapshot = engine;
+  if (snapshot.available) {
+    try {
+      const stored = await listOmpCredentials();
+      if (stored.available) {
+        // Order first (it assigns credentialId), then blocks, which are
+        // keyed by that id.
+        snapshot = applyCredentialBlocks(applyCredentialOrder(snapshot, stored.credentials), stored.credentials);
+      }
+    } catch {
+      // Ordering is a nicety; quota numbers are the point of this read.
+    }
   }
-  return snapshot;
+  if ("account" in alibaba) {
+    // A provider the engine cannot see still makes the snapshot available:
+    // otherwise a machine with only a Token Plan would report "no quota".
+    return { ...snapshot, available: true, accounts: [...snapshot.accounts, alibaba.account] };
+  }
+  return {
+    ...snapshot,
+    unavailableProviders: [
+      ...(snapshot.unavailableProviders ?? []),
+      { provider: ALIBABA_TOKEN_PLAN_PROVIDER, reason: alibaba.reason },
+    ],
+  };
 }
 
 /**

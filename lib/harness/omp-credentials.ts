@@ -25,7 +25,8 @@ export interface OmpCredentialRemoval { removed: boolean; providerRemoved: boole
 interface ListRequest { operation: "list"; packageRoot: string; agentDir: string }
 interface RemoveRequest { operation: "remove"; packageRoot: string; agentDir: string; provider: string; credentialId: number }
 interface RemoveProviderRequest { operation: "remove_provider"; packageRoot: string; agentDir: string; provider: string }
-type HelperRequest = ListRequest | RemoveRequest | RemoveProviderRequest;
+interface UnblockRequest { operation: "unblock"; packageRoot: string; agentDir: string; credentialId: number }
+type HelperRequest = ListRequest | RemoveRequest | RemoveProviderRequest | UnblockRequest;
 const HELPER_TIMEOUT_MS = 15_000;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 
@@ -130,4 +131,38 @@ export async function removeOmpProvider(provider: string, deps: OmpCredentialBri
   const agentDir = deps.agentDir?.() ?? getAgentDir();
   const frame = await invoke({ operation: "remove_provider", packageRoot, agentDir, provider }, deps);
   return normalizeRemoval(frame, "remove_provider");
+}
+
+export interface OmpCredentialUnblock {
+  cleared: { scope: string | null; until: string | null }[];
+  code?: string;
+  message?: string;
+}
+
+/**
+ * Clear omp's rate-limit blocks for one credential.
+ *
+ * A block lives in omp's own store, separate from the usage API, and can
+ * outlast the condition that wrote it — an account reporting 4% used can be
+ * blocked for five hours after a single 429, during which every turn falls
+ * back to another provider. Clearing it costs nothing if the provider is
+ * genuinely limiting: the next request writes the block straight back.
+ */
+export async function unblockOmpCredential(credentialId: number, deps: OmpCredentialBridgeDeps = {}): Promise<OmpCredentialUnblock> {
+  const unavailable = deps.packageRoot ? null : bridgeUnavailable();
+  const packageRoot = deps.packageRoot?.() ?? findOmpPackageRoot();
+  if (unavailable || !packageRoot) return { cleared: [], code: "unsupported", message: unavailable ?? "OMP's installed package source is unavailable; credential blocks cannot be cleared by this installation." };
+  const agentDir = deps.agentDir?.() ?? getAgentDir();
+  const frame = await invoke({ operation: "unblock", packageRoot, agentDir, credentialId }, deps);
+  if (!frame || frame.type !== "unblock" || frame.ok !== true) {
+    return { cleared: [], code: safeString(frame?.code) ?? "unsupported", message: safeString(frame?.message) ?? "Clearing the rate-limit block failed." };
+  }
+  const cleared = Array.isArray(frame.cleared)
+    ? frame.cleared.flatMap((entry): { scope: string | null; until: string | null }[] => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const row = entry as Record<string, unknown>;
+        return [{ scope: safeString(row.scope), until: safeString(row.until) }];
+      })
+    : [];
+  return { cleared };
 }

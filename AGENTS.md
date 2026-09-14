@@ -1936,6 +1936,82 @@ handled or safely ignored.
   (`components/settings/SystemUpdates.tsx`) present the update notification
   alongside copyable terminal update commands.
 
+### Usage-aware routing: one registry, blackouts, role binding (`lib/routing/`)
+
+Quota telemetry becomes a routing decision in exactly one place, and every
+surface reads that answer. The order is the design:
+**observe → remember → bind roles → bind agents**, run once per usage poll
+from `app/api/usage/route.ts` (`lib/routing/request.ts` gathers only what is
+already cheap; `reconcileRouting` is omp-gated and never throws).
+
+- **`lib/usage/availability.ts` is the single verdict.** Built on
+  `select.ts`'s primitives, never a second matching dialect. Two rules are
+  load-bearing: **unknown is usable** (a provider reporting no quota — an
+  API key, a local endpoint — must never be routed around; only positive
+  evidence blocks a model), and **exhaustion is per SERVING account** (a
+  spent idle sibling says nothing). An exhausted untiered window takes its
+  own tiers down with it: 5% left on the Fable bucket is unreachable when
+  the account-wide weekly window is spent.
+- **A block is a harder fact than a percentage, and it lives in a different
+  store.** omp writes `auth_credential_blocks` when a provider answers with
+  a limit and then refuses to send on that credential; `omp usage --json`
+  knows nothing about it. Measured on a live install: an Anthropic account
+  reporting **4% used** was blocked for five hours, so the ring showed
+  headroom while every turn fell back — and the Token Plan key was blocked
+  for six days while reporting nothing at all. `applyCredentialBlocks`
+  (lib/usage/credential-order.ts) folds blocks in as exhausted untiered
+  windows, synthesizing an account for a blocked credential whose provider
+  reports no usage (an API key) — otherwise it stays invisible and keeps
+  being chosen. `POST /api/usage/unblock` clears a stale block (admin-only,
+  via `bin/cody-omp-credentials.mjs unblock`); it is safe because a provider
+  that is still limiting re-writes the block on the next request.
+- **Blackouts are remembered, with the provider's own reset as the expiry**
+  (`lib/routing/route-memory.ts`, `cody-route-memory.json`, 0600, atomic).
+  A quiet or failed telemetry read reports nothing, and "nothing" reads as
+  usable — which is how a session dials an account that has been spent for
+  days, every turn. A `credits` blackout (prepaid: OpenRouter) has **no
+  expiry**: money does not return on a timer, so it clears only when a read
+  sees a positive balance, and a FAILED balance read is never a zero one.
+- **Roles follow the quota** (`lib/routing/role-binding.ts`). When a role's
+  configured model is blacked out, Cody re-points `modelRoles.<role>` at the
+  first entry of the USER's own `retry.fallbackChains` that is not — never
+  re-sorted by utilization, because a chain is a preference — and stores
+  their assignment as `baseline` to restore verbatim. The user always wins:
+  an assignment that no longer matches what Cody wrote is adopted as the new
+  baseline. Nothing usable in the chain means the role is left exactly as
+  configured; inventing a destination the user never listed is not Cody's
+  call.
+- **Subagents must resolve through a ROLE, not a model name**
+  (`lib/routing/agent-roles.ts`). In omp's `resolveEffectiveAgentModelSelection`,
+  `role` is `undefined` for any source that is not a `@alias` — and the role
+  is what keys the child's inherited retry-fallback chain, so a concrete pin
+  means **no chain at all**, however carefully `retry.fallbackChains.task`
+  was written. Worse, a pin that resolves to nothing falls through to
+  `activeModelPattern`: ask an Opus session for a cheap subagent and every
+  spawn silently runs on Opus. Cody writes `task.agentModelOverrides`
+  (which outranks agent frontmatter) as aliases — `luna → @smol`,
+  `scout → @smol`, `task → @task`, … — filling gaps and repairing pins it
+  can PROVE are broken (unresolvable against the cached catalog, or blacked
+  out). A working concrete pin, an alias the user wrote, and an `on`/`off`
+  value are left untouched; with no cached catalog no pin is ever judged
+  unresolvable.
+- **Trap — `retry.usageAwareFallback` behaves differently under Cody.**
+  omp's `turn-recovery.ts` computes
+  `shouldFallback = depleted || policy === "auto" || !confirmer`, and
+  `setUsageFallbackConfirmer` is wired only by the ACP agent and the
+  interactive TUI controller — never by `--mode rpc-ui`, which is how Cody
+  drives omp. So "Confirm interactively" cannot ask anyone and always
+  answers yes: any model inside the reserve margin switches away silently.
+  Surfaced as a warning clause on the setting itself
+  (`SETTING_NOTES` in lib/omp/settings-surface.ts → `OmpSetting.codyNote`,
+  rendered by SchemaSettingsList), kept honest by settings-surface.test.mjs.
+- **Routing notices are coalesced** (`ROUTING_BURST_MS`, useAgentSession):
+  fallback-applied/succeeded events collect for 1.5 s and deliver ONE toast
+  plus one notice. A lone event keeps its old wording; a subagent-attributed
+  switch raises no toast at all (it already has a home in the subagent
+  panel). The composer's persistent `autoModelSwitch` marker is unchanged —
+  it is the durable signal.
+
 ### Model orchestration: roles, plans, chains, resets
 - **OMP defaults and role scope.** With no `modelRoles` in config.yml, OMP owns role resolution. Its nine canonical built-in roles are `default`, `task`, `plan`, `slow`, `smol`, `tiny`, `commit`, `advisor`, and `vision`; no removed or custom role is implicit. Preserve saved custom-role mappings. “Reset to OMP defaults” deletes only Cody's overrides: `DELETE /api/model-roles` drops `modelRoles`, `DELETE /api/omp-settings` `{sections:["retry"]}` removes the retry section, and `DELETE /api/model-plan` removes the plan's roles, fallback chains, and usage-aware flag while preserving unrelated retry tuning. Deletion allow-lists live in `lib/omp/settings-config.ts` (`RESETTABLE_SECTIONS`/`RESETTABLE_PATHS`).
 - **Live config takes a restart.** An OMP child reads config.yml at spawn (only subagent preflight reloads it), so plan apply and every reset call `restartIdleRpcSessions()` (rpc-manager): idle children reconnect on demand with the new config; running turns complete on their old config. Responses carry `{restarted, active}` for the UI to announce the result.

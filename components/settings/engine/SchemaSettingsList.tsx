@@ -360,6 +360,11 @@ export function SchemaSettingRow({ row, index }: { row: SchemaRow; index: Schema
       control={(
         <>
           {!inline && control}
+          {row.codyNote && (
+            <div style={{ fontSize: 11, lineHeight: 1.45, color: "var(--status-warning)", marginBottom: 6 }}>
+              {row.codyNote}
+            </div>
+          )}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
             <span style={{ display: "inline-flex", alignItems: "center", gap: 4, minWidth: 0, flexWrap: "wrap" }}>
               <code style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono, monospace)", minWidth: 0, overflowWrap: "anywhere" }}>{row.key}</code>

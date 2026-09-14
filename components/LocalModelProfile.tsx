@@ -6,14 +6,17 @@ import { nativeOptionStyle, nativeSelectStyle } from "./settings/primitives";
 
 export type PromptProfileId = "full" | "compact" | "minimal";
 export type PromptProfileOverride = PromptProfileId | "auto";
-export interface LocalModelProfileSelection { provider: string; modelId: string; override: PromptProfileOverride; resolvedProfile: PromptProfileId; appliedProfile: PromptProfileId | null; appliesOnNextProviderCall: boolean; }
+export interface LocalModelProfileSelection { provider: string; modelId: string; isLocal: boolean; override: PromptProfileOverride; resolvedProfile: PromptProfileId; appliedProfile: PromptProfileId | null; appliesOnNextProviderCall: boolean; }
 export interface LocalModelProfileBody { overrides: { default: PromptProfileOverride; models: Record<string, PromptProfileOverride> }; selection?: LocalModelProfileSelection; }
 const PROFILE_IDS: readonly PromptProfileId[] = ["full", "compact", "minimal"];
 export function promptProfileLabel(t: (key: string) => string, profile: PromptProfileId | PromptProfileOverride): string { return t(`localModelProfile.${profile}`); }
 
 export function PromptProfileIndicator({ selection, isMobile, onOpen }: { selection?: LocalModelProfileSelection; isMobile: boolean; onOpen: () => void }) {
   const { t } = useI18n();
-  if (!selection) return null;
+  // A non-local model can only ever resolve to "full" (lib/local-model-profile-runtime.ts
+  // short-circuits on anything but a confirmed local endpoint), so the chip would be a
+  // permanent no-op occupying composer width. Show it only where a profile can differ.
+  if (!selection || !selection.isLocal) return null;
   const applied = selection.appliedProfile;
   const state = applied ? t("localModelProfile.applied") : t("localModelProfile.nextLaunch");
   const label = selection.appliesOnNextProviderCall && applied

@@ -2,6 +2,7 @@ import { withModelRuntimeError } from "@/lib/models-cache";
 import { requireEngine } from "@/lib/engine-guard";
 import { getHarness } from "@/lib/harness";
 import { loadFullCatalog } from "@/lib/model-catalog-full";
+import { seedPayAsYouGoPricesOnce } from "@/lib/model-pricing-overlay";
 import { EMPTY_MODELS, loadEffectiveModelsCached, SESSION_SCOPED_MODELS } from "@/lib/models-effective";
 
 export const dynamic = "force-dynamic";
@@ -34,6 +35,12 @@ export async function GET(req: Request) {
     // engine that does not speak the rpc dialect has no global catalog: it
     // gets an honest empty one, never a neighbour's.
     if (!harness.rpcUi) return Response.json(SESSION_SCOPED_MODELS);
+    // omp prices a prepaid plan's models at zero, so every Qwen turn reads
+    // as free. Seeding the published pay-as-you-go rates into models.yml
+    // makes omp itself report a real cost, with the real token split. Once
+    // per process, never over a rate the user set, and a failure here must
+    // not cost the caller its catalog.
+    seedPayAsYouGoPricesOnce(harness.id);
     // No allow-list filtering here on purpose: OMP already applied
     // `enabledModels` to this response, using glob semantics Cody must not
     // reimplement (see lib/model-allow-list.ts). What arrives IS the effective

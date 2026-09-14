@@ -83,9 +83,14 @@ function SubagentActivityLine({ subagent }: { subagent: SubagentInfo }) {
   const context = ctxTokens
     ? `${ctxTokens}/${formatTokens(progress?.contextWindow) ?? "?"}`
     : null;
+  // A handoff (task prewalk switching the child to the cheap model at its
+  // first edit) is otherwise invisible: the chip would simply start naming
+  // a different model with nothing to say why.
+  const handoffFrom = subagent.modelHandoff ? shortModel(subagent.modelHandoff.from) : null;
   const model = shortModel(progress?.resolvedModel);
-  const modelAndReasoning = model
-    ? progress?.thinkingLevel ? model + " · " + thinkingLevelLabel(progress.thinkingLevel, t) : model
+  const modelLabel = handoffFrom && model ? `${handoffFrom} ⇢ ${model}` : model;
+  const modelAndReasoning = modelLabel
+    ? progress?.thinkingLevel ? modelLabel + " · " + thinkingLevelLabel(progress.thinkingLevel, t) : modelLabel
     : null;
   const duration = subagent.source === "history" ? formatDuration(progress?.durationMs) : null;
   const meta: ReactNode[] = [

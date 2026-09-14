@@ -110,4 +110,9 @@ export interface UsageSnapshot {
   /** Per-window capacity for every provider that reported one, keyed by
    * provider id. Absent (rather than empty) when omp reported none at all. */
   capacity?: Record<string, UsageProviderCapacity[]>;
+  /** Providers that could not be read at all, with a machine-readable
+   * reason. Distinct from a provider reporting nothing: this is "Cody knows
+   * a quota exists here and could not see it", which the UI turns into a
+   * connect-this hint rather than silence. */
+  unavailableProviders?: { provider: string; reason: string }[];
 }

@@ -405,4 +405,30 @@ export interface SubagentInfo {
   result?: SubagentHistoryResult;
   /** Roster origin: live frames/snapshots (default) vs on-disk history. */
   source?: "live" | "history";
+  /**
+   * The child changed model WHILE RUNNING — which in practice means omp's
+   * task prewalk handed it off to the cheap model at its first edit/write.
+   * Recorded as an observation, not as a prewalk-specific frame: omp emits
+   * a plain `model_changed` for the handoff, and a running child changing
+   * model IS the event worth showing either way.
+   */
+  modelHandoff?: { from: string; to: string; at: string };
+}
+
+/**
+ * The merged subagent, with a model handoff recorded when the incoming
+ * frame names a different resolved model than the one already running.
+ *
+ * Only a change BETWEEN two known models counts: a child reporting its
+ * model for the first time has not handed off, and an absent value in a
+ * later frame is missing telemetry, not a switch back. An earlier handoff
+ * is kept unless a newer one supersedes it, so the chip still says what
+ * happened after the child settles.
+ */
+export function withModelHandoff(existing: SubagentInfo, incoming: SubagentInfo): SubagentInfo {
+  const merged = { ...existing, ...incoming };
+  const from = existing.progress?.resolvedModel;
+  const to = incoming.progress?.resolvedModel;
+  if (!from || !to || from === to) return merged;
+  return { ...merged, modelHandoff: { from, to, at: new Date().toISOString() } };
 }

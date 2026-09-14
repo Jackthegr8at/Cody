@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth/http";
 import { getHarness } from "@/lib/harness";
 import { getUsageSnapshot } from "@/lib/usage/cache";
+import { reconcileRoutingForRequest } from "@/lib/routing/request";
 import type { UsageSnapshot } from "@/lib/usage/types";
 
 /**
@@ -42,7 +43,16 @@ export async function GET(request: Request) {
     // read rather than being handed the entry it came to replace — otherwise
     // every poll lands after the TTL and reports "may be out of date" forever.
     const snapshot = await getUsageSnapshot({ awaitFresh: true });
-    return NextResponse.json(snapshot, { headers: { "Cache-Control": "no-store" } });
+    // One read, one routing decision. Reconciling here rather than on a timer
+    // of its own means the blackout registry, the role bindings and the ring
+    // are always derived from the SAME snapshot — the single-source-of-truth
+    // property the composer, the subagents and the fallback chains all
+    // depend on. It never throws and writes nothing when nothing moved.
+    const routing = await reconcileRoutingForRequest(snapshot);
+    return NextResponse.json(
+      { ...routing.snapshot, routing: { blackouts: routing.blackouts, roleChanges: routing.roleChanges, agentChanges: routing.agentChanges } },
+      { headers: { "Cache-Control": "no-store" } },
+    );
   } catch (error) {
     // getUsageSnapshot is expected to fail soft on its own; this only guards
     // against something more fundamental (e.g. the cache module itself

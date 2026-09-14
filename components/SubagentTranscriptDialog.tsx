@@ -800,6 +800,15 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
                 )}
                 <div style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{currentDetail?.sessionFile ?? subagent.sessionFile ?? subagent.id}</div>
                 <ModelAndReasoningBlock progress={displayProgress} />
+                {subagent?.modelHandoff && (
+                  <div style={{ fontSize: 10.5, color: "var(--text-dim)", marginTop: 2 }}>
+                    {t("chatWindow.subagentModelHandoff", {
+                      from: shortModel(subagent.modelHandoff.from) ?? subagent.modelHandoff.from,
+                      to: shortModel(subagent.modelHandoff.to) ?? subagent.modelHandoff.to,
+                      time: new Date(subagent.modelHandoff.at).toLocaleTimeString(),
+                    })}
+                  </div>
+                )}
                 {historyMeta && (
                   <div style={{ fontSize: 10.5, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginTop: 2 }}>
                     {historyMeta}

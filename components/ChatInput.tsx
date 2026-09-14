@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, Clock, ListChecks, Loader2, Paperclip, Pin, Search, ShieldCheck, SlidersHorizontal, Sparkles, Target, TriangleAlert, Zap, ZapOff } from "lucide-react";
+import { ChevronDown, Footprints, ListChecks, Loader2, Paperclip, Pin, ShieldCheck, SlidersHorizontal, Sparkles, Split, Target, TriangleAlert, Zap, ZapOff } from "lucide-react";
 import type { SessionModeOption } from "@/hooks/useAgentSession";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import { ALL_CAPABILITIES, OMP_ENGINE_ID, type ActiveEngineInfo, type EngineCapabilities } from "./SettingsTabs";
@@ -52,6 +52,8 @@ import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { STORAGE_EVENTS } from "@/lib/storage-keys";
 import { migrateComposerAllowlist, mirrorServerVisibility, modelVisibilityKey, pushRecentModel, readComposerVisibility, type ComposerVisibility } from "@/lib/composer-model-visibility";
 import { useSettingsRoute } from "@/hooks/useSettingsData";
+import { patchSettingsSchema } from "@/hooks/useConfigWriter";
+import { deriveFastModeState } from "@/lib/fast-mode-state";
 import { useSettingsOpener } from "./settings/shell-context";
 import { formatModelDisplayName } from "@/lib/model-display";
 import type { SessionActiveModel } from "@/lib/session-active-models";
@@ -200,8 +202,53 @@ const RING_CIRCUMFERENCE = 2 * Math.PI * 9.5;
 const RING_ABSENT_DASH = "2.5 3.5";
 /** How often the popover re-renders so "updated 2 min ago" stays true. */
 const USAGE_FRESHNESS_TICK_MS = 30_000;
-/** The picker shows a search box once the list is longer than this. */
-const MODEL_SEARCH_ABOVE = 12;
+
+/** One switch inside the model dropdown (Fast, Prewalk, Task prewalk). It
+ * mirrors the Smart and Local-only rows exactly — checkmark slot, glyph,
+ * label over a muted hint — so the panel reads as one list of decisions
+ * rather than a menu with widgets bolted on. */
+function DropdownToggleRow({ icon, label, hint, pressed, pending, isMobile, testId, onToggle }: {
+  icon: React.ReactNode;
+  label: string;
+  hint: string;
+  pressed: boolean;
+  pending: boolean;
+  isMobile: boolean;
+  testId: string;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      className="dropdown-item"
+      type="button"
+      data-testid={testId}
+      aria-pressed={pressed}
+      disabled={pending}
+      onClick={onToggle}
+      style={{
+        display: "flex", alignItems: "flex-start", gap: 8,
+        width: "100%", padding: "7px 12px",
+        minHeight: isMobile ? 44 : undefined,
+        background: pressed ? "var(--bg-selected)" : "transparent",
+        border: "none",
+        color: pressed ? "var(--text)" : "var(--text-muted)",
+        cursor: pending ? "wait" : "pointer", fontSize: 12, textAlign: "left",
+        fontWeight: pressed ? 600 : 400, opacity: pending ? 0.6 : 1,
+      }}
+      onMouseEnter={(event) => { if (!pressed && !pending) event.currentTarget.style.background = "var(--bg-hover)"; }}
+      onMouseLeave={(event) => { if (!pressed) event.currentTarget.style.background = "transparent"; }}
+    >
+      {pressed
+        ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 3 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
+        : <span style={{ width: 10, flexShrink: 0 }} />}
+      {icon}
+      <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+        <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>
+        <span style={{ fontSize: 11, color: "var(--text-dim)", fontWeight: 400, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{hint}</span>
+      </span>
+    </button>
+  );
+}
 
 /** What /api/models/visibility answers; the composer only reads it to keep
  * the browser mirror current. */
@@ -219,12 +266,6 @@ interface NewModelsPeek {
 /** Engines whose retired allowlist this page has already converted, so a
  * re-render or a second composer instance cannot migrate twice. */
 const migratedEngines = new Set<string>();
-
-/** Coarse pointers (phones, tablets) zoom into any input under 16px and stay
- * there; the picker's search box is sized against that. */
-function prefersCoarsePointer(): boolean {
-  return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
-}
 
 function compareModelOptions(collator: Intl.Collator, a: ModelOption, b: ModelOption): number {
   return collator.compare(a.name || a.modelId, b.name || b.modelId)
@@ -2628,10 +2669,98 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [engineId, modelList, visibilitySettled, t]);
 
-  const [modelQuery, setModelQuery] = useState("");
-  useEffect(() => {
-    if (!modelDropdownOpen) setModelQuery("");
-  }, [modelDropdownOpen]);
+  // omp's two prewalk switches, surfaced in the model dropdown. Only the two
+  // values are fetched — the full schema payload is ~550 keys and the
+  // composer loads on every chat.
+  const prewalkSupported = engineId === OMP_ENGINE_ID && capabilities.nativeSettings;
+  const prewalkRoute = useSettingsRoute<{ values?: Record<string, unknown> }>(
+    "/api/omp-settings/schema?values=prewalk.enabled,task.prewalk",
+    { enabled: prewalkSupported, ttlMs: 60_000 },
+  );
+  const [prewalkPending, setPrewalkPending] = useState<string | null>(null);
+  const reloadPrewalk = prewalkRoute.reload;
+  const setPrewalkSetting = useCallback((path: string, value: boolean) => {
+    setPrewalkPending(path);
+    // `applyNow` restarts idle engine children, so the switch reaches the
+    // conversation on screen at its next turn rather than only the next
+    // session — which is what "or in the middle of a session" requires.
+    patchSettingsSchema({ [path]: value }, { applyNow: true })
+      .then(() => reloadPrewalk())
+      .catch((error: unknown) => toast.error(t("chatInput.prewalkSaveFailed"), error instanceof Error ? error.message : String(error)))
+      .finally(() => setPrewalkPending((current) => (current === path ? null : current)));
+  }, [reloadPrewalk, t]);
+
+  // Fast and both prewalk switches are model-ROUTING decisions, so they live
+  // in the model dropdown rather than the controls row — which on a phone has
+  // no width left for them (lib/…/ChatInput: the row is nowrap below 640px).
+  // An unavailable Fast renders NOTHING (see lib/fast-mode-state.ts).
+  const fastState = deriveFastModeState({
+    capable: Boolean(fastModeCapable && onFastModeChange),
+    supported: fastModeSupported,
+    enabled: fastModeEnabled,
+    active: fastModeActive,
+    unavailable: fastModeUnavailable,
+    pending: fastModePending,
+  });
+  const fastRow = fastState !== "unavailable" && onFastModeChange ? (() => {
+    const labels: Record<string, string> = {
+      checking: t("chatInput.fastModeChecking"),
+      requested: t("chatInput.fastModeRequested"),
+      inactive: t("chatInput.fastModeInactive"),
+      unverified: t("chatInput.fastModeUnverified"),
+      off: t("chatInput.fastModeOff"),
+    };
+    const hints: Record<string, string> = {
+      checking: t("chatInput.fastModeCheckingHint"),
+      requested: t("chatInput.fastModeRequestedHint"),
+      inactive: t("chatInput.fastModeInactiveHint"),
+      unverified: t("chatInput.fastModeUnverifiedHint"),
+      off: t("chatInput.fastModeOffHint"),
+    };
+    const warning = fastState === "inactive";
+    return (
+      <DropdownToggleRow
+        testId="fast-mode-toggle"
+        icon={fastState === "checking"
+          ? <Loader2 size={13} strokeWidth={1.8} aria-hidden="true" style={{ flexShrink: 0, marginTop: 2, animation: "spin 0.8s linear infinite" }} />
+          : React.createElement(warning ? TriangleAlert : fastModeEnabled ? Zap : ZapOff, { size: 13, strokeWidth: 1.8, "aria-hidden": true, style: { flexShrink: 0, marginTop: 2, color: warning ? "var(--status-warning)" : fastModeEnabled ? "var(--accent)" : "var(--text-dim)" } })}
+        label={labels[fastState]}
+        hint={hints[fastState]}
+        pressed={Boolean(fastModeEnabled)}
+        pending={Boolean(fastModePending)}
+        isMobile={isMobile}
+        onToggle={() => { if (!fastModePending) onFastModeChange(!fastModeEnabled); }}
+      />
+    );
+  })() : null;
+
+  const prewalkValues = prewalkRoute.data?.values;
+  const prewalkEnabled = prewalkValues?.["prewalk.enabled"] === true;
+  const taskPrewalkEnabled = prewalkValues?.["task.prewalk"] === true;
+  const prewalkRows = prewalkSupported && prewalkValues ? (
+    <>
+      <DropdownToggleRow
+        testId="prewalk-toggle"
+        icon={<Footprints size={13} strokeWidth={1.8} aria-hidden="true" style={{ flexShrink: 0, marginTop: 2, color: prewalkEnabled ? "var(--accent)" : "var(--text-dim)" }} />}
+        label={t("chatInput.prewalk")}
+        hint={t("chatInput.prewalkHint")}
+        pressed={prewalkEnabled}
+        pending={prewalkPending === "prewalk.enabled"}
+        isMobile={isMobile}
+        onToggle={() => setPrewalkSetting("prewalk.enabled", !prewalkEnabled)}
+      />
+      <DropdownToggleRow
+        testId="task-prewalk-toggle"
+        icon={<Split size={13} strokeWidth={1.8} aria-hidden="true" style={{ flexShrink: 0, marginTop: 2, color: taskPrewalkEnabled ? "var(--accent)" : "var(--text-dim)" }} />}
+        label={t("chatInput.taskPrewalk")}
+        hint={t("chatInput.taskPrewalkHint")}
+        pressed={taskPrewalkEnabled}
+        pending={prewalkPending === "task.prewalk"}
+        isMobile={isMobile}
+        onToggle={() => setPrewalkSetting("task.prewalk", !taskPrewalkEnabled)}
+      />
+    </>
+  ) : null;
 
   // Every model the session may pick: the catalog minus what is hidden. The
   // running model stays listed even when hidden, so the label always names
@@ -2653,13 +2782,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     })).sort((a, b) => compareModelOptions(modelCollator, a, b));
   }, [modelList, modelNames, model?.provider, model?.modelId, visibility, modelCollator]);
   const modelOptions = allModelOptions;
-  const showModelSearch = allModelOptions.length > MODEL_SEARCH_ABOVE;
-  const modelNeedle = modelQuery.trim().toLowerCase();
-  const filteredModelOptions = React.useMemo(() => (
-    modelNeedle
-      ? allModelOptions.filter((opt) => opt.name.toLowerCase().includes(modelNeedle) || opt.modelId.toLowerCase().includes(modelNeedle) || opt.provider.toLowerCase().includes(modelNeedle))
-      : allModelOptions
-  ), [allModelOptions, modelNeedle]);
   // Two providers serving a model under one display name (a vendor and a
   // gateway rebadging it) get their provider appended so the rows can be
   // told apart.
@@ -2669,19 +2791,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     return new Set([...counts].filter(([, count]) => count > 1).map(([name]) => name));
   }, [allModelOptions]);
 
-  // Pinned → Recent → one group per provider (sticky headers). The pinned
-  // and recent groups are shortcuts; the provider groups stay complete.
-  const modelGroups: { id: string; kind: "pinned" | "recent" | "provider"; provider: string; options: ModelOption[] }[] = React.useMemo(() => {
-    const byKey = new Map(filteredModelOptions.map((opt) => [`${opt.provider}/${opt.modelId}`, opt]));
-    const groups: { id: string; kind: "pinned" | "recent" | "provider"; provider: string; options: ModelOption[] }[] = [];
-    const pinned = filteredModelOptions.filter((opt) => visibility.pinned.has(`${opt.provider}/${opt.modelId}`));
-    if (pinned.length > 0) groups.push({ id: "pinned", kind: "pinned", provider: "", options: pinned });
-    const recent = visibility.recent
-      .map((key) => byKey.get(key))
-      .filter((opt): opt is ModelOption => Boolean(opt) && !visibility.pinned.has(`${opt!.provider}/${opt!.modelId}`));
-    if (recent.length > 0) groups.push({ id: "recent", kind: "recent", provider: "", options: recent });
+  // PINNED models only, one group per provider. The composer is the place
+  // the user works from, not a catalog browser: everything else lives in
+  // Settings › Models, which is also where an empty list points. The active
+  // model's provider leads so the running model is never a scroll away.
+  const modelGroups: { id: string; provider: string; options: ModelOption[] }[] = React.useMemo(() => {
+    const pinned = allModelOptions.filter((opt) => visibility.pinned.has(`${opt.provider}/${opt.modelId}`));
     const providers = new Map<string, ModelOption[]>();
-    for (const opt of filteredModelOptions) {
+    for (const opt of pinned) {
       const list = providers.get(opt.provider) ?? [];
       list.push(opt);
       providers.set(opt.provider, list);
@@ -2690,9 +2807,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const ordered = providerOrder
       ? [...providerOrder.filter((name) => providers.has(name)), ...names.filter((name) => !providerOrder.includes(name))]
       : names;
-    for (const name of ordered) groups.push({ id: `provider:${name}`, kind: "provider", provider: name, options: providers.get(name) ?? [] });
-    return groups;
-  }, [filteredModelOptions, visibility, providerOrder, modelCollator]);
+    if (model && providers.has(model.provider)) {
+      ordered.splice(ordered.indexOf(model.provider), 1);
+      ordered.unshift(model.provider);
+    }
+    return ordered.map((name) => ({
+      id: `provider:${name}`,
+      provider: name,
+      options: (providers.get(name) ?? []).slice().sort((a, b) => compareModelOptions(modelCollator, a, b)),
+    }));
+  }, [allModelOptions, visibility, providerOrder, modelCollator, model]);
   const modelsByProvider = modelGroups;
   const activeModelHiddenByAdmin = Boolean(model && visibility.instanceHidden.has(`${model.provider}/${model.modelId}`));
 
@@ -3806,24 +3930,27 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         </span>
                       </button>
                     )}
-                    {showModelSearch && (
-                      <div style={{ padding: "6px 8px", background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 6 }}>
-                        <Search size={12} aria-hidden="true" style={{ flexShrink: 0, color: "var(--text-dim)" }} />
-                        <input
-                          type="search"
-                          value={modelQuery}
-                          onChange={(e) => setModelQuery(e.target.value)}
-                          onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setModelDropdownOpen(false); } }}
-                          placeholder={t("chatInput.searchModels")}
-                          aria-label={t("chatInput.searchModels")}
-                          autoFocus={!isMobile}
-                          style={{ flex: 1, minWidth: 0, border: "none", background: "transparent", color: "var(--text)", fontSize: prefersCoarsePointer() ? 16 : 12, outline: "none", padding: "3px 0" }}
-                        />
+                    {(fastRow || prewalkRows) && (
+                      <div style={{ borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
+                        {fastRow}
+                        {prewalkRows}
                       </div>
                     )}
                     {modelsByProvider.length === 0 ? (
-                      <div style={{ padding: "8px 12px", color: "var(--text-dim)", fontSize: 12, whiteSpace: "nowrap" }}>
-                        {showModelsLoading ? t("chatInput.loadingModels") : modelNeedle ? t("chatInput.noMatchingModels") : t("chatInput.noAvailableModels")}
+                      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 4, padding: "8px 12px" }}>
+                        <span style={{ color: "var(--text-dim)", fontSize: 12 }}>
+                          {showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noPinnedModels")}
+                        </span>
+                        {!showModelsLoading && (
+                          <button
+                            type="button"
+                            onClick={() => { setModelDropdownOpen(false); openSettings("models", { sub: "catalog" }); }}
+                            style={{ display: "inline-flex", alignItems: "center", gap: 5, minHeight: isMobile ? 44 : 24, padding: 0, border: "none", background: "transparent", color: "var(--accent)", fontSize: 11.5, fontWeight: 600, cursor: "pointer" }}
+                          >
+                            <Pin size={11} aria-hidden="true" />
+                            {t("chatInput.pinModelsHint")}
+                          </button>
+                        )}
                       </div>
                     ) : modelsByProvider.map((group, gi) => (
                       <div key={group.id}>
@@ -3831,22 +3958,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                           <div style={{
                             display: "flex", alignItems: "center", gap: 6,
                             padding: "6px 12px 4px",
-                            fontSize: 10, fontWeight: 600, color: group.kind === "provider" ? "var(--text-dim)" : "var(--accent)",
+                            fontSize: 10, fontWeight: 600, color: "var(--text-dim)",
                             textTransform: "uppercase", letterSpacing: "0.07em",
                             borderTop: gi > 0 ? "1px solid var(--border)" : "none",
                             background: "var(--bg-panel)",
                           }}>
-                            {group.kind === "pinned"
-                              ? <Pin size={10} aria-hidden="true" style={{ flexShrink: 0 }} />
-                              : group.kind === "recent"
-                                ? <Clock size={10} aria-hidden="true" style={{ flexShrink: 0 }} />
-                                : <ProviderIcon provider={group.provider} size={10} style={{ flexShrink: 0, color: "var(--text-dim)" }} />}
-                            {group.kind === "pinned" ? t("chatInput.pinnedGroup") : group.kind === "recent" ? t("chatInput.recentGroup") : group.provider}
+                            <ProviderIcon provider={group.provider} size={10} style={{ flexShrink: 0, color: "var(--text-dim)" }} />
+                            {group.provider}
                           </div>
                         )}
                         {group.options.map((opt) => {
                           const isActive = opt.modelId === model?.modelId && opt.provider === model?.provider;
-                          const showProvider = duplicateModelNames.has(opt.name) && group.kind !== "provider";
+                          const showProvider = duplicateModelNames.has(opt.name) && modelsByProvider.length === 1;
                           return (
                             <button
                               className="dropdown-item"
@@ -3934,7 +4057,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             )}
 
 
-            {(onThinkingLevelChange || (fastModeCapable && onFastModeChange)) && (
+            {onThinkingLevelChange && (
             <div style={{ display: "inline-flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
             {/* Reasoning level selector stays available during an active run:
                 an accepted change applies to the next model request. */}
@@ -4039,95 +4162,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 )}
               </div>
             )}
-            {fastModeCapable && onFastModeChange && (() => {
-              // The preference and engine state are distinct: a request can be
-              // accepted on the wire without the provider confirming service.
-              const fastState = fastModePending
-                ? "checking"
-                : fastModeActive === true
-                  ? "requested"
-                  : fastModeUnavailable === true
-                    ? "unavailable"
-                    : fastModeEnabled && fastModeActive === false
-                      ? "inactive"
-                      : fastModeSupported === false
-                        ? "unavailable"
-                        : fastModeEnabled
-                          ? "unverified"
-                          : fastModeSupported === true
-                            ? "off"
-                            : "unverified";
-              const fastLabels = {
-                checking: t("chatInput.fastModeChecking"),
-                requested: t("chatInput.fastModeRequested"),
-                inactive: t("chatInput.fastModeInactive"),
-                unavailable: t("chatInput.fastModeUnavailable"),
-                unverified: t("chatInput.fastModeUnverified"),
-                off: t("chatInput.fastModeOff"),
-              };
-              const fastLabel = fastLabels[fastState];
-              const fastTitle = fastState === "requested"
-                ? t("chatInput.fastModeRequestedHint")
-                : fastState === "inactive"
-                  ? t("chatInput.fastModeInactiveHint")
-                  : fastState === "unavailable"
-                    ? t("chatInput.fastModeUnavailableHint")
-                    : fastState === "unverified"
-                      ? t("chatInput.fastModeUnverifiedHint")
-                      : fastState === "checking"
-                        ? t("chatInput.fastModeCheckingHint")
-                        : t("chatInput.fastModeOffHint");
-              const isWarning = fastState === "inactive" || fastState === "unavailable";
-              // On a phone the label is the difference between one row and two,
-              // so it goes and the glyph carries the state the words carried:
-              // accent-on-hover-fill for a live request, a warning triangle for
-              // inactive/unavailable, a struck bolt for a Fast that is simply
-              // off, a plain bolt for support nobody has confirmed, and a
-              // spinner while that is being checked. The full sentence stays in
-              // `title` and `aria-label`.
-              const FastIcon = isWarning ? TriangleAlert : fastState === "off" ? ZapOff : Zap;
-              return (
-                <button
-                  type="button"
-                  data-testid="fast-mode-toggle"
-                  onClick={() => {
-                    if (fastModePending) return;
-                    // Always preserve the ability to turn off an enabled but
-                    // inactive Fast request.
-                    if (fastModeEnabled) {
-                      onFastModeChange(false);
-                      return;
-                    }
-                    if (fastModeUnavailable || fastModeSupported === false) {
-                      toast.info(t("chatInput.fastModeUnavailableHint"));
-                      return;
-                    }
-                    onFastModeChange(true);
-                  }}
-                  disabled={fastModePending}
-                  title={fastTitle}
-                  aria-label={fastLabel}
-                  aria-pressed={Boolean(fastModeEnabled)}
-                  style={{
-                    display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4,
-                    height: isMobile ? 38 : 28,
-                    width: isMobile ? 38 : undefined,
-                    padding: isMobile ? 0 : "0 7px",
-                    background: fastState === "requested" ? "var(--bg-hover)" : "none",
-                    border: "none", borderRadius: 7,
-                    color: fastState === "requested" ? "var(--accent)" : isWarning ? "var(--status-warning)" : "var(--text-muted)",
-                    cursor: fastModePending ? "wait" : "pointer", flexShrink: 0,
-                    opacity: fastModePending ? 0.65 : 1,
-                    transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
-                  }}
-                >
-                  {fastState === "checking"
-                    ? <Loader2 size={isMobile ? 16 : 14} strokeWidth={2} aria-hidden="true" style={{ animation: "spin 0.8s linear infinite" }} />
-                    : <FastIcon size={isMobile ? 16 : 14} strokeWidth={2} aria-hidden="true" />}
-                  {!isMobile && <span style={{ whiteSpace: "nowrap", fontSize: 11, fontWeight: fastState === "requested" ? 600 : 500 }}>{fastLabel}</span>}
-                </button>
-              );
-            })()}
             </div>
             )}
             {/* Agent-mode selector — the engine's own session modes, offered

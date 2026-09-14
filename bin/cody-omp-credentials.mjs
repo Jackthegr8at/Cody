@@ -78,18 +78,44 @@ async function listCredentials(storage) {
   return [...activeRows, ...disabledRows].sort((a, b) => a.id - b.id);
 }
 
+/** Drop every rate-limit block row for one credential.
+ *
+ * A block is omp's own record that a provider refused this credential until
+ * a deadline; it is a SEPARATE store from the usage API and can outlive the
+ * condition that caused it (measured: an Anthropic account reporting 4%
+ * used, blocked for five hours after one 429 — every turn fell back to
+ * another provider while that quota sat unused). Clearing it is safe: if
+ * the provider really is still limiting, the next request writes it again.
+ */
+function unblockCredential(storage, credentialId) {
+  const blocks = storage.listCredentialBlocks([credentialId]);
+  const active = blocks.filter((block) => typeof block.blockedUntilMs === "number" && block.blockedUntilMs > Date.now());
+  if (typeof storage.deleteCredentialBlocks === "function") {
+    storage.deleteCredentialBlocks(credentialId);
+  } else if (typeof storage.deleteCredentialBlock === "function") {
+    for (const block of blocks) storage.deleteCredentialBlock(credentialId, block.providerKey, block.blockScope ?? "");
+  } else {
+    throw new Error("Installed OMP does not expose credential block removal.");
+  }
+  return active.map((block) => ({ scope: block.blockScope || null, until: isoFromEpochMs(block.blockedUntilMs) }));
+}
+
 async function main() {
   let request; try { request = asRecord(JSON.parse(process.argv[2] ?? "")); } catch { return fail("error", "invalid_request", "Malformed credential request."); }
-  const validOp = request && (request.operation === "list" || request.operation === "remove" || request.operation === "remove_provider");
+  const validOp = request && (request.operation === "list" || request.operation === "remove" || request.operation === "remove_provider" || request.operation === "unblock");
   if (!validOp || typeof request.packageRoot !== "string" || typeof request.agentDir !== "string") return fail("error", "invalid_request", "Malformed credential request.");
-  if (request.operation !== "list" && typeof request.provider !== "string") return fail(request.operation, "invalid_request", "A provider id is required.");
-  if (request.operation === "remove" && !(typeof request.credentialId === "number" && Number.isSafeInteger(request.credentialId))) return fail("remove", "invalid_request", "A credential id is required.");
+  if (request.operation !== "list" && request.operation !== "unblock" && typeof request.provider !== "string") return fail(request.operation, "invalid_request", "A provider id is required.");
+  if ((request.operation === "remove" || request.operation === "unblock") && !(typeof request.credentialId === "number" && Number.isSafeInteger(request.credentialId))) return fail(request.operation, "invalid_request", "A credential id is required.");
   let storage;
   try { storage = await loadStorage(request.packageRoot, request.agentDir); } catch (error) { return fail(request.operation, "unsupported", error instanceof Error ? error.message : String(error)); }
   try {
     if (request.operation === "list") {
       let credentials; try { credentials = await listCredentials(storage); } catch (error) { return fail("list", "credential_list_failed", error instanceof Error ? error.message : String(error)); }
       return emit({ type: "list", ok: true, credentials });
+    }
+    if (request.operation === "unblock") {
+      let cleared; try { cleared = unblockCredential(storage, request.credentialId); } catch (error) { return fail("unblock", "credential_unblock_failed", error instanceof Error ? error.message : String(error)); }
+      return emit({ type: "unblock", ok: true, cleared });
     }
     if (request.operation === "remove") {
       let removed; try { removed = await storage.removeCredential(request.provider, request.credentialId); } catch (error) { return fail("remove", "credential_remove_failed", error instanceof Error ? error.message : String(error)); }

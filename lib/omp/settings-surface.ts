@@ -81,6 +81,35 @@ export function isTerminalOnlySetting(key: string): boolean {
   return TERMINAL_ONLY_PREFIXES.some((prefix) => key.startsWith(prefix));
 }
 
+/**
+ * Settings whose BEHAVIOUR differs under Cody — not because Cody ignores
+ * them, but because the engine takes a different path when it is driven
+ * over RPC instead of from its own terminal. Rendered as a warning clause
+ * beside the control.
+ *
+ * Same discipline as the terminal-only list: each entry names a mechanism
+ * that was read in the installed engine's source, never a guess.
+ */
+const SETTING_NOTES: Record<string, string> = {
+  // turn-recovery.ts: `shouldFallback = depleted || policy === "auto" || !confirmer`,
+  // and setUsageFallbackConfirmer is wired only by the ACP agent and the
+  // interactive TUI controller — never by `--mode rpc-ui`, which is how
+  // Cody drives the engine. So "Confirm interactively" cannot ask anyone
+  // here and always answers yes.
+  "retry.usageAwareFallback":
+    "In Cody the engine has no one to ask, so \"Confirm interactively\" behaves as \"Auto-fallback\": any model inside the reserve margin switches away without asking, even when another account for that provider still has quota.",
+  "retry.usageReservePolicy":
+    "\"Confirm interactively\" is unavailable over Cody's connection to the engine and behaves as \"Auto-fallback\".",
+};
+
+/** The Cody-specific caveat for a setting, when one applies. */
+export function settingNoteFor(key: string): string | undefined {
+  return SETTING_NOTES[key];
+}
+
+/** The notes themselves, for the test that keeps them matching the schema. */
+export const SETTING_NOTE_KEYS = Object.keys(SETTING_NOTES);
+
 /** The rules themselves, for the test that keeps them honest. */
 export const TERMINAL_ONLY_RULES = {
   keys: [...TERMINAL_ONLY_KEYS],
