@@ -7,6 +7,8 @@ import { invalidateSessionListCache } from "@/lib/session-reader";
 import { WebRpcError, startRpcSession } from "@/lib/rpc-manager";
 import { createCheckpoint } from "@/lib/checkpoints";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
+import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
+
 import { getRequestUser } from "@/lib/auth/guard";
 import { setSessionOwner } from "@/lib/auth/session-owners";
 import { getHarness } from "@/lib/harness";
@@ -14,7 +16,15 @@ import { engineSessionTitle, getEngineSession, upsertEngineSession } from "@/lib
 import { EngineCommandError } from "@/lib/harness/errors";
 import { configuredLocalRoutingModels, renameSessionLocalRouting, setSessionLocalOnly } from "@/lib/local-model-routing";
 
+/** Same bound as /api/agent/[id]: the browser's prompt frame is capped at
+ * PROMPT_FRAME_BUDGET_BYTES (900 KiB, lib/image-compress.ts), so 4 MiB is
+ * headroom, not a working size. */
+const MAX_NEW_AGENT_REQUEST_BYTES = 4 * 1024 * 1024;
+
 function newSessionErrorResponse(error: unknown) {
+  if (error instanceof RequestBodyTooLargeError) {
+    return NextResponse.json({ error: "New session request is too large", code: "request_too_large" }, { status: 413 });
+  }
   if (error instanceof SyntaxError) {
     return NextResponse.json({ error: "Invalid JSON request body", code: "invalid_json" }, { status: 400 });
   }
@@ -38,7 +48,7 @@ function newSessionErrorResponse(error: unknown) {
 // the live model catalog (incl. background discovery) is consulted.
 export async function POST(req: Request) {
   try {
-    const body = await req.json() as { cwd?: string; [key: string]: unknown };
+    const body = await parseJsonWithinLimit<{ cwd?: string; [key: string]: unknown }>(req, MAX_NEW_AGENT_REQUEST_BYTES);
     const { cwd, ...command } = body;
 
     if (!cwd || typeof cwd !== "string") {
@@ -50,6 +60,8 @@ export async function POST(req: Request) {
 
     // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
     const { provider, modelId, toolNames, thinkingLevel, advisor, localOnly, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: string; advisor?: boolean; localOnly?: boolean; [key: string]: unknown };
+    // A stale or forged sessionId must never reach the child RPC.
+    delete promptCommand.sessionId;
     if (typeof promptCommand.type !== "string" || !promptCommand.type.trim()) {
       return NextResponse.json({ error: "command type is required", code: "command_type_required" }, { status: 400 });
     }

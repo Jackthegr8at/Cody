@@ -185,7 +185,10 @@ lib/
                         marketplace.ts pure-Node catalog reader, plugin-cli.ts
                         shared `omp plugin` execFile/JSON helpers)
   agent-client.ts      typed fetch helper for /api/agent commands
-  draft-store.ts       local draft persistence helpers
+  draft-store.ts       composer drafts: in-memory per session key, with the TEXT
+                        mirrored to sessionStorage (`cody:draft:<key>`, 64 K cap)
+                        so a reload or navigation never loses an unsent prompt;
+                        images/files stay in memory only
   image-compress.ts    browser-side source-first batch preparation: exact 900 KiB prompt-frame budget, adaptive WebP fallback, explicit decode/budget errors
   image-attachments.ts defensive server validation for base64 image command payloads (10-image bound)
   context-usage.ts     derives idle/reconnect gauge usage from persisted messages
@@ -927,7 +930,7 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   every binary, because a cache HIT never expires and the companion CLI's bin
   name is not something the installer models.
 - **`HarnessAdapter.verifiedVersion`** is the exact engine version this Cody
-  build was last audited against — every adapter carries one (omp: 18.1.12,
+  build was last audited against — every adapter carries one (omp: 18.1.21,
   claude-agent-acp: 0.73.0, codex-acp: 1.8.0, pi: 0.73.1, hermes: 0.19.0).
   It is shown verbatim on the System hub's engine roster card (Settings ›
   System › Engines) ("Built to vX.Y.Z", served through `/api/engines`), and
@@ -1152,6 +1155,18 @@ setting added upstream appears without a Cody change.
 - `globalThis` survives Next.js hot-reload; plain module-level Map does not.
 - Idle sessions are disposed after a timeout; concurrent `startRpcSession()`
   calls must share a single start promise.
+- **Every ack the wrapper awaits is bounded** (`PROMPT_ACK_TIMEOUT_MS`, 30 s):
+  `RpcProcess.sendCommand` never times out unless told to, and a child that
+  accepts a `prompt` (or the `/mcp list` prompt) but never acks it used to
+  leave `promptRunning` true forever — every later call answered
+  `session_busy` until a restart. On `RpcCommandTimeoutError` the wrapper
+  recycles the child (`destroyAndWait`) and answers `session_unresponsive`;
+  the next request spawns fresh. The bound is on the ACK only, never on the
+  run: omp acks a prompt as soon as it accepts it and the turn reports
+  through events. Pinned in `lib/rpc-manager.test.mjs`.
+- **A fresh spawn never receives a client-supplied session id.**
+  `/api/agent/new` strips `sessionId` from the forwarded command; a stale or
+  forged id would address the wrong session in the child.
 
 ### Agent-driven Preview panel (`lib/preview-url.ts`, `lib/preview-autoopen.ts`)
 - The agent reaches the Preview tab two ways. Deliberately: the `open_preview`

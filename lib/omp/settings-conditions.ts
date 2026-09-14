@@ -24,7 +24,12 @@ export const SETTING_CONDITIONS: Record<string, ConditionRule> = {
   hindsightActive: { key: "memory.backend", equals: "hindsight" },
   mnemopiActive: { key: "memory.backend", equals: "mnemopi" },
   planModeEnabled: { key: "plan.enabled", equals: true },
+  // omp 18.1.17: `plan.autosaveDir` is offered only once autosave is on.
+  planAutosaveEnabled: { key: "plan.autosave", equals: true },
   usageAwareFallbackEnabled: { key: "retry.usageAwareFallback", equals: true },
+  // omp 18.1.17: `tui.vimModeDisplay` is shown only while Vim mode is on. The
+  // rows are terminal-only anyway, but the chip must not outnumber the TUI.
+  vimModeEnabled: { key: "tui.vimMode", equals: true },
   // hasImageProtocol is a terminal capability probe with no web equivalent, so
   // it is deliberately absent and its settings always render.
 };

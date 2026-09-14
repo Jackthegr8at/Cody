@@ -49,6 +49,9 @@ const TERMINAL_ONLY_KEYS = new Set([
   "autocompleteMaxVisible",
   "emojiAutocomplete",
   "paste.largeMenuThreshold",
+  // omp 18.1.17: Up-arrow recall of prompts cleared with Ctrl+C in the TUI
+  // composer; Cody's composer keeps its own drafts (lib/draft-store.ts).
+  "composer.recallClearedDrafts",
   // Desktop/terminal notifications. Cody has its own completion sound.
   "completion.notify",
   "error.notify",
@@ -100,6 +103,15 @@ const SETTING_NOTES: Record<string, string> = {
     "In Cody the engine has no one to ask, so \"Confirm interactively\" behaves as \"Auto-fallback\": any model inside the reserve margin switches away without asking, even when another account for that provider still has quota.",
   "retry.usageReservePolicy":
     "\"Confirm interactively\" is unavailable over Cody's connection to the engine and behaves as \"Auto-fallback\".",
+  // omp 18.1.15 turn-recovery.ts: with `retry.waitForUsageReset` a provider-
+  // stated usage-limit reset is slept through on the ordinary auto-retry path
+  // (`auto_retry_start` with the full delayMs, abortable through the retry
+  // controller), so Cody shows it as a retry countdown and "Abort retry" ends
+  // it. Cody's usage-aware routing (lib/routing) re-points roles around an
+  // exhausted provider before the request is made, so the two mechanisms
+  // disagree about what a spent quota should do.
+  "retry.waitForUsageReset":
+    "In Cody the wait appears as an auto-retry countdown that can last until the provider's reset (hours to a week) and holds subagents; Abort retry ends it. Cody's routing already routes roles around exhausted providers, so leave this off unless you want turns to block instead.",
 };
 
 /** The Cody-specific caveat for a setting, when one applies. */

@@ -13,7 +13,7 @@ import { APP_LOG_SHADOW_NOTE, DEFAULT_LIMIT, MAX_LIMIT, appLogNotice, formatAppL
 import { APP_LOG_LEVELS, type AppLogQuery } from "./logs/types";
 import { invalidateModelsCache } from "./models-cache";
 import { MAX_RPC_FRAME_BYTES } from "./omp/rpc-frame";
-import { RpcCommandError, RpcProcess, type RpcFrame, type RpcProcessLaunch } from "./omp/rpc-process";
+import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame, type RpcProcessLaunch } from "./omp/rpc-process";
 import { readNativeSettings } from "./omp/settings-config";
 import { captureLoopbackScreenshot, ScreenshotError } from "./preview-screenshot";
 import { ProjectTodoError, type TodoDocument, formatTodoForAgent, mutateProjectTodo, parseTodoAgentAction, readProjectTodo, todoAgentActionOperation } from "./project-todo";
@@ -127,6 +127,13 @@ const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
 }, FORGE_HOST_TOOL];
 const SERVER_HOST_TOOL_NAMES = new Set(SERVER_HOST_TOOLS.map((tool) => tool.name));
 const MCP_LIST_TIMEOUT_MS = 15_000;
+/** Cap on the *acknowledgement* of a prompt frame — not on model execution.
+ * omp acks a prompt as soon as it accepts it and the run then reports through
+ * events (agent_start/agent_end), so an ack that never arrives means the child
+ * is wedged: without this the API request (and the UI spinner behind it) would
+ * stay pending forever. Generous enough to cover slow local startup work the
+ * child does before acking. */
+const PROMPT_ACK_TIMEOUT_MS = 30_000;
 
 const RESTARTING_MESSAGE = "This session is restarting. Retry in a moment.";
 
@@ -1316,13 +1323,26 @@ export class AgentSessionWrapper {
     this.mcpListWaiter = waiter;
 
     try {
-      await this.proc.sendCommand({ type: "prompt", message: "/mcp list" });
+      await this.proc.sendCommand({ type: "prompt", message: "/mcp list" }, PROMPT_ACK_TIMEOUT_MS);
       return await output;
     } catch (error) {
+      const expired = error instanceof RpcCommandTimeoutError;
       if (this.mcpListWaiter === waiter) {
         clearTimeout(waiter.timer);
         this.mcpListWaiter = null;
-        waiter.reject(error instanceof Error ? error : new Error(String(error)));
+        waiter.reject(
+          expired
+            ? new WebRpcError("The session stopped responding and was reset.", "session_unresponsive")
+            : error instanceof Error
+              ? error
+              : new Error(String(error)),
+        );
+      }
+      if (expired) {
+        // Nothing on this child will ever resolve the waiter; recycle it like
+        // the prompt-ack timeout path so the next request gets a fresh child.
+        await this.destroyAndWait();
+        throw new WebRpcError("The session stopped responding and was reset.", "session_unresponsive");
       }
       throw error;
     } finally {
@@ -1498,7 +1518,7 @@ export class AgentSessionWrapper {
             message: command.message as string,
             ...(toImageContents(command.images) ? { images: toImageContents(command.images) } : {}),
             ...(streamingBehavior ? { streamingBehavior } : {}),
-          });
+          }, PROMPT_ACK_TIMEOUT_MS);
           // Slash commands fully consumed by a builtin report agentInvoked:false
           // in the ack itself — no prompt_result frame follows.
           if (ack?.agentInvoked === false && !streamingBehavior) {
@@ -1509,6 +1529,14 @@ export class AgentSessionWrapper {
         } catch (error) {
           this.promptRunning = false;
           notifyRunningChange();
+          if (error instanceof RpcCommandTimeoutError) {
+            // The child took the frame but never acked it, so nothing will ever
+            // report this run: recycle it exactly like the mcp-list timeout
+            // path so the next request spawns a fresh child instead of talking
+            // to a wedged one.
+            await this.destroyAndWait();
+            throw new WebRpcError("The session stopped responding and was reset.", "session_unresponsive");
+          }
           throw error;
         }
         return null;
