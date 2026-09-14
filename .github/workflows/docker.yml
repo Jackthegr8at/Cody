@@ -77,7 +77,8 @@ jobs:
           load: true
           tags: cody:smoke
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # A cache write must never be the reason a release does not ship.
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Smoke test the image
         run: |
@@ -304,7 +305,8 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # A cache write must never be the reason a release does not ship.
+          cache-to: type=gha,mode=max,ignore-error=true
 
   # Publishes the GitHub Release that is the image's changelog: the ShipLog
   # plugin on Unraid resolves ghcr.io/nphil/cody to this repo via the

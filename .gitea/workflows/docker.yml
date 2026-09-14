@@ -56,6 +56,21 @@ jobs:
           [ -n "$v" ] || v=$(node -p "require('./package.json').version")
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
+      # The forge runners are small LXCs with a shared host daemon, and every
+      # release leaves an image, a builder and a smoke container behind. A
+      # full disk surfaces as a cryptic buildx error mid-release, so the
+      # space is reclaimed BEFORE the build rather than diagnosed after it.
+      # Only unreferenced data goes: `:latest` and the version tags are
+      # referenced by the registry, and `--filter until=72h` keeps the layer
+      # cache that makes consecutive releases fast. Never fatal.
+      - name: Reclaim runner disk
+        continue-on-error: true
+        run: |
+          docker container prune -f --filter until=6h || true
+          docker image prune -f --filter until=72h || true
+          docker builder prune -f --filter until=72h || true
+          df -h / | tail -1
+
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -77,7 +92,14 @@ jobs:
           load: true
           tags: cody:smoke
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # `ignore-error` is load-bearing, not tidiness. The cache EXPORT runs
+          # after a successful image build, and on the forge's own cache
+          # backend it can fail on its own ("error writing layer blob: failed
+          # to commit cache") — which failed the whole publish job, and with
+          # it the release, for a build that had already succeeded. A cache is
+          # an optimization; it may never be the reason a release does not
+          # ship.
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Smoke test the image
         # The job itself runs in a container on the forge runner while
@@ -348,7 +370,38 @@ jobs:
             org.opencontainers.image.source=https://git.nateshome.net/nphilip89/Cody
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Same rule as the smoke build: never fail a published release on a
+          # cache write.
+          cache-to: type=gha,mode=max,ignore-error=true
+
+      # Every push publishes a `sha-<commit>` tag, and the array filled with
+      # them (46 versions of one image before the first sweep). They exist so
+      # a release can be traced to a commit and so `:latest` can be proved
+      # identical to it — that value expires quickly, while the disk cost
+      # does not. Keeps every semver tag and `:latest` untouched (those are
+      # the rollback path), drops sha- tags beyond the newest few, and never
+      # fails the release.
+      - name: Prune old sha- image tags
+        continue-on-error: true
+        env:
+          FORGE_TOKEN: ${{ secrets.FORGE_REGISTRY_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          api="https://git.nateshome.net/api/v1/packages/$OWNER"
+          versions=$(curl -sf -H "Authorization: token $FORGE_TOKEN" "$api?type=container&limit=200" \
+            | node -e '
+              let raw = ""; process.stdin.on("data", (c) => { raw += c; });
+              process.stdin.on("end", () => {
+                const rows = JSON.parse(raw).filter((r) => r.name === "cody" && r.version.startsWith("sha-"));
+                rows.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+                // Keep the newest few so a just-published run can still be
+                // traced; everything older is archaeology.
+                console.log(rows.slice(3).map((r) => r.version).join("\n"));
+              });') || versions=""
+          for v in $versions; do
+            echo "pruning $v"
+            curl -s -o /dev/null -X DELETE -H "Authorization: token $FORGE_TOKEN" "$api/container/cody/$v" || true
+          done
 
   # Publishes the Gitea Release that is the image's changelog: the ShipLog
   # plugin on Unraid resolves git.nateshome.net/nphilip89/cody to this repo via

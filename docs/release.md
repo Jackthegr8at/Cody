@@ -24,6 +24,29 @@ Everything is driven by `.github/workflows/docker.yml`:
 - **A version release** additionally publishes `ghcr.io/nphil/cody:X.Y.Z`,
   creates/updates the `vX.Y.Z` tag, and publishes a GitHub Release.
 
+
+## Rules the pipeline enforces (learned the hard way)
+
+- **A cache write may never fail a release.** Both builds export with
+  `cache-to: type=gha,mode=max,ignore-error=true`. The export runs *after* a
+  successful image build, and the forge's cache backend can fail on its own
+  (`error writing layer blob: failed to commit cache`) — which failed the
+  publish job, and with it the release, for an image that had already built.
+- **Runner disk is reclaimed before the build, not diagnosed after it.** The
+  forge runners are small LXCs sharing a host daemon, and every release
+  leaves an image, a builder and a smoke container behind. `Reclaim runner
+  disk` prunes unreferenced containers/images/build cache older than the
+  window that keeps consecutive builds fast.
+- **`sha-<commit>` tags are pruned to the newest three.** They exist to tie
+  `:latest` to a commit, which is a short-lived need; 46 versions of one
+  image accumulated on the array before the first sweep. Semver tags and
+  `:latest` are never touched — they are the rollback path.
+- **Never verify against the live agent dir.** A verification server started
+  with only `CODY_ACCOUNTS_DIR` isolated still shares `/data/agent`, so its
+  first `/api/usage` poll reconciled routing and rewrote the owner's
+  `modelRoles`. A throwaway instance MUST set `PI_CODING_AGENT_DIR` to a
+  scratch directory; isolating accounts alone is not isolation.
+
 ## Cutting a release
 
 From a clean, gated `main` checkout (`npm run typecheck && npm run lint &&
