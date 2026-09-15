@@ -1176,7 +1176,8 @@ test("renders pending switch, target reasoning, and attributed fallback detail",
     }),
   );
 
-  assert.match(html, /data-testid="model-switch-pending"[^>]*>[\s\S]*?Switching to Next model at next step/);
+  assert.match(html, /data-testid="model-switch-pending"/);
+  assert.match(html, /title="The current step finishes first\. Your conversation context is kept\."/);
   assert.match(html, />Applying High</);
   assert.match(html, /title="This conversation requested Primary; failed: rate limit; using Fallback."/);
 });

@@ -1396,7 +1396,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
         </div>
         {/* Keep the native scrollbar on touch layouts for direct scrolling;
             ChatMinimap remains visible as the compact position overview. */}
-        <div ref={scrollContainerRef} className={`chat-scroll-region chat-transcript-scroll min-w-0 flex-1 overflow-y-auto pt-6` + (isMobile ? "" : " [scrollbar-width:none]")} style={tuningCssVars}>
+        <div ref={scrollContainerRef} className={`chat-scroll-region chat-transcript-scroll min-w-0 flex-1 overflow-y-auto pt-6` + (isMobile ? "" : " [scrollbar-width:none]")}>
           <div className="chat-transcript-gutter" style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
             <div className="chat-column-frame" style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
               <ExtensionStatusBar statuses={extensionStatuses} />
