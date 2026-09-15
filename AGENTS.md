@@ -98,6 +98,9 @@ app/api/
   auth/**                         omp's provider list + login flow (via RPC); every
                                    route refuses `unsupported` unless omp is active
   cwd/validate/route.ts           POST validate/select a cwd
+  cwd/browse/route.ts             GET list subdirectories of a given path (no auth restriction on parent)
+  cwd/mkdir/route.ts              POST create a folder in a browsable directory
+
   default-cwd/route.ts            POST create ~/omp-cwd-YYYYMMDD
   files/[...path]/route.ts        GET file contents for viewer
   git/status/route.ts             GET repo status + branch/ahead-behind for a cwd
@@ -361,6 +364,10 @@ lib/
   project-todo.ts      .cody/todo.json schema, atomic mutation/history + agent summary
   workspace-tasks.ts   .cody/tasks.json schema validation + grouping
   tool-presets.ts      PRESET_NONE/DEFAULT/FULL + getPresetFromTools()
+  transcript-anchor.ts the reader pin's anchor: what a scrolled-up reader is
+                       looking at, by transcript identity (turn index / part /
+                       block index + offset), captured on scroll and restored
+                       after every commit — see "Chat scroll" below
   types.ts             shared TypeScript types
   normalize.ts         normalizeToolCalls() — field name mismatch between file format and our types
   worktree.ts          project/worktree resolution and git worktree operations
@@ -2009,7 +2016,8 @@ handled or safely ignored.
 
 ### File access allow-list
 - `/api/files` is intentionally not a general filesystem browser. Allowed roots come from session cwds, their resolved project roots, `~/omp-cwd-*`, and roots explicitly added with `allowFileRoot()`.
-- `/api/cwd/validate`, `/api/default-cwd`, and `/api/worktrees` call `allowFileRoot()` when they make a new location browsable.
+- `/api/cwd/validate`, `/api/cwd/browse`, `/api/cwd/mkdir`, `/api/default-cwd`, and `/api/worktrees` call `allowFileRoot()` when they make a new location browsable.
+- **Authorization rule for `/api/cwd/mkdir`**: if a path is browsable via `/api/cwd/browse` (i.e., reachable through user's directory-picker navigation), it can be written to. The old mkdir flow POST'd to `/api/files/ops` (action="mkdir"), which required the parent to already be in `allowedFileRoots` — but a freshly-browsed directory outside allowed-roots would 403. The new route uses the same parent-resolution logic as browse (`resolveDirectory` + authorization), so "Add project" → "browse /tmp" → "New folder" succeeds immediately, registering the created folder as a new allowed root, unifying the authorization model: **one rule for every cwd operation**.
 
 ### Session list caching — new sessions must appear immediately
 - `listAllSessions()` (sidebar, command palette) is cached twice: a 30s TTL
@@ -2034,31 +2042,55 @@ handled or safely ignored.
   `lib/rpc-manager.ts` polls for the file after `agent_start` and re-signals
   the sidebar once it lands.
 
-### Chat scroll-follow
-- `useAgentSession` follows the conversation: the effect depends on both
-  `messages` (boundaries) and `streamState` (every token batch) and throttles
-  to one `requestAnimationFrame` while a run is active (`followScrollFrameRef`).
-- A manual scroll-up sets `completionScrollAllowedRef = false` and disables
-  following until the next prompt; `scrollUserMsgToTop` handles the
-  pending-scroll after sending.
-- **A completion never moves a reader.** The terminal reload replaces
-  `messages` wholesale. Two things make that invisible to someone scrolled
-  up: (1) transcript rows and MessageViews are keyed by ENTRY ID
-  (`turnKeyOf` in ChatWindow's CommittedTranscript, exposed on the DOM as
-  `data-turn-key`), never by array index, so the reload does not remount
-  the rows above the viewport and the browser's own scroll anchoring holds;
-  (2) the arming sites (finishPromptWithoutStream, agent_end) capture an
-  ELEMENT anchor — `captureReaderAnchor()`: the first turn whose bottom is
-  below the container's top edge, and its offset from that edge — and the
-  terminal re-pin layout effect puts that element back at that offset,
-  pre-paint and again a frame later once content-visibility placeholders
-  realize their heights; a pixel `scrollTop` is only the fallback for a key
-  that vanished (a pixel offset lands on different content once the
-  per-turn intrinsic-size estimates above the viewport re-realize, which
-  was the "completion ding scrolled me way up" bug). The restore is NEVER
-  skipped because the reader scrolled recently — that early-out was the
-  other half of the bug; a scroll AFTER the restore still wins as before.
-  Followers get pinned to the bottom instead.
+### Chat scroll: a follower is pinned to the tail, a reader is pinned to their content
+- Two states, one flag (`completionScrollAllowedRef`, "following"). Following:
+  every commit and every content resize re-pins the bottom (`scrollToBottom`
+  "instant" — the follow effect, throttled to one rAF per run; the
+  ResizeObserver; the terminal re-pin layout effect). Reading (the user
+  scrolled up): NO programmatic scroll ever runs; the **reader pin** holds the
+  viewport on the same content instead. Sending a prompt re-engages following.
+- **The reader pin** (`lib/transcript-anchor.ts`, wired in useAgentSession):
+  on every user scroll the anchor is captured — the row at the container's
+  top edge, named by `data-turn-index` (+ `data-turn-part` for a message
+  rendered in slices: `group` / `process` / `answer`), the `data-block-index`
+  inside it, and both offsets — and after EVERY commit (a layout effect with
+  no deps) and on every content resize (the same ResizeObserver) the
+  anchored element is put back at its offset before paint. Identity, not DOM
+  node, is the point: three transitions remount the rows under a reader and
+  browser scroll anchoring lets go at each — `message_end` swaps the
+  streaming bubble for a committed row (thinking collapses), `agent_end`
+  unmounts the bubble and folds the turn into a collapsed process group, and
+  the terminal reload re-keys every tail row from `idx-N` to its entry id —
+  and Safari has no scroll anchoring at all. Measured before: a reader lost
+  282px at turn end with `scrollTop` untouched (the content moved under a
+  pixel restore). After: ≤5px for one frame on desktop, 0px on a phone.
+  The streaming bubble therefore carries `data-turn-index={messages.length}`
+  (the index it will have once committed) and every assistant block gets a
+  `data-block-index` wrapper, so an anchor inside the bubble is found again
+  in the row that replaces it.
+- **Nothing a reader is looking at folds or closes under them.** A run that
+  ends while the user is reading sets `readerHoldsTail`: the last turn stays
+  in its live, unfolded layout until they return to the bottom (`holdLiveTail`
+  into `buildTranscriptUnits`). A thinking box whose auto-expansion ends
+  (the next block starts, or the committed row replaces the bubble) stays
+  open when the anchor names that block and the anchored box was taller than
+  a bare header (`anchorIsInsideOpenBlock`, `TranscriptViewportContext`) —
+  latched as if the user had opened it, so a click still closes it.
+- **Scroll events: intent decides who moved.** wheel / touchstart / keyboard
+  / pointerdown mark intent for 1.2s. Without intent, our own scrolls are
+  told apart by VALUE (an instant write lands on a known `scrollTop`,
+  `expectedScrollTopRef`) or by a short window for a UA-animated one. What
+  remains (a momentum flick past the window, find-in-page, the browser's
+  own anchoring adjustment, a clamp when content below shrank) re-captures a
+  READER's anchor but can never demote a FOLLOWER: a clamp's scroll event is
+  delivered a frame late, by which time new tokens have grown the content
+  and the geometry reads "not at bottom" — measured stranding a follower
+  180px above the tail. Pin corrections are deferred while a touch scroll
+  (finger down, or momentum still delivering events) is in flight.
+- The lazy-load prepend needs no distance-from-end restore any more — the
+  pin holds the reader through it (the old restore ignored content still
+  streaming in at the bottom and ran after paint); only a CLICK on the banner
+  moves the viewport to the loaded page, and re-anchors there.
 - Programmatic smooth scrolling must respect `prefers-reduced-motion`
   (`usePrefersReducedMotion` in `hooks/usePrefersReducedMotion.ts` — also the
   only way to stop SVG SMIL animations, which CSS cannot).

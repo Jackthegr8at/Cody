@@ -526,6 +526,11 @@ interface PromptDialogProps {
   /** Returns an error message to block submission, or null to allow it.
    * Runs on blur and on submit; the message clears as the user types. */
   validate?: (value: string) => string | null;
+  /** Externally supplied error — e.g. a failed async submit — rendered in
+   * the same slot as live validation. Takes a back seat to a live validation
+   * problem with the CURRENT value; cleared by the caller (typically at the
+   * start of the next submit attempt), not automatically on keystroke. */
+  error?: string | null;
   busy?: boolean;
   danger?: boolean;
   onSubmit: (value: string) => void;
@@ -549,6 +554,7 @@ export function PromptDialog({
   cancelLabel,
   initialValue,
   validate,
+  error: externalError,
   busy,
   danger,
   onSubmit,
@@ -557,6 +563,7 @@ export function PromptDialog({
   const [value, setValue] = useState(initialValue ?? "");
   const validation = useFieldValidation(() => (validate ? validate(value) : null));
   const { onChange: clearError, onSubmit: runValidation } = validation;
+  const displayError = validation.error ?? externalError ?? null;
 
   useEffect(() => {
     if (open) setValue(initialValue ?? "");
@@ -575,7 +582,7 @@ export function PromptDialog({
       clearError();
     },
     placeholder,
-    error: validation.error,
+    error: displayError,
     onBlurValidate: validation.onBlur,
     disabled: busy,
   };
@@ -601,7 +608,7 @@ export function PromptDialog({
           }}
           style={{ display: "flex", flexDirection: "column", gap: 16 }}
         >
-          <Field label={label} error={validation.error}>
+          <Field label={label} error={displayError}>
             {secret ? (
               <SecretInput {...inputProps} showLabel="Show" hideLabel="Hide" />
             ) : (
