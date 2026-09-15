@@ -25,6 +25,11 @@ export interface ModalDialogOptions {
   onClose: () => void;
   /** Set false while the dialog markup is not yet mounted (e.g. portal target pending). */
   active?: boolean;
+  /** True while a base-ui Dialog (ConfirmDialog, PromptDialog) is open on top
+   * of this one: Escape then belongs to it. Those dialogs are not on the
+   * stack here, and this handler runs first (document capture), so without
+   * yielding it would close this dialog AND swallow the key. */
+  deferEscape?: boolean;
 }
 
 /**
@@ -34,10 +39,12 @@ export interface ModalDialogOptions {
  * container. Attach the returned ref to the dialog panel and give that
  * element tabIndex={-1} (plus role="dialog" / aria-modal / a label).
  */
-export function useModalDialog<T extends HTMLElement>({ onClose, active = true }: ModalDialogOptions) {
+export function useModalDialog<T extends HTMLElement>({ onClose, active = true, deferEscape = false }: ModalDialogOptions) {
   const containerRef = useRef<T | null>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  const deferEscapeRef = useRef(deferEscape);
+  deferEscapeRef.current = deferEscape;
 
   useEffect(() => {
     if (!active) return;
@@ -53,7 +60,7 @@ export function useModalDialog<T extends HTMLElement>({ onClose, active = true }
     const handleKeyDown = (e: KeyboardEvent) => {
       if (dialogStack[dialogStack.length - 1] !== container) return;
       if (e.key === "Escape") {
-        if (e.isComposing || e.keyCode === 229) return;
+        if (e.isComposing || e.keyCode === 229 || deferEscapeRef.current) return;
         e.preventDefault();
         // Swallow the event: the window-level shortcut handler (Esc = stop
         // agent) must not also fire just because focus sat inside a dialog.

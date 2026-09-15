@@ -1,7 +1,7 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { CompactionProgress } from "@/components/CompactionProgress";
-import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ChevronDown, TriangleAlert, X } from "lucide-react";
 import type { ActivityDisplayMode, AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, ImageContent, SessionInfo, SessionTreeNode, TextContent, ToolCallContent, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
@@ -27,12 +27,9 @@ import type { SessionStatsInfo } from "@/lib/pi-types";
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { resolveAvailableThinkingLevels } from "@/lib/thinking-levels";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
-import {
-  captureScrollDistance,
-  getNextVisibleCount,
-  restoreScrollTop,
-  VISIBLE_PAGE_SIZE,
-} from "@/lib/chat-lazy-load";
+import { getNextVisibleCount, VISIBLE_PAGE_SIZE } from "@/lib/chat-lazy-load";
+import { captureTranscriptAnchor } from "@/lib/transcript-anchor";
+import { TranscriptViewportContext, type TranscriptViewport } from "@/components/TranscriptViewportContext";
 import { formatModelDisplayName } from "@/lib/model-display";
 import { deriveSessionActiveModels } from "@/lib/session-active-models";
 
@@ -410,6 +407,8 @@ interface CommittedTranscriptProps {
    *  messages appended by a running agent cannot slide the viewed messages
    *  out of the window. */
   nearBottom: boolean;
+  /** A run ended while the user was reading: keep the last turn unfolded until they return to the bottom. */
+  holdLiveTail: boolean;
   sentinelRef: React.RefObject<HTMLButtonElement | null>;
   handleLoadMoreClick: () => void;
 }
@@ -525,7 +524,7 @@ function turnClassName(live: boolean, compact: boolean): string {
 const CommittedTranscript = memo(function CommittedTranscript({
   messages, entryIds, conversationMeta, messageRefs, isStreaming, sessionBusy, isNew, forkingEntryId,
   canFork, handleFork, handleNavigate, handleEditContent, modelNames, messageCwd, onOpenFile, sessionId,
-  activityDisplayMode, thinkingDefaultExpanded, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
+  activityDisplayMode, thinkingDefaultExpanded, visibleCount, nearBottom, holdLiveTail, sentinelRef, handleLoadMoreClick,
 }: CommittedTranscriptProps) {
   const { t } = useI18n();
   const { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage } = conversationMeta;
@@ -613,6 +612,8 @@ const CommittedTranscript = memo(function CommittedTranscript({
         <div
           key={`process-${turnKeyOf(unit.userIdx)}-${turnKeyOf(unit.finalAssistantIdx)}`}
           data-turn-key={turnKeyOf(unit.finalAssistantIdx)}
+          data-turn-index={unit.finalAssistantIdx}
+          data-turn-part="group"
           className={turnClassName(live, true)}
           style={turnStyle}
           ref={processRefIdx === undefined ? undefined : messageRefCallback(processRefIdx)}
@@ -624,8 +625,18 @@ const CommittedTranscript = memo(function CommittedTranscript({
             key={activityDisplayMode}
             defaultExpanded={activityDisplayMode === "full" || (thinkingDefaultExpanded && groupHasThinking(messages, unit.processIndices, processBlocks))}
           >
-            {unit.processIndices.map((processIdx) => renderMessage(processIdx, { keyPrefix: "process" }))}
-            {unit.finalProcessMessage && renderMessage(unit.finalAssistantIdx, { keyPrefix: "process-final", messageOverride: unit.finalProcessMessage, showTimestamp: false })}
+            {/* Every row inside the group carries its own identity too, so a
+                reader inside an expanded group anchors on the row, not the group. */}
+            {unit.processIndices.map((processIdx) => (
+              <div key={`process-row-${turnKeyOf(processIdx)}`} data-turn-index={processIdx}>
+                {renderMessage(processIdx, { keyPrefix: "process" })}
+              </div>
+            ))}
+            {unit.finalProcessMessage && (
+              <div data-turn-index={unit.finalAssistantIdx} data-turn-part="process">
+                {renderMessage(unit.finalAssistantIdx, { keyPrefix: "process-final", messageOverride: unit.finalProcessMessage, showTimestamp: false })}
+              </div>
+            )}
           </ProcessDetailsGroup>
         </div>
       );
@@ -636,6 +647,8 @@ const CommittedTranscript = memo(function CommittedTranscript({
       <div
         key={`turn-${turnKeyOf(unit.idx)}`}
         data-turn-key={turnKeyOf(unit.idx)}
+        data-turn-index={unit.idx}
+        data-turn-part={unit.kind === "answer" ? "answer" : undefined}
         className={turnClassName(live, isUserTurn)}
         style={turnStyle}
         ref={refIdx === undefined ? undefined : messageRefCallback(refIdx)}
@@ -647,7 +660,12 @@ const CommittedTranscript = memo(function CommittedTranscript({
 
   const units = useMemo(
     () => {
-      const planned = buildTranscriptUnits(messages, lastAnchorIdx, sessionBusy || isStreaming);
+      // The last turn stays in its live, unfolded layout while the run is on
+      // AND while a reader who watched it end is still scrolled up: folding
+      // it under them would collapse the very content they are reading into
+      // a group (see useAgentSession's readerHoldsTail). It folds the moment
+      // they return to the bottom.
+      const planned = buildTranscriptUnits(messages, lastAnchorIdx, sessionBusy || isStreaming || holdLiveTail);
       if (activityDisplayMode !== "hidden") return planned;
       const visible: TranscriptUnit[] = [];
       for (const unit of planned) {
@@ -666,7 +684,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
       }
       return visible;
     },
-    [messages, lastAnchorIdx, sessionBusy, isStreaming, activityDisplayMode, toolResultsMap],
+    [messages, lastAnchorIdx, sessionBusy, isStreaming, holdLiveTail, activityDisplayMode, toolResultsMap],
   );
 
   // Anchor the render window while the user is reading history: the plain
@@ -754,7 +772,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     agentPhase, liveToolResults, streamDegraded, streamAlert, dismissStreamAlert, retryEventStream, activeGoal, activePlan,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases, planOverlay,
     isNew,
-    sessionIdRef, messagesEndRef, scrollContainerRef,
+    sessionIdRef, messagesEndRef, scrollContainerRef, followingRef, readerAnchorRef, readerHoldsTail,
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, selectSmartModel,
     handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     removeQueuedMessage, promoteQueuedToSteer,
@@ -766,6 +784,9 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     onOpenFile, onOpenPreview, onPreviewUrlsSeen,
   });
   const sessionBusy = agentRunning || bashRunning;
+  // Refs only, so the value is stable for the life of the component and no
+  // block re-renders because the reader scrolled.
+  const transcriptViewport = useMemo<TranscriptViewport>(() => ({ followingRef, anchorRef: readerAnchorRef }), [followingRef, readerAnchorRef]);
 
   useEffect(() => {
     onActiveSubagentCountChange?.(activeSubagentCount);
@@ -836,11 +857,10 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     };
   }, [scrollContainerRef]);
   const sentinelRef = useRef<HTMLButtonElement>(null);
-  const prevScrollDistanceRef = useRef<number | null>(null);
-  // "auto" (observer fired while scrolling) anchors the viewport to the old
-  // content; "click" (user pressed the banner) reveals the loaded messages at
-  // the top of the viewport instead.
-  const loadMoreModeRef = useRef<"auto" | "click">("auto");
+  // Set by a click on the banner: the loaded page is revealed at the top of
+  // the viewport. An auto-load (observer fired while scrolling) reveals
+  // nothing — the reader pin keeps the old content in view.
+  const pendingRevealRef = useRef(false);
 
   // IntersectionObserver on the sentinel banner at the top of the message
   // list. When the user scrolls near the top, load the next page of older
@@ -857,9 +877,10 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
         // (the capture happens before the scroll, and the restore pins the
         // viewport to the top of the last page until every page is loaded).
         if (entries[0]?.isIntersecting && container.scrollTop > 0) {
-          // Save distance from top before prepending to restore scroll later
-          prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
-          loadMoreModeRef.current = "auto";
+          // The reader pin holds the viewport on the content the reader is
+          // looking at through the prepend (useAgentSession), so nothing is
+          // captured here; the old distance-from-end restore ignored content
+          // still streaming in at the bottom and ran after paint.
           setVisibleCount((prev) => getNextVisibleCount(prev));
         }
       },
@@ -872,43 +893,34 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     return () => observer.disconnect();
   }, [visibleCount, messages.length, scrollContainerRef]);
 
-  // After visibleCount increases (more messages prepended), restore the
-  // scroll position so the viewport doesn't jump.
-  useEffect(() => {
-    if (prevScrollDistanceRef.current == null) return;
+  // After a CLICK on the banner loaded a page, reveal it: the reader pin kept
+  // the previous content in view through the prepend, so move the viewport
+  // up to the loaded messages — and re-anchor there, or the next commit's pin
+  // would drag the viewport straight back.
+  useLayoutEffect(() => {
+    if (!pendingRevealRef.current) return;
+    pendingRevealRef.current = false;
     const container = scrollContainerRef.current;
     if (!container) return;
-    if (loadMoreModeRef.current === "click") {
-      // Explicit request: reveal the loaded page. The browser's scroll
-      // anchoring already kept the previous content in view, so move the
-      // viewport up to the loaded messages.
-      const sentinel = sentinelRef.current;
-      if (sentinel) {
-        // More pages remain: place the banner's bottom edge just above the
-        // viewport so the newest loaded message is at the top.
-        const containerRect = container.getBoundingClientRect();
-        const sentinelRect = sentinel.getBoundingClientRect();
-        container.scrollTop = container.scrollTop + (sentinelRect.bottom - containerRect.top) + 1;
-      } else {
-        // Everything loaded — the banner unmounted; show the top of the session.
-        container.scrollTop = 0;
-      }
+    const sentinel = sentinelRef.current;
+    if (sentinel) {
+      // More pages remain: place the banner's bottom edge just above the
+      // viewport so the newest loaded message is at the top.
+      const containerRect = container.getBoundingClientRect();
+      const sentinelRect = sentinel.getBoundingClientRect();
+      container.scrollTop = container.scrollTop + (sentinelRect.bottom - containerRect.top) + 1;
     } else {
-      container.scrollTop = restoreScrollTop(container.scrollHeight, prevScrollDistanceRef.current);
+      // Everything loaded — the banner unmounted; show the top of the session.
+      container.scrollTop = 0;
     }
-    loadMoreModeRef.current = "auto";
-    prevScrollDistanceRef.current = null;
-  }, [visibleCount, scrollContainerRef]);
+    followingRef.current = false;
+    readerAnchorRef.current = captureTranscriptAnchor(container);
+  }, [visibleCount, scrollContainerRef, followingRef, readerAnchorRef]);
 
   const handleLoadMoreClick = useCallback(() => {
-    const container = scrollContainerRef.current;
-    if (container) {
-      // Sentinel value so the restore effect above runs and reveals the page.
-      prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
-    }
-    loadMoreModeRef.current = "click";
+    pendingRevealRef.current = true;
     setVisibleCount((prev) => getNextVisibleCount(prev));
-  }, [scrollContainerRef]);
+  }, []);
   // Push session stats up to AppShell for the top bar.
   // Compare scalar fields to avoid loops from new object identity each render.
   const statsKey = sessionStats
@@ -1402,6 +1414,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
               <ExtensionStatusBar statuses={extensionStatuses} />
               <ExtensionWidgets widgets={aboveEditorWidgets} />
 
+            <TranscriptViewportContext.Provider value={transcriptViewport}>
             <CommittedTranscript
               messages={messages}
               entryIds={entryIds}
@@ -1423,12 +1436,19 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
               thinkingDefaultExpanded={thinkingDefaultExpanded}
               visibleCount={visibleCount}
               nearBottom={nearBottom}
+              holdLiveTail={readerHoldsTail}
               sentinelRef={sentinelRef}
               handleLoadMoreClick={handleLoadMoreClick}
             />
+            {/* The streaming bubble carries the index it will have once
+                committed, so a reader anchored inside it is found again in the
+                committed row that replaces it at message_end. */}
             {streamState.isStreaming && streamState.streamingMessage && (
-              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} toolResults={toolResultsWithLive} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} />
+              <div data-turn-index={messages.length}>
+                <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} toolResults={toolResultsWithLive} sessionId={session?.id ?? sessionIdRef.current ?? undefined} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} />
+              </div>
             )}
+            </TranscriptViewportContext.Provider>
 
             {activityDisplayMode === "compact" && pendingToolHeaders.map((tool) => (
               <div

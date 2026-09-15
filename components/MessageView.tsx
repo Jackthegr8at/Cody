@@ -2,8 +2,11 @@
 
 import { memo, useState, useRef, useEffect, useMemo, useCallback, type ComponentProps, type TransitionEvent } from "react";
 import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, Brain, CircleAlert, CircleSlash, LoaderCircle } from "lucide-react";
+import { useLayoutEffect, useContext } from "react";
 import { MarkdownBody } from "./MarkdownBody";
 import { ClickableImage } from "./ImageLightbox";
+import { TranscriptViewportContext } from "./TranscriptViewportContext";
+import { anchorIsInsideOpenBlock } from "@/lib/transcript-anchor";
 import { translate, useI18n, type Locale } from "@/lib/i18n";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { isEmptyThinkingBlock, isVisibleTranscriptMessage } from "@/lib/message-display";
@@ -44,6 +47,9 @@ const THINKING_DISTILL_INTERVAL_MS = 4_000;
 /** Below this a reply is already its own summary: distilling "Done." costs a
  *  model call and gives back a longer sentence. */
 const REPLY_DISTILL_MIN_CHARS = 400;
+/** A collapsed thinking box is its header alone (~32px); anything taller
+ *  measured at the reader's anchor was an open box. */
+const THINKING_HEADER_MAX_PX = 48;
 
 function formatMessageSize(chars: number): string {
   return chars >= 1_000_000 ? `${(chars / 1_000_000).toFixed(1)} MB` : `${Math.round(chars / 1_000)} KB`;
@@ -436,10 +442,13 @@ function AssistantMessageView({
   const blockItems = (message.content ?? [])
     .map((block, originalIndex) => ({ block, originalIndex }))
     .filter(({ block }) => !isEmptyThinkingBlock(block, { isStreaming }));
+  // Only block types BlockView draws get a wrapper: an empty wrapper would
+  // still take a slot (and a gap) in the column below.
   const visibleBlockItems = blockItems.filter(({ block }) => (
-    activityDisplayMode !== "hidden"
-    || block.type !== "toolCall"
-    || Boolean(toolResults?.get((block as ToolCallContent).toolCallId)?.isError)
+    (block.type === "text" || block.type === "thinking" || block.type === "toolCall")
+    && (activityDisplayMode !== "hidden"
+      || block.type !== "toolCall"
+      || Boolean(toolResults?.get((block as ToolCallContent).toolCallId)?.isError))
   ));
   const blocks = visibleBlockItems.map(({ block }) => block);
   const errorMessage = message.errorMessage?.trim() || null;
@@ -660,17 +669,26 @@ function AssistantMessageView({
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {/* Each block wrapper names the block by its index in the message's
+            content, so a scrolled-up reader's anchor (lib/transcript-anchor)
+            survives the streaming bubble becoming a committed row. */}
         {visibleBlockItems.map(({ block, originalIndex }) => {
           // The distilled body stands in for the reply text only: thinking
           // and tool activity are not a reply and keep rendering as they do
           // today. Later text blocks fold into the one distilled view.
           if (distilledReply !== null && block.type === "text") {
             return originalIndex === distilledTextIndex
-              ? <DistilledReply key={`${entryId ?? "stream"}-distilled`} text={distilledReply} cwd={cwd} onOpenFile={onOpenFile} />
+              ? (
+                <div key={`${entryId ?? "stream"}-distilled`} data-block-index={originalIndex}>
+                  <DistilledReply text={distilledReply} cwd={cwd} onOpenFile={onOpenFile} />
+                </div>
+              )
               : null;
           }
           return (
-            <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block} toolResults={toolResults} isStreaming={isStreaming} isActiveStreamBlock={originalIndex === activeStreamIndex} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} distillThinking={distillThinking} />
+            <div key={`${entryId ?? "stream"}-${originalIndex}`} data-block-index={originalIndex}>
+              <BlockView block={block} toolResults={toolResults} isStreaming={isStreaming} isActiveStreamBlock={originalIndex === activeStreamIndex} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} distillThinking={distillThinking} />
+            </div>
           );
         })}
         {errorMessage && (
@@ -1024,6 +1042,30 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
       .finally(() => setLoading(false));
   }, [expanded, block.deferred, sessionId, entryId, blockIndex, t]);
 
+  // A box the reader is inside does not close under them. Auto-expansion ends
+  // when the next block starts streaming (this instance) or when the
+  // committed row replaces the streaming bubble (a fresh instance that never
+  // saw the stream). Either way, if the reader pin says the container's top
+  // edge is inside THIS block — and the anchored box was taller than a bare
+  // header, i.e. open — the box is latched open as if they had opened it;
+  // a click still closes it. Layout effect: the re-render lands before paint.
+  const viewport = useContext(TranscriptViewportContext);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const autoExpanded = isStreaming === true && isActiveStreamBlock === true;
+  useLayoutEffect(() => {
+    if (autoExpanded || userExpanded !== null || defaultExpanded) return;
+    if (!viewport || viewport.followingRef.current) return;
+    const turn = rootRef.current?.closest<HTMLElement>("[data-turn-index]");
+    const turnIndex = turn ? Number(turn.dataset.turnIndex) : NaN;
+    if (!anchorIsInsideOpenBlock(viewport.anchorRef.current, turnIndex, blockIndex, THINKING_HEADER_MAX_PX)) return;
+    setUserExpanded(true);
+  }, [autoExpanded, userExpanded, defaultExpanded, viewport, blockIndex]);
+  const attachSeen = summary.ref;
+  const attachRoot = useCallback((node: HTMLDivElement | null) => {
+    rootRef.current = node;
+    attachSeen(node);
+  }, [attachSeen]);
+
   const handleOpenChange = (nextOpen: boolean) => {
     beginToggle();
     setUserExpanded(nextOpen);
@@ -1031,7 +1073,7 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
 
   return (
     <div
-      ref={summary.ref}
+      ref={attachRoot}
       className="collapse-box chat-block-in"
       data-expanded={expanded ? "" : undefined}
       data-streaming={isStreaming === true && isActiveStreamBlock === true ? "" : undefined}

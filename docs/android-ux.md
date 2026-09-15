@@ -765,8 +765,9 @@ most important fluidity decision in this document.
 
 Web: 50 messages per page (`VISIBLE_PAGE_SIZE`), an `IntersectionObserver` on a
 sentinel banner with `rootMargin: "400px 0px 0px 0px"` so the next page loads
-*before* the user reaches the top, and `captureScrollDistance` /
-`restoreScrollTop` to keep the viewport anchored across the prepend.
+*before* the user reaches the top; the reader pin (`lib/transcript-anchor.ts`,
+re-asserted after every commit) keeps the viewport on the same content
+across the prepend.
 
 Android: same page size. The sentinel becomes
 `snapshotFlow { lazyListState.layoutInfo }` watching for the first visible

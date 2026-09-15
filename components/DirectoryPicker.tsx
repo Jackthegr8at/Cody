@@ -7,8 +7,10 @@ import { useModalDialog } from "@/hooks/useModalDialog";
 import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
-import { ConfirmDialog } from "@/components/ui/field";
+import { ConfirmDialog, PromptDialog } from "@/components/ui/field";
 import { postFileOp } from "@/lib/file-ops-client";
+import { toast } from "@/components/ui/toast";
+import { findEntryNameProblem } from "@/lib/entry-name";
 
 interface DirectoryEntry {
   name: string;
@@ -56,32 +58,31 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
   const [parentDirectory, setParentDirectory] = useState<string | null>(null);
   const [pathInput, setPathInput] = useState("");
   const [directories, setDirectories] = useState<DirectoryEntry[]>([]);
+  const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
   const [opError, setOpError] = useState<string | null>(null);
-  const [creatingFolder, setCreatingFolder] = useState(false);
-  const [newFolderName, setNewFolderName] = useState("");
-  const [createBusy, setCreateBusy] = useState(false);
+  const [folderDialogOpen, setFolderDialogOpen] = useState(false);
+  const [folderDialogBusy, setFolderDialogBusy] = useState(false);
+  const [folderDialogError, setFolderDialogError] = useState<string | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [renameBusy, setRenameBusy] = useState(false);
   const [deleteBusyPath, setDeleteBusyPath] = useState<string | null>(null);
   const [confirmDeleteEntry, setConfirmDeleteEntry] = useState<DirectoryEntry | null>(null);
   const [confirmDeleteBusy, setConfirmDeleteBusy] = useState(false);
-  const newFolderInputRef = useRef<HTMLInputElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
   const renameCancelRef = useRef(false);
   const dialogRef = useModalDialog<HTMLDivElement>({
     onClose: () => { if (!busy) onCancel(); },
     active: portalTarget !== null,
+    deferEscape: folderDialogOpen || confirmDeleteEntry !== null,
   });
 
   const navigateTo = useCallback(async (directory?: string) => {
     setLoading(true);
     setLoadError(null);
-    setOpError(null);
-    setCreatingFolder(false);
-    setNewFolderName("");
+    setFolderDialogOpen(false);
+    setFolderDialogError(null);
     setRenamingPath(null);
     setConfirmDeleteEntry(null);
     try {
@@ -103,33 +104,53 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
     void navigateTo();
   }, [navigateTo]);
 
-  const startCreateFolder = useCallback(() => {
-    setOpError(null);
-    setNewFolderName("");
-    setCreatingFolder(true);
-    setTimeout(() => newFolderInputRef.current?.focus(), 0);
+  const openFolderDialog = useCallback(() => {
+    setFolderDialogOpen(true);
+    setFolderDialogError(null);
   }, []);
 
-  const commitCreateFolder = useCallback(async () => {
-    const name = newFolderName.trim();
-    if (!name) {
-      setCreatingFolder(false);
-      return;
-    }
-    setCreateBusy(true);
-    setOpError(null);
+  const closeFolderDialog = useCallback(() => {
+    if (folderDialogBusy) return;
+    setFolderDialogOpen(false);
+  }, [folderDialogBusy]);
+
+  const validateFolderName = (name: string): string | null => {
+    if (!name.trim()) return t("directoryPicker.invalidNameEmpty");
+    const problem = findEntryNameProblem(name);
+    if (problem === "dots") return t("directoryPicker.invalidNameDots");
+    if (problem === "slash") return t("directoryPicker.invalidNameSlash");
+    return null;
+  };
+
+  const submitNewFolder = useCallback(async (name: string) => {
+    setFolderDialogBusy(true);
+    setFolderDialogError(null);
     try {
-      const { ok, data } = await postFileOp({ action: "mkdir", path: currentPath, name });
-      if (!ok) throw new Error(formatApiError(data));
-      setCreatingFolder(false);
-      setNewFolderName("");
-      await navigateTo(currentPath);
+      const response = await fetch("/api/cwd/mkdir", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: currentPath, name }),
+      });
+      const data = await response.json() as { path?: string; error?: string; code?: string };
+      if (!response.ok) {
+        if (data.code === "already_exists") {
+          setFolderDialogError(t("directoryPicker.nameExists", { name }));
+        } else if (data.code === "permission_denied") {
+          setFolderDialogError(t("directoryPicker.permissionDenied"));
+        } else {
+          setFolderDialogError(data.error ?? `Failed to create folder (HTTP ${response.status})`);
+        }
+        return;
+      }
+      setFolderDialogOpen(false);
+      await navigateTo(data.path);
+      toast.success(t("directoryPicker.folderCreated"));
     } catch (cause) {
-      setOpError(cause instanceof Error ? cause.message : String(cause));
+      setFolderDialogError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setCreateBusy(false);
+      setFolderDialogBusy(false);
     }
-  }, [currentPath, navigateTo, newFolderName]);
+  }, [currentPath, navigateTo, t]);
 
   const startRename = useCallback((entry: DirectoryEntry) => {
     setOpError(null);
@@ -217,9 +238,13 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
       onClick={(event) => {
         if (event.target === event.currentTarget && !busy) onCancel();
       }}
-      style={{ position: "fixed", inset: 0, zIndex: 1002, display: "flex", alignItems: "center", justifyContent: "center", background: "var(--overlay-backdrop)" }}
+      // Below the shared Dialog layer (components/ui/primitives.tsx: backdrop
+      // 1000, popup 1001): the picker's own PromptDialog / ConfirmDialog must
+      // stack ABOVE this backdrop, or they open invisibly behind it — which is
+      // exactly how "New folder" read as doing nothing.
+      style={{ position: "fixed", inset: 0, zIndex: 999, display: "flex", alignItems: "center", justifyContent: "center", background: "var(--overlay-backdrop)" }}
     >
-      <div className="directory-picker-panel animate-scale-in" ref={dialogRef} role="dialog" aria-modal="true" aria-label={t("directoryPicker.selectDirectory")} tabIndex={-1} style={{ width: 520, maxWidth: "calc(100vw - 16px)", height: "min(620px, calc(100dvh - 16px))", maxHeight: "calc(100dvh - 16px)", display: "flex", flexDirection: "column", overflow: "hidden", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: "var(--radius-modal)", boxShadow: "var(--shadow-modal)", outline: "none" }}>
+      <div className="directory-picker-panel animate-scale-in" ref={dialogRef} role="dialog" aria-modal="true" aria-label={t("directoryPicker.selectDirectory")} tabIndex={-1} style={{ width: "min(520px, calc(100vw - 16px))", height: "min(620px, calc(100dvh - 16px))", maxHeight: "calc(100dvh - 16px)", display: "flex", flexDirection: "column", overflow: "hidden", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: "var(--radius-modal)", boxShadow: "var(--shadow-modal)", outline: "none" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0, padding: "12px 18px", borderBottom: "1px solid var(--border)" }}>
           <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ color: "var(--text)", fontWeight: 700, fontSize: 15 }}>{t("directoryPicker.selectDirectory")}</div>
@@ -260,7 +285,7 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
               setPathInput(event.target.value);
               setLoadError(null);
             }}
-            style={{ minWidth: 0, flex: 1, height: 36, padding: "0 10px", border: "1px solid var(--border)", borderRadius: 6, outline: "none", background: "var(--bg-panel)", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 12, transition: "border-color var(--dur-fast) var(--ease-out-warm)" }}
+            style={{ minWidth: 0, flex: 1, height: 36, padding: "0 10px", border: "1px solid var(--border)", borderRadius: 6, outline: "none", background: "var(--bg-panel)", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", transition: "border-color var(--dur-fast) var(--ease-out-warm)" }}
           />
           <button
             className="directory-picker-action"
@@ -276,12 +301,12 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
           <button
             className="directory-picker-back"
             type="button"
-            onClick={startCreateFolder}
-            disabled={loading || creatingFolder || busy}
+            onClick={openFolderDialog}
+            disabled={loading || busy}
             title={t("directoryPicker.newFolder")}
             aria-label={t("directoryPicker.newFolder")}
-            style={{ width: 36, height: 36, padding: 0, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-hover)", color: "var(--text-muted)", cursor: loading || creatingFolder || busy ? "default" : "pointer", opacity: loading || creatingFolder || busy ? 0.5 : 1, transition: "background-color var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm), opacity var(--dur-fast) var(--ease-out-warm)" }}
-            onMouseEnter={(e) => { if (!loading && !creatingFolder && !busy) { e.currentTarget.style.background = "var(--bg-selected)"; e.currentTarget.style.color = "var(--text)"; } }}
+            style={{ width: 36, height: 36, padding: 0, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-hover)", color: "var(--text-muted)", cursor: loading || busy ? "default" : "pointer", opacity: loading || busy ? 0.5 : 1, transition: "background-color var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm), opacity var(--dur-fast) var(--ease-out-warm)" }}
+            onMouseEnter={(e) => { if (!loading && !busy) { e.currentTarget.style.background = "var(--bg-selected)"; e.currentTarget.style.color = "var(--text)"; } }}
             onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text-muted)"; }}
           >
             <FolderPlus size={16} strokeWidth={1.8} aria-hidden="true" />
@@ -289,30 +314,6 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
         </form>
 
         <div className="directory-picker-list" style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "8px 10px" }}>
-          {creatingFolder && (
-            <div className="directory-picker-entry" style={{ width: "100%", minHeight: isCoarsePointer ? 44 : 30, display: "flex", alignItems: "center", gap: 7, padding: "5px 8px" }}>
-              <FolderIcon />
-              <input
-                ref={newFolderInputRef}
-                type="text"
-                value={newFolderName}
-                autoFocus
-                autoComplete="off"
-                spellCheck={false}
-                placeholder={t("directoryPicker.namePlaceholder")}
-                disabled={createBusy}
-                onChange={(event) => setNewFolderName(event.target.value)}
-                onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
-                  if (event.key === "Enter") { event.preventDefault(); void commitCreateFolder(); }
-                  if (event.key === "Escape") { event.preventDefault(); setCreatingFolder(false); }
-                }}
-                // Blur discards rather than commits (unlike rename below): an
-                // accidental click-away should not silently create a folder.
-                onBlur={() => { if (!createBusy) setCreatingFolder(false); }}
-                style={{ flex: 1, minWidth: 0, height: 24, padding: "0 6px", border: "1px solid var(--accent)", borderRadius: 5, outline: "none", background: "var(--bg)", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11 }}
-              />
-            </div>
-          )}
           {loading ? (
             <div style={{ display: "grid", gap: 6, padding: 8 }} aria-busy="true" aria-label={t("directoryPicker.loadingDirectories")}>
               {Array.from({ length: 7 }).map((_, i) => (
@@ -399,18 +400,21 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
           {(loadError || error || opError) && <div style={{ padding: "8px", color: "var(--status-error)", fontSize: 11 }}>{loadError ?? error ?? opError}</div>}
         </div>
 
-        <div className="directory-picker-footer" style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 10, flexShrink: 0, padding: "10px 18px", borderTop: "1px solid var(--border)" }}>
-          <button className="directory-picker-action" type="button" onClick={onCancel} disabled={busy} style={{ padding: "6px 14px", border: "1px solid var(--border)", borderRadius: 6, background: "none", color: "var(--text-muted)", cursor: busy ? "default" : "pointer", fontSize: 13 }}>{t("directoryPicker.cancel")}</button>
-          <button
-            className="directory-picker-action"
-            type="button"
-            onClick={() => onSelect(currentPath)}
-            disabled={!canSelect}
-            title={hasUncommittedPath ? t("directoryPicker.openPathBeforeSelecting") : t("directoryPicker.selectCurrentDirectory")}
-            style={{ padding: "6px 16px", border: 0, borderRadius: 6, background: "var(--accent)", color: "var(--on-accent)", fontSize: 13, fontWeight: 600, opacity: canSelect ? 1 : 0.6, cursor: canSelect ? "pointer" : "default" }}
-          >
-            {busy ? t("directoryPicker.checking") : t("directoryPicker.selectThisFolder")}
-          </button>
+        <div className="directory-picker-footer" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexShrink: 0, padding: "10px 18px", borderTop: "1px solid var(--border)" }}>
+          <button className="directory-picker-action" type="button" onClick={openFolderDialog} disabled={busy} style={{ padding: "6px 14px", border: "1px solid var(--border)", borderRadius: 6, background: "none", color: "var(--text)", cursor: busy ? "default" : "pointer", fontSize: 13 }}>{t("directoryPicker.newFolder")}</button>
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <button className="directory-picker-action" type="button" onClick={onCancel} disabled={busy} style={{ padding: "6px 14px", border: "1px solid var(--border)", borderRadius: 6, background: "none", color: "var(--text-muted)", cursor: busy ? "default" : "pointer", fontSize: 13 }}>{t("directoryPicker.cancel")}</button>
+            <button
+              className="directory-picker-action"
+              type="button"
+              onClick={() => onSelect(currentPath)}
+              disabled={!canSelect}
+              title={hasUncommittedPath ? t("directoryPicker.openPathBeforeSelecting") : t("directoryPicker.selectCurrentDirectory")}
+              style={{ padding: "6px 16px", border: 0, borderRadius: 6, background: "var(--accent)", color: "var(--on-accent)", fontSize: 13, fontWeight: 600, opacity: canSelect ? 1 : 0.6, cursor: canSelect ? "pointer" : "default" }}
+            >
+              {busy ? t("directoryPicker.checking") : t("directoryPicker.selectThisFolder")}
+            </button>
+          </div>
         </div>
       </div>
       <ConfirmDialog
@@ -423,6 +427,19 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
         danger
         busy={confirmDeleteBusy}
         onConfirm={() => void confirmForceDelete()}
+      />
+      <PromptDialog
+        open={folderDialogOpen}
+        title={t("directoryPicker.newFolderTitle")}
+        label={t("directoryPicker.newFolderLabel")}
+        placeholder={t("directoryPicker.namePlaceholder")}
+        confirmLabel={t("directoryPicker.create")}
+        cancelLabel={t("directoryPicker.cancel")}
+        validate={validateFolderName}
+        error={folderDialogError}
+        busy={folderDialogBusy}
+        onSubmit={(name) => void submitNewFolder(name)}
+        onCancel={closeFolderDialog}
       />
     </div>,
     portalTarget,

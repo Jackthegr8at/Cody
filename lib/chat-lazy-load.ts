@@ -12,11 +12,3 @@ export function getVisibleRenderWindow(totalCount: number, visibleCount: number)
 export function getNextVisibleCount(currentVisibleCount: number, pageSize = VISIBLE_PAGE_SIZE): number {
   return currentVisibleCount + pageSize;
 }
-
-export function captureScrollDistance(scrollHeight: number, scrollTop: number): number {
-  return scrollHeight - scrollTop;
-}
-
-export function restoreScrollTop(scrollHeight: number, savedDistance: number): number {
-  return Math.max(0, scrollHeight - savedDistance);
-}

@@ -69,6 +69,7 @@ import type { HostToolDefinition, HostUriSchemeDefinition, PlanOverlay, RpcAvail
 import { asCount, asNumber, asString, isRecord } from "@/lib/type-guards";
 import { addUsageTotals, aggregateMessageUsage, emptyUsageTotals, usageTokenTotal, type UsageTotals } from "@/lib/session-usage";
 import { SESSION_STORAGE_PREFIXES } from "@/lib/storage-keys";
+import { captureTranscriptAnchor, restoreTranscriptAnchor, type TranscriptAnchor } from "@/lib/transcript-anchor";
 import {
   parseSubagentActivityEvent,
   parseSubagentLifecycle,
@@ -675,6 +676,10 @@ export interface UseAgentSessionOptions {
 export type ThinkingLevelOption = string;
 
 const PROGRAMMATIC_SCROLL_IGNORE_MS = 700;
+// After a touch ends, scroll events that keep arriving within this gap of one
+// another are momentum; a longer silence means the flick is over.
+const TOUCH_MOMENTUM_IDLE_MS = 150;
+const TOUCH_MOMENTUM_MAX_MS = 3000;
 const USER_SCROLL_INTENT_MS = 1200;
 const PROMPT_SETTLE_INITIAL_DELAY_MS = 800;
 const PROMPT_SETTLE_POLL_MS = 600;
@@ -1204,33 +1209,44 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleAgentEventRef = useRef<((event: AgentEvent) => void) | null>(null);
   const initialScrollDoneRef = useRef(false);
   const pendingScrollToUserRef = useRef(false);
+  // "Following": the viewport is pinned to the live tail. False once the user
+  // scrolls up; every programmatic scroll is gated on it, and while it is
+  // false the reader pin below holds the viewport on the same content instead.
   const completionScrollAllowedRef = useRef(true);
   // Non-null while a terminal run-end reload is replacing `messages` AND the
   // user was following at the bottom: holds the pre-reload array identity.
   // While set, follow scrolls stay instant; the layout effect below consumes
   // it before that commit paints.
   const completionRepinFromRef = useRef<AgentMessage[] | null>(null);
-  // The reader's anchor across a terminal reload: the first turn visible at
-  // the container's top edge (by `data-turn-key`, which is the entry id) and
-  // how far its top sits from the container's top. Restoring "that element at
-  // that offset" shows the same content after the reload, whatever the
-  // content-visibility placeholders above it re-estimate their heights as —
-  // a pixel scrollTop cannot, which was the "completion ding scrolled me way
-  // up" bug. `pixel` is the fallback when the keyed element no longer exists.
-  const completionScrollAnchorRef = useRef<{ key: string; offset: number; pixel: number } | null>(null);
-
-  /** Capture the reader's anchor; null when following (a follower is re-pinned instead). */
-  const captureReaderAnchor = useCallback(() => {
-    if (completionScrollAllowedRef.current) return null;
-    const container = scrollContainerRef.current;
-    if (!container) return null;
-    const top = container.getBoundingClientRect().top;
-    for (const turn of container.querySelectorAll<HTMLElement>("[data-turn-key]")) {
-      const rect = turn.getBoundingClientRect();
-      if (rect.bottom <= top) continue;
-      return { key: turn.dataset.turnKey ?? "", offset: rect.top - top, pixel: container.scrollTop };
-    }
-    return { key: "", offset: 0, pixel: container.scrollTop };
+  // The reader pin. Captured on every user scroll while not following and
+  // re-asserted after every commit and every content resize: the content
+  // under the container's top edge stays exactly where the reader put it,
+  // whatever the transcript does underneath — a token batch, a thinking box
+  // opening or closing, the streaming bubble becoming a committed row, the
+  // run's end folding the turn, the reload re-keying it. Named by transcript
+  // identity (lib/transcript-anchor), not by DOM node, so a remount cannot
+  // lose it the way browser scroll anchoring does.
+  const readerAnchorRef = useRef<TranscriptAnchor | null>(null);
+  // The scrollTop our own last instant write landed on. A scroll event at
+  // that value is our echo; any other value with no programmatic window open
+  // is the user (or the browser's own anchoring) and recomputes `following`.
+  const expectedScrollTopRef = useRef<number | null>(null);
+  // Touch scrolling in flight (finger down, or momentum still delivering
+  // scroll events). Pin corrections wait it out: a scrollTop write during
+  // momentum on iOS can end the gesture.
+  const touchActiveRef = useRef(false);
+  const touchEndedAtRef = useRef(0);
+  const lastScrollEventAtRef = useRef(0);
+  // True once a run ended while the user was reading: the finished turn stays
+  // in its live, unfolded layout until they return to the bottom, so the
+  // content they are reading cannot fold away into a collapsed group.
+  const [readerHoldsTail, setReaderHoldsTail] = useState(false);
+  const readerHoldsTailRef = useRef(false);
+  /** A run just ended under a reader: keep the finished turn in its live layout until they return to the bottom. */
+  const holdTailForReader = useCallback(() => {
+    if (completionScrollAllowedRef.current || readerHoldsTailRef.current) return;
+    readerHoldsTailRef.current = true;
+    setReaderHoldsTail(true);
   }, []);
   const executeBashRef = useRef<(command: string, excludeFromContext: boolean) => Promise<void> | undefined>(undefined);
   const userScrollIntentUntilRef = useRef(0);
@@ -2623,11 +2639,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const runError = lastRunErrorRef.current;
     const allowEmptyResponse = slashCommandRunRef.current;
     try {
-      // The reload below replaces `messages` wholesale. A follower must be
-      // re-pinned instantly through the reflow; a reader scrolled up must
-      // keep the exact offset (see the terminal re-pin effect).
+      // The reload below replaces `messages` wholesale. A follower is
+      // re-pinned instantly through the reflow (the terminal re-pin effect);
+      // a reader keeps their place through the reader pin, and the finished
+      // turn stays unfolded under them until they return to the bottom.
       completionRepinFromRef.current = messagesRef.current;
-      completionScrollAnchorRef.current = captureReaderAnchor();
+      holdTailForReader();
       // Pass the fence into loadSession: the pre-check above only guards the
       // start — a next prompt that begins while the reload is in flight must
       // not be overwritten by the finished run's snapshot.
@@ -2676,7 +2693,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       slashCommandRunRef.current = false;
       onAgentEnd?.();
     }
-  }, [addNotice, clearLiveToolResults, dispatchPendingModelSwitch, loadSession, onAgentEnd, refreshSubagentUsage, resetSubagentActivityState]);
+  }, [addNotice, clearLiveToolResults, dispatchPendingModelSwitch, holdTailForReader, loadSession, onAgentEnd, refreshSubagentUsage, resetSubagentActivityState]);
 
   // The engine restarted (container restart, crash) while this client was
   // waiting for a turn: the resumed engine is idle and no agent_end will ever
@@ -3087,9 +3104,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         slashCommandRunRef.current = false;
         if (endedSid) {
           // Same contract as finishPromptWithoutStream: re-pin a follower,
-          // anchor a reader, before the reload's content-visibility reflow.
+          // hold the tail unfolded for a reader.
           completionRepinFromRef.current = messagesRef.current;
-          completionScrollAnchorRef.current = captureReaderAnchor();
+          holdTailForReader();
           void loadSession(endedSid, false, false, endedRunId);
           const endToken = beginAuthoritativeModelSync();
           const endModeSeq = modeSyncSeqRef.current;
@@ -3762,7 +3779,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, beginAuthoritativeModelSync, clearLiveToolResults, consumeQueuedMessage, dispatchPendingModelSwitch, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, resetSubagentActivityState, setLiveToolResult]);
+  }, [addNotice, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, beginAuthoritativeModelSync, clearLiveToolResults, consumeQueuedMessage, dispatchPendingModelSwitch, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, holdTailForReader, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, refreshTodoState, resetSubagentActivityState, setLiveToolResult]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {
@@ -4652,13 +4669,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const container = scrollContainerRef.current;
     const end = messagesEndRef.current;
     if (!container || !end) return;
-    ignoreProgrammaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
     // `behavior: "auto"` falls back to the container's computed
     // `scroll-behavior` (which inherits `html { scroll-behavior: smooth }`),
     // so a per-frame live follow would restart an eased scroll animation
     // every frame — an endless chase that lags the growing content. Callers
     // pass "instant" for live follow; "smooth" stays for idle scrolls.
-    end.scrollIntoView({ block: "nearest", behavior: reducedMotion ? "instant" : behavior });
+    const instant = reducedMotion || behavior === "instant";
+    end.scrollIntoView({ block: "nearest", behavior: instant ? "instant" : behavior });
+    if (instant) {
+      // An instant scroll has landed: its scroll event will report exactly this value.
+      expectedScrollTopRef.current = container.scrollTop;
+    } else {
+      // A UA-animated scroll reports intermediate values we cannot predict; window it.
+      ignoreProgrammaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
+    }
   }, [reducedMotion]);
 
   const markUserScrollIntent = useCallback((event: Event) => {
@@ -4669,27 +4693,81 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     userScrollIntentUntilRef.current = Date.now() + USER_SCROLL_INTENT_MS;
   }, []);
 
+  const handleTouchStart = useCallback(() => {
+    touchActiveRef.current = true;
+    userScrollIntentUntilRef.current = Date.now() + USER_SCROLL_INTENT_MS;
+  }, []);
+  const handleTouchEnd = useCallback(() => {
+    touchActiveRef.current = false;
+    touchEndedAtRef.current = Date.now();
+  }, []);
+  /** A finger is down, or momentum after a flick is still delivering scroll events. */
+  const isTouchScrolling = useCallback(() => {
+    if (touchActiveRef.current) return true;
+    const now = Date.now();
+    return now - touchEndedAtRef.current < TOUCH_MOMENTUM_MAX_MS && now - lastScrollEventAtRef.current < TOUCH_MOMENTUM_IDLE_MS;
+  }, []);
+
+  /** Re-assert the reader pin: the anchored content back at its offset. No-op while following. */
+  const repinReader = useCallback(() => {
+    if (completionScrollAllowedRef.current) return;
+    const container = scrollContainerRef.current;
+    const anchor = readerAnchorRef.current;
+    if (!container || !anchor || isTouchScrolling()) return;
+    if (restoreTranscriptAnchor(container, anchor) !== 0) expectedScrollTopRef.current = container.scrollTop;
+  }, [isTouchScrolling]);
+
   const handleScrollPositionChange = useCallback(() => {
-    const userScrollIntent = Date.now() <= userScrollIntentUntilRef.current;
-    // A user wheel, keyboard, touch, or scrollbar scroll must win over the
-    // timer used to suppress our own scroll events. During a busy stream that
-    // timer is refreshed every frame, so checking it first would trap the user
-    // at the bottom.
-    if (!userScrollIntent && Date.now() < ignoreProgrammaticScrollUntilRef.current) return;
-    if (!userScrollIntent) return;
+    const now = Date.now();
+    lastScrollEventAtRef.current = now;
     const container = scrollContainerRef.current;
     const end = messagesEndRef.current;
     if (!container || !end) return;
+    // A user wheel, keyboard, touch, or scrollbar scroll must win over the
+    // suppression of our own scroll events: during a busy stream those are
+    // issued every frame, so checking them first would trap the user at the
+    // bottom. Our own scrolls are told apart by VALUE (an instant write lands
+    // on a known scrollTop) or, for a UA-animated one, by a short window.
+    // What remains is a scroll no input event announced: a momentum flick
+    // past the intent window, find-in-page, the browser's own anchoring
+    // adjustment, a clamp when content below shrank. For a READER every one
+    // of those must re-capture the anchor, or the pin would drag them back to
+    // where the flick started. A FOLLOWER is never demoted by one: a clamp's
+    // scroll event is delivered a frame late, by which time new tokens have
+    // grown the content again and the geometry reads "not at bottom" —
+    // measured stranding a follower 180px above the tail.
+    const userScrollIntent = now <= userScrollIntentUntilRef.current;
+    if (!userScrollIntent) {
+      if (now < ignoreProgrammaticScrollUntilRef.current) return;
+      const expected = expectedScrollTopRef.current;
+      if (expected !== null && Math.abs(container.scrollTop - expected) <= 1) return;
+      if (completionScrollAllowedRef.current) return;
+    }
     // Recompute even while idle: otherwise the flag stays false after a run
     // ends while the user is scrolled up, and a message that arrives outside
     // a run (queued follow-up, steering reply) would never auto-scroll.
-    completionScrollAllowedRef.current = end.getBoundingClientRect().bottom - container.getBoundingClientRect().bottom <= 24;
+    const following = end.getBoundingClientRect().bottom - container.getBoundingClientRect().bottom <= 24;
+    completionScrollAllowedRef.current = following;
+    if (following) {
+      readerAnchorRef.current = null;
+      if (readerHoldsTailRef.current) {
+        readerHoldsTailRef.current = false;
+        setReaderHoldsTail(false);
+      }
+    } else {
+      readerAnchorRef.current = captureTranscriptAnchor(container);
+    }
   }, []);
 
   // Load session on mount
   useEffect(() => {
     if (session) {
       sessionIdRef.current = session.id;
+      // A session opens at its bottom, whatever the previous one was scrolled to.
+      completionScrollAllowedRef.current = true;
+      readerAnchorRef.current = null;
+      readerHoldsTailRef.current = false;
+      setReaderHoldsTail(false);
       ++compactionGenerationRef.current;
       dispatchCompactionStatus({ type: "reset", sessionId: session.id });
       updateSessionControlScope(session.id, null);
@@ -4813,14 +4891,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const container = scrollContainerRef.current;
     if (!container) return;
     container.addEventListener("wheel", markUserScrollIntent, { passive: true });
-    container.addEventListener("touchstart", markUserScrollIntent, { passive: true });
+    container.addEventListener("touchstart", handleTouchStart, { passive: true });
+    container.addEventListener("touchend", handleTouchEnd, { passive: true });
+    container.addEventListener("touchcancel", handleTouchEnd, { passive: true });
     container.addEventListener("scroll", handleScrollPositionChange, { passive: true });
     return () => {
       container.removeEventListener("wheel", markUserScrollIntent);
-      container.removeEventListener("touchstart", markUserScrollIntent);
+      container.removeEventListener("touchstart", handleTouchStart);
+      container.removeEventListener("touchend", handleTouchEnd);
+      container.removeEventListener("touchcancel", handleTouchEnd);
       container.removeEventListener("scroll", handleScrollPositionChange);
     };
-  }, [hasMessages, loading, handleScrollPositionChange, markUserScrollIntent]);
+  }, [hasMessages, loading, handleScrollPositionChange, markUserScrollIntent, handleTouchStart, handleTouchEnd]);
+
+  // The reader pin, React half: after EVERY commit of the host component —
+  // a token batch, a message boundary swapping the streaming bubble for its
+  // committed row, the run's end, the terminal reload re-keying the tail, a
+  // lazy-loaded page prepending above — put the anchored content back at its
+  // offset before the frame paints. Cheap (one attribute query and one rect)
+  // and a no-op while following.
+  useLayoutEffect(() => {
+    repinReader();
+  });
 
   // Follow the conversation: scroll to the user's latest message when they
   // send one, then keep the newest content in view while the agent streams.
@@ -4862,76 +4954,47 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   //    growing a line, the window resizing — pushing the live tail (status
   //    line, pending tool headers) below the fold: the owner sees it "hidden
   //    behind the composer";
-  //  - the CONTENT grows after commit — deferred tool-result images arriving,
-  //    fonts swapping, collapse animations settling — leaving a followed
-  //    viewport stranded above the true bottom (the stream-end "bounce"
-  //    residue).
-  // Re-pin on either while following; "instant" because an eased chase during
-  // a drag-resize lags the pointer. A user who scrolled up keeps their
-  // position (completionScrollAllowedRef is false).
+  //  - the CONTENT grows or shrinks after commit — deferred tool-result
+  //    images arriving, fonts swapping, a collapse animating frame by frame,
+  //    a content-visibility placeholder realizing its true height.
+  // A follower is re-pinned to the bottom on either ("instant" because an
+  // eased chase during a drag-resize lags the pointer); a reader is re-pinned
+  // to their anchor — the ResizeObserver half of the reader pin, which is
+  // what holds a reader still on Safari (no native scroll anchoring) and
+  // through animations React never commits.
   const transcriptMounted = !loading && (messages.length > 0 || streamState.isStreaming);
   useEffect(() => {
     if (!transcriptMounted || typeof ResizeObserver === "undefined") return;
     const container = scrollContainerRef.current;
     if (!container) return;
     const observer = new ResizeObserver(() => {
-      if (!completionScrollAllowedRef.current) return;
-      scrollToBottom("instant");
+      if (completionScrollAllowedRef.current) scrollToBottom("instant");
+      else repinReader();
     });
     observer.observe(container);
     // The content wrapper is the scroller's only child; its border-box height
     // IS the scrollHeight, so observing it catches late content growth.
     if (container.firstElementChild) observer.observe(container.firstElementChild);
     return () => observer.disconnect();
-  }, [transcriptMounted, scrollToBottom]);
+  }, [transcriptMounted, scrollToBottom, repinReader]);
 
-  // Terminal re-pin. When a run ends, the transcript is reloaded from disk
-  // and `messages` is replaced: the streamed tail unmounts and every turn
-  // re-enters a `.chat-turn` wrapper whose content-visibility placeholder
-  // only realizes its true height as it paints. A smooth scroll issued
-  // against the pre-reload geometry animates toward a stale offset and lands
-  // mid-conversation. Two cases, both handled before this commit paints and
-  // once more a frame later after realized heights settle:
-  //  - the user was FOLLOWING: pin the viewport back to the bottom;
-  //  - the user was READING (scrolled up): restore the exact scrollTop the
-  //    arming site captured. Reading means they want to stay exactly there —
-  //    a completion must never move them. The per-turn intrinsic-size
-  //    estimates make the above-viewport geometry reproducible across the
-  //    reload, so the restored offset shows the same content.
-  // A fresh user wheel/keyboard scroll always wins over the re-assert.
+  // Terminal re-pin for a FOLLOWER. When a run ends, the transcript is
+  // reloaded from disk and `messages` is replaced: the streamed tail unmounts
+  // and every turn re-enters a `.chat-turn` wrapper whose content-visibility
+  // placeholder only realizes its true height as it paints. A smooth scroll
+  // issued against the pre-reload geometry animates toward a stale offset and
+  // lands mid-conversation, so pin the bottom before this commit paints and
+  // once more a frame later after realized heights settle. A reader needs
+  // nothing here: the reader pin already ran for this commit.
   useLayoutEffect(() => {
     const from = completionRepinFromRef.current;
     if (from === null || from === messages) return;
     completionRepinFromRef.current = null;
-    const anchor = completionScrollAnchorRef.current;
-    completionScrollAnchorRef.current = null;
-    if (completionScrollAllowedRef.current) {
-      scrollToBottom("instant");
-      requestAnimationFrame(() => {
-        if (completionScrollAllowedRef.current) scrollToBottom("instant");
-      });
-      return;
-    }
-    if (anchor === null) return;
-    // A reader's restore always runs: skipping it because they scrolled a
-    // moment ago is exactly how the viewport got handed to the browser's own
-    // guess. A NEW scroll after the restore still wins, because the restore
-    // only marks the programmatic-scroll window and never touches intent.
-    const restore = () => {
-      const container = scrollContainerRef.current;
-      if (!container) return;
-      ignoreProgrammaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
-      const turn = anchor.key ? container.querySelector<HTMLElement>(`[data-turn-key="${CSS.escape(anchor.key)}"]`) : null;
-      if (turn) {
-        const delta = (turn.getBoundingClientRect().top - container.getBoundingClientRect().top) - anchor.offset;
-        if (Math.abs(delta) > 0.5) container.scrollTop += delta;
-      } else {
-        container.scrollTop = anchor.pixel;
-      }
-    };
-    restore();
-    // Once more after content-visibility placeholders realize their heights.
-    requestAnimationFrame(restore);
+    if (!completionScrollAllowedRef.current) return;
+    scrollToBottom("instant");
+    requestAnimationFrame(() => {
+      if (completionScrollAllowedRef.current) scrollToBottom("instant");
+    });
   }, [messages, scrollToBottom]);
 
   useEffect(() => () => {
@@ -5071,6 +5134,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Refs
     sessionIdRef, messagesEndRef, scrollContainerRef,
     pendingScrollToUserRef, initialScrollDoneRef,
+    // The reader pin, for the transcript: whether the viewport follows the
+    // tail, what a reader is anchored on, and whether the finished turn must
+    // stay unfolded under them.
+    followingRef: completionScrollAllowedRef, readerAnchorRef, readerHoldsTail,
     // Actions
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, selectSmartModel, selectLocalOnly, handleFastModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply,
     handleCompact, handleHandoff, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
