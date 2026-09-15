@@ -752,7 +752,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     notices, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     permissionRequests, respondToPermission,
     isAutoModelSelection, autoModelSwitch, modelSwitchPending, localOnly, selectLocalOnly,
-    agentPhase, streamDegraded, streamAlert, dismissStreamAlert, retryEventStream, activeGoal, activePlan,
+    agentPhase, liveToolResults, streamDegraded, streamAlert, dismissStreamAlert, retryEventStream, activeGoal, activePlan,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases, planOverlay,
     isNew,
     sessionIdRef, messagesEndRef, scrollContainerRef,
@@ -981,6 +981,22 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
 
     return { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage };
   }, [messages]);
+  // Runtime tool results cover the gap between `tool_execution_start` and the
+  // committed toolResult message. A committed result is authoritative, so it
+  // wins when both maps contain the same call; the live map only supplies
+  // output for calls that have not reached the transcript yet.
+  const toolResultsWithLive = useMemo<Map<string, ToolResultMessage>>(() => {
+    if (liveToolResults.size === 0) return conversationMeta.toolResultsMap;
+    const merged = new Map(liveToolResults);
+    for (const [toolCallId, result] of conversationMeta.toolResultsMap) merged.set(toolCallId, result);
+    return merged;
+  }, [conversationMeta, liveToolResults]);
+  const conversationMetaWithLive = useMemo(
+    () => (toolResultsWithLive === conversationMeta.toolResultsMap
+      ? conversationMeta
+      : { ...conversationMeta, toolResultsMap: toolResultsWithLive }),
+    [conversationMeta, toolResultsWithLive],
+  );
   // The minimap needs one ref slot per user/assistant message — the same set
   // conversationMeta already indexed, so re-filtering `messages` per render
   // (an O(N) pass plus an array allocation on every streaming frame) is waste.
@@ -1390,7 +1406,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
             <CommittedTranscript
               messages={messages}
               entryIds={entryIds}
-              conversationMeta={conversationMeta}
+              conversationMeta={conversationMetaWithLive}
               messageRefs={messageRefs}
               isStreaming={streamState.isStreaming}
               sessionBusy={sessionBusy}
@@ -1412,7 +1428,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
               handleLoadMoreClick={handleLoadMoreClick}
             />
             {streamState.isStreaming && streamState.streamingMessage && (
-              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} sessionId={session?.id ?? sessionIdRef.current ?? undefined} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} />
+              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} toolResults={toolResultsWithLive} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} />
             )}
 
             {activityDisplayMode === "compact" && pendingToolHeaders.map((tool) => (

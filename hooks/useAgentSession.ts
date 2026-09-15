@@ -9,6 +9,7 @@ import type {
   ExtensionWidgetItem,
   SessionInfo,
   SessionTreeNode,
+  ToolResultMessage,
 } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
 import {
@@ -567,6 +568,17 @@ export function toolUpdateStatusText(partialResult: unknown): string | undefined
   return undefined;
 }
 
+/** Keep only tool-result blocks the transcript renderer understands. Engine
+ * event payloads are untrusted, and a malformed live frame must not poison the
+ * committed-message shape or make a render throw. */
+function toolResultContent(value: unknown): ToolResultMessage["content"] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((block): block is Record<string, unknown> => (
+    isRecord(block)
+    && (block.type === "image" || (block.type === "text" && typeof block.text === "string"))
+  )) as unknown as ToolResultMessage["content"];
+}
+
 /**
  * A stream problem the user must be told about, rather than left to infer from
  * a spinner that never stops.
@@ -1053,6 +1065,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return () => window.clearTimeout(timer);
   }, [compactionStatus]);
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
+  // In-flight tool results live outside the committed transcript. omp sends
+  // the complete accumulated snapshot in each update, so the coalesced map
+  // can replace a tool's prior output until its committed toolResult arrives.
+  const [liveToolResults, setLiveToolResults] = useState<Map<string, ToolResultMessage>>(() => new Map());
+  const setLiveToolResult = useCallback((toolCallId: string, result: ToolResultMessage | null) => {
+    setLiveToolResults((prev) => {
+      if (result === null) {
+        if (!prev.has(toolCallId)) return prev;
+        const next = new Map(prev);
+        next.delete(toolCallId);
+        return next;
+      }
+      const next = new Map(prev);
+      next.set(toolCallId, result);
+      return next;
+    });
+  }, []);
+  const clearLiveToolResults = useCallback(() => {
+    setLiveToolResults((prev) => (prev.size === 0 ? prev : new Map()));
+  }, []);
   // Event-stream health, surfaced so a believed-running turn is never rendered
   // as a healthy "Waiting for model…" against a stream that is not delivering.
   const [streamDegraded, setStreamDegraded] = useState(false);
@@ -2625,6 +2657,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       void dispatchPendingModelSwitch();
       setAgentRunning(false);
       setAgentPhase(null);
+      clearLiveToolResults();
       setRetryInfo(null);
       retryErrorByJobRef.current.clear();
       setSubagents([]);
@@ -2643,7 +2676,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       slashCommandRunRef.current = false;
       onAgentEnd?.();
     }
-  }, [addNotice, dispatchPendingModelSwitch, loadSession, onAgentEnd, refreshSubagentUsage, resetSubagentActivityState]);
+  }, [addNotice, clearLiveToolResults, dispatchPendingModelSwitch, loadSession, onAgentEnd, refreshSubagentUsage, resetSubagentActivityState]);
 
   // The engine restarted (container restart, crash) while this client was
   // waiting for a turn: the resumed engine is idle and no agent_end will ever
@@ -2981,6 +3014,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setStreamAlert(null);
         setAgentRunning(true);
         setAgentPhase({ kind: "waiting_model" });
+        clearLiveToolResults();
         dispatch({ type: "start" });
         runHadContentRef.current = false;
         lastQuotaErrorRef.current = null;
@@ -3040,6 +3074,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         void dispatchPendingModelSwitch();
         setAgentRunning(false);
         setAgentPhase(null);
+        clearLiveToolResults();
         setRetryInfo(null);
         retryErrorByJobRef.current.clear();
         setSubagents([]);
@@ -3297,6 +3332,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const text = extractMessageText(completed as Partial<AgentMessage>);
           if (text && isQuotaLikeError(text)) lastQuotaErrorRef.current = text.slice(0, 800);
         }
+        if (completed?.role === "toolResult" && typeof completed.toolCallId === "string") {
+          // The durable result is authoritative; remove the ephemeral entry
+          // before appending so committed and live snapshots cannot race.
+          setLiveToolResult(completed.toolCallId, null);
+        }
         if (completed && completed.role === "user") {
           // Delivered steering/follow-up messages surface here as user
           // messages. The run's initial prompt also emits one, but handleSend
@@ -3360,8 +3400,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "tool_execution_start": {
         assistantProviderCallRef.current = false;
         void dispatchPendingModelSwitch();
-        const id = event.toolCallId as string;
-        const name = event.toolName as string;
+        const id = typeof event.toolCallId === "string" ? event.toolCallId : "";
+        if (!id) break;
+        const name = typeof event.toolName === "string" && event.toolName ? event.toolName : "tool";
+        setLiveToolResult(id, { role: "toolResult", toolCallId: id, toolName: name, content: [], partial: true });
         setAgentPhase((prev) => {
           const tools = prev?.kind === "running_tools" ? [...prev.tools] : [];
           if (!tools.some((t) => t.id === id)) tools.push({ id, name, startedAt: Date.now() });
@@ -3374,7 +3416,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // run_watch reports every CI poll this way). Keep only the newest
         // line per tool — without it a long `write xd://github` watch is
         // indistinguishable from a hang.
-        const id = event.toolCallId as string;
+        const id = typeof event.toolCallId === "string" ? event.toolCallId : "";
+        if (!id) break;
+        const partial = isRecord(event.partialResult) ? event.partialResult : null;
+        const content = toolResultContent(partial?.content);
+        const toolName = typeof event.toolName === "string" && event.toolName ? event.toolName : undefined;
+        setLiveToolResults((prev) => {
+          const existing = prev.get(id);
+          const next = new Map(prev);
+          next.set(id, {
+            role: "toolResult",
+            toolCallId: id,
+            ...(toolName ?? existing?.toolName ? { toolName: toolName ?? existing?.toolName } : {}),
+            content,
+            ...(partial?.isError === true ? { isError: true } : existing?.isError ? { isError: true } : {}),
+            ...(partial?.details !== undefined ? { details: partial.details } : existing?.details !== undefined ? { details: existing.details } : {}),
+            partial: true,
+          });
+          return next;
+        });
         const statusText = toolUpdateStatusText(event.partialResult);
         if (!statusText) break;
         setAgentPhase((prev) => {
@@ -3389,7 +3449,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       case "tool_execution_end": {
         assistantProviderCallRef.current = true;
-        const id = event.toolCallId as string;
+        const id = typeof event.toolCallId === "string" ? event.toolCallId : "";
+        if (!id) break;
+        const finalResult = isRecord(event.result) ? event.result : null;
+        // Keep the last live snapshot visible, but mark it settled, until the
+        // durable toolResult message arrives on the stream.
+        setLiveToolResults((prev) => {
+          const existing = prev.get(id);
+          const next = new Map(prev);
+          next.set(id, {
+            role: "toolResult",
+            toolCallId: id,
+            ...(typeof event.toolName === "string" && event.toolName
+              ? { toolName: event.toolName }
+              : existing?.toolName ? { toolName: existing.toolName } : {}),
+            content: finalResult && Array.isArray(finalResult.content)
+              ? toolResultContent(finalResult.content)
+              : existing?.content ?? [],
+            ...(finalResult?.isError === true || event.isError === true || existing?.isError === true ? { isError: true } : {}),
+            ...(finalResult?.details !== undefined ? { details: finalResult.details } : existing?.details !== undefined ? { details: existing.details } : {}),
+          });
+          return next;
+        });
         if (event.toolName === "todo" && sessionIdRef.current) {
           void reconcileAgentState(sessionIdRef.current);
         }
@@ -3681,7 +3762,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, beginAuthoritativeModelSync, consumeQueuedMessage, dispatchPendingModelSwitch, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, refreshTodoState, resetSubagentActivityState]);
+  }, [addNotice, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, beginAuthoritativeModelSync, clearLiveToolResults, consumeQueuedMessage, dispatchPendingModelSwitch, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, resetSubagentActivityState, setLiveToolResult]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {
@@ -3725,6 +3806,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Optimistic: the stream is opened and the prompt posted below, so the
     // server has not acknowledged this run yet (see runConfirmedRef).
     runConfirmedRef.current = false;
+    clearLiveToolResults();
     setStreamAlert(null);
     setAgentRunning(true);
     setAgentPhase(isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" });
@@ -3822,10 +3904,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       slashCommandRunRef.current = false;
       setAgentRunning(false);
       setAgentPhase(null);
+      clearLiveToolResults();
       dispatch({ type: "end" });
       return false;
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef, refreshSubagentRoster, registerHostTools, registerHostUriSchemes]);
+  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef, refreshSubagentRoster, registerHostTools, registerHostUriSchemes, clearLiveToolResults]);
 
   /** Abort the running agent and send the message as a fresh prompt
    * (abort_and_prompt). Only valid mid-run; the old turn's agent_end is
@@ -3860,6 +3943,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         message: trimmedMessage,
         ...(piImages?.length ? { images: piImages } : {}),
       }, { timeoutMs: PROMPT_SEND_TIMEOUT_MS });
+      clearLiveToolResults();
       return true;
     } catch (e) {
       console.error("Failed to interrupt and reply:", e);
@@ -3881,7 +3965,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setStreamAlert({ kind: "send_failed", detail });
       return false;
     }
-  }, [addNotice, ensureEventsConnected, refreshSubagentRoster]);
+  }, [addNotice, clearLiveToolResults, ensureEventsConnected, refreshSubagentRoster]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;
@@ -4995,6 +5079,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleThinkingLevelChange, handleModeChange, loadSlashCommands, setActiveLeafId, setData, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
+    liveToolResults,
     // Subscriptions
     handleAgentEventRef,
   };

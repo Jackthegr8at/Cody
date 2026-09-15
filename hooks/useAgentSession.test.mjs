@@ -224,6 +224,20 @@ test("todo_auto_update's ungated refresh still fences on the current session", (
   assert.match(cases, /case "todo_auto_update":\s*\n\s*if \(sessionIdRef\.current\) refreshTodoState\(sessionIdRef\.current\);/);
 });
 
+test("live tool results stay separate until committed and merge into the transcript", () => {
+  assert.match(hook, /const \[liveToolResults, setLiveToolResults\] = useState<Map<string, ToolResultMessage>>/);
+  assert.match(hook, /setLiveToolResult\(id, \{ role: "toolResult"[\s\S]*partial: true/);
+  assert.match(hook, /const partial = isRecord\(event\.partialResult\) \? event\.partialResult : null/);
+  assert.match(hook, /completed\?\.role === "toolResult"[\s\S]*setLiveToolResult\(completed\.toolCallId, null\)/);
+  assert.match(hook, /case "tool_execution_end":/);
+  assert.match(hook, /clearLiveToolResults\(\)/);
+  assert.match(hook, /liveToolResults,\s*\/\/ Subscriptions/);
+  assert.match(chatWindow, /const toolResultsWithLive = useMemo/);
+  assert.match(chatWindow, /const conversationMetaWithLive = useMemo/);
+  assert.match(chatWindow, /conversationMeta=\{conversationMetaWithLive\}/);
+  assert.match(chatWindow, /toolResults=\{toolResultsWithLive\}/);
+});
+
 test("quota failures stay visible without treating every streamed message as completion", () => {
   assert.match(hook, /const NOTICE_ERROR_VISIBLE_MS = 30000;/);
   assert.match(hook, /function isQuotaLikeError\(text: string\)/);

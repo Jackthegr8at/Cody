@@ -21,6 +21,7 @@ test("desktop activity stays wired to the titlebar and native shell", async () =
   assert.match(titleBar, /<ActivitySummary activeSessions=\{activeSessions\} activeSubagents=\{activeSubagents\} \/>/);
   assert.match(appShell, /activeSessions=\{activeSessionCount\} activeSubagents=\{activeSubagentCount\}/);
   assert.match(appShell, /onDesktopActivityChange=\{handleDesktopActivityChange\}/);
+  assert.match(appShell, /isDesktop=\{isDesktop\}/);
   assert.match(appShell, /onActiveSubagentCountChange=\{handleActiveSubagentCountChange\}/);
   assert.match(chatWindow, /onActiveSubagentCountChange\?\.\(activeSubagentCount\)/);
   assert.match(sidebar, /onDesktopActivityChange\?\.\(\{/);
@@ -29,6 +30,12 @@ test("desktop activity stays wired to the titlebar and native shell", async () =
   assert.match(sidebar, /completedSessionIds\.forEach\(\(id\) => next\.add\(id\)\)/);
   assert.match(sidebar, /completionId = `session:\$\{sessionId\}`/);
   assert.match(sidebar, /completions: runningStateReady \? desktopCompletions : \[\]/);
+  assert.match(sidebar, /const markSessionRead = useCallback/);
+  assert.match(sidebar, /markSessionRead\(s\.id\)/);
+  assert.match(sidebar, /if \(!isDesktop\) return;/);
+  assert.match(sidebar, /window\.addEventListener\("focus", markSelectedSessionRead\)/);
+  assert.match(sidebar, /document\.addEventListener\("visibilitychange", markSelectedSessionRead\)/);
+  assert.match(sidebar, /document\.visibilityState !== "visible"/);
   assert.doesNotMatch(sidebar, /completedInBackground/);
   assert.match(appShell, /completed: true/);
   assert.match(appShell, /completionKind: completion\.completionKind/);

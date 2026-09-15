@@ -85,6 +85,63 @@ test("streaming tool calls can still start expanded when the preference is disab
   assert.match(html, /<pre/);
 });
 
+test("running tool results show an explicit live state and spinner", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    activityDisplayMode: "full",
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", toolCallId: "call-live", toolName: "bash", input: { command: "long-job" } }],
+    },
+    toolResults: new Map([[
+      "call-live",
+      { role: "toolResult", toolCallId: "call-live", toolName: "bash", content: [], partial: true },
+    ]]),
+  }));
+
+  assert.match(html, /data-tool-state="running"/);
+  assert.match(html, /icon-spin/);
+  assert.match(html, /data-tool-running="true"/);
+});
+
+test("running tool results render the latest partial output before commit", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    activityDisplayMode: "full",
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", toolCallId: "call-live", toolName: "bash", input: { command: "long-job" } }],
+    },
+    toolResults: new Map([[
+      "call-live",
+      { role: "toolResult", toolCallId: "call-live", toolName: "bash", content: [{ type: "text", text: "line-1\nline-2" }], partial: true },
+    ]]),
+  }));
+
+  assert.match(html, /data-tool-state="running"/);
+  assert.match(html, /data-tool-output="true"/);
+  assert.match(html, /line-1/);
+  assert.match(html, /line-2/);
+  assert.doesNotMatch(html, /data-tool-running="true"/);
+});
+
+test("committed tool results replace the live affordances", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    activityDisplayMode: "full",
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", toolCallId: "call-live", toolName: "bash", input: { command: "long-job" } }],
+    },
+    toolResults: new Map([[
+      "call-live",
+      { role: "toolResult", toolCallId: "call-live", toolName: "bash", content: [{ type: "text", text: "done" }] },
+    ]]),
+  }));
+
+  assert.match(html, /data-tool-state="complete"/);
+  assert.doesNotMatch(html, /icon-spin/);
+  assert.doesNotMatch(html, /data-tool-running="true"/);
+  assert.match(html, /done/);
+});
+
 test("thinking blocks stay collapsed by default", () => {
   const html = renderToStaticMarkup(React.createElement(MessageView, {
     message: {
@@ -195,6 +252,84 @@ test("async-only task details render the job as one started row", () => {
   assert.match(html, /1 subagent/);
   assert.match(html, /AsyncAudit/);
   assert.doesNotMatch(html, /0 subagents/);
+});
+
+test("hub send results render the IRC target and hide generic delivery output", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    activityDisplayMode: "full",
+    message: {
+      role: "assistant",
+      content: [{
+        type: "toolCall",
+        toolCallId: "hub-send",
+        toolName: "hub",
+        input: { op: "send", to: "VisualFix", message: "Please check the current tree." },
+      }],
+    },
+    toolResults: new Map([[
+      "hub-send",
+      {
+        role: "toolResult",
+        toolCallId: "hub-send",
+        toolName: "hub",
+        content: [{ type: "text", text: "Delivered to VisualFix" }],
+        details: { op: "send", receipts: [{ to: "VisualFix", outcome: "injected" }] },
+      },
+    ]]),
+  }));
+
+  assert.match(html, /data-hub-result="send"/);
+  assert.match(html, /IRC → VisualFix injected/);
+  assert.match(html, /Please check the current tree/);
+  assert.doesNotMatch(html, /Delivered to VisualFix/);
+});
+
+test("hub jobs results render the waiting roster and duration", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    activityDisplayMode: "full",
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", toolCallId: "hub-jobs", toolName: "hub", input: { op: "jobs" } }],
+    },
+    toolResults: new Map([[
+      "hub-jobs",
+      {
+        role: "toolResult",
+        toolCallId: "hub-jobs",
+        toolName: "hub",
+        content: [{ type: "text", text: "raw jobs response" }],
+        details: {
+          op: "jobs",
+          jobs: [
+            { id: "Audit", type: "task", status: "running", label: "Audit workspace", durationMs: 1_890_000 },
+            { id: "Fix", type: "task", status: "completed", label: "Apply fix", durationMs: 45_000 },
+          ],
+        },
+      },
+    ]]),
+  }));
+
+  assert.match(html, /data-hub-result="jobs"/);
+  assert.match(html, /waiting on 2 jobs/);
+  assert.match(html, /Audit workspace/);
+  assert.match(html, /31m30s/);
+  assert.doesNotMatch(html, /raw jobs response/);
+});
+
+test("hub results retain raw output when structured details are absent", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    activityDisplayMode: "full",
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", toolCallId: "hub-fallback", toolName: "hub", input: { op: "unknown" } }],
+    },
+    toolResults: new Map([[
+      "hub-fallback",
+      { role: "toolResult", toolCallId: "hub-fallback", toolName: "hub", content: [{ type: "text", text: "unstructured hub output" }] },
+    ]]),
+  }));
+
+  assert.match(html, /unstructured hub output/);
 });
 
 test("irc:incoming custom messages title with the sender name", () => {

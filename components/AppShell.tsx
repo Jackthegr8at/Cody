@@ -115,6 +115,32 @@ const THINKING_EXPANDED_STORAGE_KEY = STORAGE_KEYS.thinkingExpanded;
 const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 520;
 const SIDEBAR_DEFAULT_WIDTH = 260;
+const DISMISSED_OMP_UPDATE_STORAGE_KEY = "cody:dismissed-omp-update";
+const DISMISSED_APP_UPDATE_STORAGE_KEY = "cody:dismissed-app-update";
+
+/**
+ * Update probes can run again after the shell changes state. Keep only the
+ * version the user last dismissed, and treat storage as an optional
+ * best-effort enhancement so private mode or Tauri storage failures cannot
+ * break the shell.
+ */
+export function readDismissedUpdateVersion(storageKey: string): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(storageKey);
+  } catch {
+    return null;
+  }
+}
+
+export function rememberDismissedUpdateVersion(storageKey: string, version: string): void {
+  if (typeof window === "undefined" || !version) return;
+  try {
+    window.localStorage.setItem(storageKey, version);
+  } catch {
+    // The toast still closes for this page load when storage is unavailable.
+  }
+}
 
 function clampSidebarWidth(width: number): number {
   return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)));
@@ -368,9 +394,15 @@ export function AppShell() {
       .then((data: { currentVersion?: string | null; availableVersion?: string | null; updateAvailable?: boolean } | null) => {
         setOmpUpdateAvailable(Boolean(data?.updateAvailable));
         if (!data?.updateAvailable || !data.availableVersion) return;
+        // Base UI invokes onClose for both the close button and a timeout.
+        // Cody keeps its existing 4s toast timing, so auto-expiry intentionally
+        // counts as dismissal; a newer version will still be announced.
+        const version = data.availableVersion;
+        if (readDismissedUpdateVersion(DISMISSED_OMP_UPDATE_STORAGE_KEY) === version) return;
         toast.info(
           translate("updates.notice.engineTitle", { name: activeEngine?.shortName ?? "OMP" }),
-          <UpdateNoticeBody current={data.currentVersion ?? null} next={data.availableVersion} onOpen={() => openSettings("system")} />
+          <UpdateNoticeBody current={data.currentVersion ?? null} next={version} onOpen={() => openSettings("system")} />,
+          { onClose: () => rememberDismissedUpdateVersion(DISMISSED_OMP_UPDATE_STORAGE_KEY, version) }
         );
       })
       .catch(() => {});
@@ -383,9 +415,12 @@ export function AppShell() {
       .then((data: { currentVersion?: string; availableVersion?: string | null; updateAvailable?: boolean } | null) => {
         setAppUpdateAvailable(Boolean(data?.updateAvailable));
         if (!data?.updateAvailable || !data.availableVersion) return;
+        const version = data.availableVersion;
+        if (readDismissedUpdateVersion(DISMISSED_APP_UPDATE_STORAGE_KEY) === version) return;
         toast.info(
           translate("updates.notice.appTitle"),
-          <UpdateNoticeBody current={data.currentVersion ?? null} next={data.availableVersion} onOpen={() => openSettings("system")} />
+          <UpdateNoticeBody current={data.currentVersion ?? null} next={version} onOpen={() => openSettings("system")} />,
+          { onClose: () => rememberDismissedUpdateVersion(DISMISSED_APP_UPDATE_STORAGE_KEY, version) }
         );
       })
       .catch(() => {});
@@ -1218,6 +1253,7 @@ export function AppShell() {
         refreshKey={refreshKey}
         onSessionDeleted={handleSessionDeleted}
         onDesktopActivityChange={handleDesktopActivityChange}
+        isDesktop={isDesktop}
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
         onCwdChange={handleCwdChange}
         onOpenFile={handleOpenFile}

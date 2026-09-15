@@ -64,6 +64,8 @@ interface Props {
   onSessionDeleted?: (sessionId: string) => void;
   /** Reports authoritative cross-session running/unread state to the desktop shell. */
   onDesktopActivityChange?: (activity: DesktopActivity) => void;
+  /** Desktop activation can clear the selected session without changing its id. */
+  isDesktop?: boolean;
   selectedCwd?: string | null;
   onCwdChange?: (cwd: string | null, projectRoot?: string | null) => void;
   onOpenFile?: (filePath: string, fileName: string) => void;
@@ -553,7 +555,7 @@ function CodyTitle() {
     </button>
   );
 }
-export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, onDesktopActivityChange, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, onAtMentions, engine = null }: Props) {
+export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, onDesktopActivityChange, isDesktop = false, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, onAtMentions, engine = null }: Props) {
   const engineId = engine?.id ?? null;
   // Import writes an omp .jsonl into omp's sessions layout and Archive moves
   // one with omp's gc layout; both routes answer 400 "unsupported" under any
@@ -621,6 +623,16 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   const sseAuthoritativeRef = useRef(false);
   const sessionRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileExplorerRef = useRef<FileExplorerHandle>(null);
+
+  const markSessionRead = useCallback((sessionId: string | null) => {
+    if (!sessionId) return;
+    setUnreadSessionIds((prev) => {
+      if (!prev.has(sessionId)) return prev;
+      const next = new Set(prev);
+      next.delete(sessionId);
+      return next;
+    });
+  }, []);
 
   const loadSessions = useCallback(async (showLoading = false) => {
     try {
@@ -803,14 +815,29 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   }, [runningSessionIds, loadSessions]);
 
   useEffect(() => {
-    if (!selectedSessionId) return;
-    setUnreadSessionIds((prev) => {
-      if (!prev.has(selectedSessionId)) return prev;
-      const next = new Set(prev);
-      next.delete(selectedSessionId);
-      return next;
-    });
-  }, [selectedSessionId]);
+    markSessionRead(selectedSessionId);
+  }, [markSessionRead, selectedSessionId]);
+
+  // Desktop activation can restore the same selected session without a
+  // selection change. Browser focus/visibility events cover both minimize /
+  // restore and switching away and back to the Cody window. Running state is
+  // deliberately untouched: only the selected session's unread marker is
+  // cleared here.
+  useEffect(() => {
+    if (!isDesktop) return;
+
+    const markSelectedSessionRead = () => {
+      if (document.visibilityState !== "visible") return;
+      markSessionRead(selectedSessionId);
+    };
+
+    window.addEventListener("focus", markSelectedSessionRead);
+    document.addEventListener("visibilitychange", markSelectedSessionRead);
+    return () => {
+      window.removeEventListener("focus", markSelectedSessionRead);
+      document.removeEventListener("visibilitychange", markSelectedSessionRead);
+    };
+  }, [isDesktop, markSessionRead, selectedSessionId]);
 
   useEffect(() => {
     if (explorerRefreshKey !== undefined) setExplorerKey((k) => k + 1);
@@ -905,7 +932,14 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   // their containing project.
   const lastSyncedCwdPropRef = useRef<string | null>(null);
   useEffect(() => {
-    if (selectedCwdProp && selectedCwdProp !== lastSyncedCwdPropRef.current) {
+    // A withdrawn command must not swallow the next one: without this reset,
+    // re-commanding a cwd the sidebar already synced (A -> sidebar B -> A)
+    // stays stuck on B.
+    if (!selectedCwdProp) {
+      lastSyncedCwdPropRef.current = null;
+      return;
+    }
+    if (selectedCwdProp !== lastSyncedCwdPropRef.current) {
       lastSyncedCwdPropRef.current = selectedCwdProp;
       setSelectedCwd(selectedCwdProp);
       const project = projectRootFor(selectedCwdProp);
@@ -1274,10 +1308,11 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   // activates and expands its containing project.
   const handleSelectSessionFromList = useCallback((s: SessionInfo) => {
     provisionalSelectionRef.current = false;
+    markSessionRead(s.id);
     if (s.cwd) setSelectedCwd(s.cwd);
     expandProject(workspaceKeyOf(s));
     onSelectSession(s);
-  }, [onSelectSession, expandProject]);
+  }, [markSessionRead, onSelectSession, expandProject]);
 
   const handleNewSession = useCallback(() => {
     if (!selectedCwd) return;
