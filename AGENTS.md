@@ -330,10 +330,16 @@ lib/
                        mcp.json and symlinked credentials (sidebarAgentDir), the
                        --no-* flags, an overlay, and SIDEBAR_CONTEXT_TOOLS
                        registered through set_host_tools
-  sidebar-context-tools.ts  the sidebar's five read-only, bounded, pageable
-                       tools: list_workspace_files, read_workspace_file,
-                       read_project_context, list_sessions, read_session
-                       (ownership-gated, condensed, tool NAMES only)
+  session-tools.ts     the three CROSS-SESSION tools every chat gets
+                       (list_sessions, session_status, read_session): name-or-id
+                       resolution that lists candidates instead of guessing,
+                       the ownership gate, the condensed transcript (messages
+                       and tool NAMES only), snapshot-only — nothing here
+                       blocks on another session's run
+  sidebar-context-tools.ts  the sidebar's three WORKSPACE tools
+                       (list_workspace_files, read_workspace_file,
+                       read_project_context) plus the session three above,
+                       appended verbatim rather than re-declared
   sidebar-context-budget.ts  how much of a small model's window one tool result
                        may take; an unknown window is assumed to be the
                        SMALLEST supported (8,192), never unlimited
@@ -1509,6 +1515,7 @@ must name the panel that fixes it.
   that and report an empty list. `scripts/engine-bringup.mjs` drives adapters with no
   server behind them, and a throw there aborts `session/new`: no bridge is a missing
   Preview button, a throw is a chat that will not open.
+
 - **Project To-do list is durable user intent, not an engine plan.** `.cody/todo.json`
   sits at the resolved project root so it is visible in the project and survives session
   or engine changes. Cody writes it atomically and preserves unknown top-level keys.
@@ -1655,6 +1662,54 @@ must name the panel that fixes it.
 - **Trap**: the display bus and the capability secret are process-local. A
   multi-process deployment (multiple Next.js workers or replicas) would need a
   shared store for both before display requests survive crossing processes.
+
+### Cross-session awareness (`lib/session-tools.ts`)
+
+One conversation regularly needs to know what another is doing, and Cody is
+the only party that can answer: an engine's own agent hub sees nothing but its
+own subagents, while Cody holds the live child registry AND every transcript
+on disk. Three read-only tools, in every session's tool list:
+`list_sessions` (what exists, what is running, when it last moved),
+`session_status` (one session's live phase plus its newest message; with no
+argument, every running session) and `read_session` (a condensed transcript,
+paged).
+
+- **Addressed by the NAME the user set.** An exact session id wins, then a
+  case-insensitive substring of the name; more than one match returns the
+  candidate list rather than picking one. Guessing which conversation was
+  meant and then reporting on it is a far worse failure than asking, because
+  nothing downstream can tell it happened.
+- **Snapshot-only, never a wait.** A tool that blocked until another session
+  finished would tie up the caller's own turn on a run it cannot influence.
+  "Poll it" is a call the model repeats; the module promises nothing more.
+- **Phase comes off the registry, not a round trip.**
+  `getLiveSessionPhases()` reads each wrapper's own flags
+  (`EngineSession.livePhase?.()`, optional because an ACP session cannot break
+  "running" down and reports just that). Asking the other child over RPC is
+  exactly what must not happen: the session being asked about may be wedged,
+  and awaiting it would hang the asker.
+- **Ownership is the boundary, and an UNOWNED caller is the trap.** Listings
+  go through `filterSessionsForUser` so an inaccessible session's id or title
+  is never enumerated, and every single-target read re-checks
+  `canAccessSession`; blocked and missing answer identical text. A main
+  session has no request behind its tool calls, so the acting account is the
+  session's OWNER (`getSessionOwner` → `findUserById`). When a session has no
+  recorded owner (pre-accounts, terminal-created) `user: null` would mean
+  "sees everything", so it is paired with `restrictToUnowned`, which limits it
+  to other unowned sessions. Both the host-tool path and the internal route
+  compute it the same way: `user === null && hasAnyUser()`.
+- **One declaration, two callers.** The sidebar appends
+  `SESSION_AWARENESS_TOOLS` verbatim instead of re-declaring the schemas — a
+  second copy is how the sidebar and the main chat start describing the same
+  tool differently. The main chat gets a larger page
+  (`MAIN_SESSION_RESULT_CHARS`, 24k) than the sidebar's
+  smallest-window-assumption budget; both still report a continuation offset.
+- **ACP engines reach them over MCP** like the display tools:
+  `POST /api/internal/sessions` (capability-token authenticated, on
+  `proxy.ts`'s `PUBLIC_EXACT` list for the same reason display/todo are) with
+  the three tools declared in `bin/cody-display-mcp.js`. The route trusts
+  `capability.sid` alone — a body may name any session id, but it must match
+  the token, and the caller's identity is derived server-side from it.
 
 ### Disk exhaustion is a first-class failure (`lib/disk-space.ts`)
 - The instance data dir is finite and often quota-capped (a ZFS dataset on

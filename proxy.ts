@@ -32,6 +32,7 @@ const PUBLIC_EXACT = new Set([
   "/icon-maskable-512.png",
   "/api/internal/display",
   "/api/internal/todo",
+  "/api/internal/sessions",
 ]);
 
 function isPublicPath(pathname: string): boolean {

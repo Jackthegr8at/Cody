@@ -391,6 +391,20 @@ export interface EngineSession {
   destroyAndWait(): Promise<void>;
   /** Resolves once an in-flight destroy finishes; null when idle. */
   destroyPromise: Promise<void> | null;
+  /**
+   * Phase detail for a cross-session status report, when the engine's session
+   * can answer it without a round trip (lib/session-tools.ts). Optional on
+   * purpose: `isRunning()` is the part every engine has, and an engine that
+   * cannot break "running" down further reports just that rather than
+   * inventing a breakdown.
+   */
+  livePhase?(): {
+    running: boolean;
+    streaming: boolean;
+    promptRunning: boolean;
+    bashRunning: boolean;
+    compacting: boolean;
+  };
 }
 
 /**

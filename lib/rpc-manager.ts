@@ -29,7 +29,8 @@ import { selectPromptProfileId, type PromptProfileId } from "./local-model-profi
 import { PRESET_FULL } from "./tool-presets";
 import { isRecord } from "./type-guards";
 import { SIDEBAR_CONTEXT_TOOLS } from "./sidebar-context-tools";
-import type { UserRecord } from "./auth/users";
+import { SESSION_AWARENESS_TOOLS, type SessionLivePhase, type SessionToolContext } from "./session-tools";
+import { findUserById, hasAnyUser, type UserRecord } from "./auth/users";
 import type {
   BashResultInfo,
   HostToolDefinition,
@@ -225,7 +226,13 @@ const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
     },
     required: ["action"],
   },
-}, FORGE_HOST_TOOL];
+},
+// Cross-session awareness. A main chat is regularly asked what ANOTHER
+// session is doing, and Cody is the only party that can answer: an engine's
+// own agent hub sees nothing but its own subagents. Shared verbatim with the
+// sidebar (lib/session-tools.ts) so both describe them identically.
+...SESSION_AWARENESS_TOOLS.map(({ handler: _handler, ...tool }) => tool),
+FORGE_HOST_TOOL];
 /** Every tool the SERVER settles itself, so `handleFrame` routes its calls
  * here instead of to a browser. The sidebar's context tools are server-side
  * for the same reason the rest are: they read the filesystem and the session
@@ -234,6 +241,12 @@ const SERVER_HOST_TOOL_NAMES = new Set([
   ...SERVER_HOST_TOOLS.map((tool) => tool.name),
   ...SIDEBAR_CONTEXT_TOOLS.map((tool) => tool.name),
 ]);
+/** One session-tool result's char budget for a MAIN chat. The sidebar's own
+ * budget assumes the smallest supported window (6 KB); a main session runs on
+ * whatever model the user picked, where paging a transcript four times to
+ * answer one question is its own kind of waste. Still bounded: a transcript
+ * is unbounded and a tool result has to fit one RPC frame. */
+const MAIN_SESSION_RESULT_CHARS = 24_000;
 const MCP_LIST_TIMEOUT_MS = 15_000;
 /** Cap on the *acknowledgement* of a prompt frame — not on model execution.
  * omp acks a prompt as soon as it accepts it and the run then reports through
@@ -707,6 +720,20 @@ export class AgentSessionWrapper {
     return this.localProfileLaunch?.profileId === "minimal" ? [] : [...this.hostTools, ...SERVER_HOST_TOOLS];
   }
 
+  /** The phase flags a status call reports, read straight off this wrapper.
+   * Deliberately not a `get_state` round trip: the whole point of asking
+   * about ANOTHER session is that it may be wedged, and awaiting its child
+   * would hang the asking session's own turn. */
+  livePhase(): SessionLivePhase {
+    return {
+      running: this.isRunning(),
+      streaming: this.streaming,
+      promptRunning: this.promptRunning,
+      bashRunning: this.bashRunning,
+      compacting: this.compacting,
+    };
+  }
+
   get sessionId(): string {
     return this._sessionId;
   }
@@ -1166,16 +1193,18 @@ export class AgentSessionWrapper {
    * reject paths, never routed to a browser.
    */
   private async handleServerHostTool(id: string, toolName: string, event: AgentEvent): Promise<void> {
-    const sidebarTool = SIDEBAR_CONTEXT_TOOLS.find((tool) => tool.name === toolName);
+    // A sidebar session may call its workspace tools too; a main chat is only
+    // ever offered the session three, and serving it a tool its engine was
+    // never told about would be answering a call nothing can have made.
+    const available = this.engine.kind === "sidebar" ? SIDEBAR_CONTEXT_TOOLS : SESSION_AWARENESS_TOOLS;
+    const sidebarTool = available.find((tool) => tool.name === toolName);
     if (sidebarTool) {
       // Handlers always resolve to plain text, success or failure, so there is
       // nothing to catch here: a bounded, human-readable answer is the
-      // contract (lib/sidebar-context-tools.ts). `user` is what gates every
-      // session read, so it must be the account that owns this session.
+      // contract (lib/sidebar-context-tools.ts, lib/session-tools.ts).
       const text = await sidebarTool.handler(isRecord(event.arguments) ? event.arguments : {}, {
         cwd: this.engine.contextCwd ?? this.cwd,
-        user: this.engine.user ?? null,
-        defaultSessionId: this.engine.contextSessionId ?? null,
+        ...this.sessionToolContext(),
       });
       this.sendHostToolResult({ type: "host_tool_result", id, result: { content: [{ type: "text", text }] } });
       return;
@@ -1330,6 +1359,42 @@ export class AgentSessionWrapper {
         result: { content: [{ type: "text", text: message }] },
       });
     }
+  }
+
+  /**
+   * The identity and live state a session-awareness tool call runs with.
+   *
+   * `user` is the security boundary, so it is resolved here and never taken
+   * from the engine's arguments. A sidebar session carries the account that
+   * opened it; a main session's engine has no request behind it, so the
+   * account is the one that OWNS this session. When a session has no recorded
+   * owner on an instance that has accounts (a pre-accounts or
+   * terminal-created session), `user: null` would mean "sees everything" —
+   * so it is paired with `restrictToUnowned`, which limits it to other
+   * unowned sessions instead of every account's conversations.
+   *
+   * The main chat gets a larger page than the sidebar's
+   * smallest-window-assumption budget: it runs on the model the user picked,
+   * and paging a transcript four times to answer one question is its own kind
+   * of waste.
+   */
+  private sessionToolContext(): SessionToolContext {
+    const explicit = this.engine.user ?? null;
+    const ownerId = explicit === null && this._sessionId ? getSessionOwner(this._sessionId) : null;
+    const owner = ownerId === null ? null : findUserById(ownerId);
+    const user = explicit ?? owner;
+    const livePhases = getLiveSessionPhases();
+    const runningSessionIds = new Set(
+      [...livePhases].filter(([, phase]) => phase.running).map(([sessionId]) => sessionId),
+    );
+    return {
+      user,
+      defaultSessionId: this.engine.contextSessionId ?? (this._sessionId || null),
+      runningSessionIds,
+      livePhases,
+      restrictToUnowned: user === null && hasAnyUser(),
+      ...(this.engine.kind === "sidebar" ? {} : { charBudget: MAIN_SESSION_RESULT_CHARS }),
+    };
   }
 
   /**
@@ -2036,6 +2101,29 @@ export async function restartSessionForRouting(sessionId: string): Promise<{ res
   if (session.isRunning()) return { restarted: false, active: true };
   await session.restartForRouting();
   return { restarted: true, active: false };
+}
+
+/**
+ * Every live session's phase, keyed by session id — the source both the
+ * omp host-tool path and the internal route the ACP bridge posts to read, so
+ * a status report says the same thing whichever engine asked for it.
+ *
+ * An engine that cannot break "running" down (every ACP session) contributes
+ * the one fact it has rather than a fabricated breakdown.
+ */
+export function getLiveSessionPhases(): Map<string, SessionLivePhase> {
+  const phases = new Map<string, SessionLivePhase>();
+  for (const [registeredId, session] of getRegistry()) {
+    const running = session.isRunning();
+    phases.set(session.sessionId || registeredId, session.livePhase?.() ?? {
+      running,
+      streaming: false,
+      promptRunning: running,
+      bashRunning: false,
+      compacting: false,
+    });
+  }
+  return phases;
 }
 
 export function getRunningRpcSessionIds(): string[] {

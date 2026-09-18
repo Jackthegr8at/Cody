@@ -55,9 +55,30 @@ async function main() {
   ]);
   const endpoint = process.env.CODY_DISPLAY_ENDPOINT;
   const todoEndpoint = process.env.CODY_TODO_ENDPOINT;
+  const sessionsEndpoint = process.env.CODY_SESSIONS_ENDPOINT;
   const capability = process.env.CODY_DISPLAY_CAPABILITY;
   const sessionId = process.env.CODY_DISPLAY_SESSION_ID;
   if (!endpoint || !capability) throw new Error("Cody display capability is unavailable");
+
+  /** Shared by the three session-awareness tools below: same endpoint,
+   * same envelope, same error shape — one place to keep them in lockstep
+   * rather than three fetch blocks that could drift. */
+  async function callSessionTool(tool, toolArgs) {
+    if (!sessionsEndpoint || !sessionId) throw new Error("Cody session capability is unavailable");
+    const response = await fetch(sessionsEndpoint, {
+      method: "POST",
+      headers: { Authorization: "Bearer " + capability, "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId, tool, arguments: toolArgs }),
+      // Longer than the display calls' 5s: a transcript read is bounded in
+      // OUTPUT but not in the work behind it (a long session file, or a status
+      // sweep over every running session), and a timeout here costs the model
+      // a whole tool call.
+      signal: AbortSignal.timeout(15_000),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "HTTP " + response.status);
+    return typeof body.text === "string" ? body.text : "";
+  }
 
   const server = new McpServer({ name: "cody-display", version: "1.0.0" });
   server.registerTool("open_preview", {
@@ -129,6 +150,48 @@ async function main() {
       return { content: [{ type: "text", text: formatTodoForAgent(body.doc) }] };
     } catch (error) {
       return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to update the project to-do list" }] };
+    }
+  });
+  server.registerTool("list_sessions", {
+    description: "List recent chat sessions: id, title, folder, running state, last activity.",
+    inputSchema: {
+      workspace: z.string().optional().describe("Only sessions whose folder matches this path."),
+      running: z.boolean().optional().describe("Only sessions with a live engine process."),
+    },
+  }, async (input) => {
+    try {
+      const text = await callSessionTool("list_sessions", input);
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to list sessions" }] };
+    }
+  });
+  server.registerTool("session_status", {
+    description: "What a chat session is doing right now — live phase plus its newest message. Omit `session` for every running one.",
+    inputSchema: {
+      session: z.string().optional().describe("Session id or title; omit for all running sessions."),
+    },
+  }, async (input) => {
+    try {
+      const text = await callSessionTool("session_status", input);
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to read session status" }] };
+    }
+  });
+  server.registerTool("read_session", {
+    description: "Read a condensed transcript of a chat session by id or title: messages and tool names only.",
+    inputSchema: {
+      session: z.string().optional().describe("Session id or title; omit for this session."),
+      tail: z.number().optional().describe("Only the most recent N messages."),
+      offset: z.number().optional().describe("Resume from a prior truncated result's offset."),
+    },
+  }, async (input) => {
+    try {
+      const text = await callSessionTool("read_session", input);
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to read the session transcript" }] };
     }
   });
   await server.connect(new StdioServerTransport());
