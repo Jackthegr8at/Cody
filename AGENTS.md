@@ -279,6 +279,11 @@ lib/
                        for the first asker; cancel rejects every waiter
   file-paths.ts        client/server path encoding helpers
   markdown.ts          shared markdown helpers
+  message-rate.ts      the ONE place output-token throughput is computed: the
+                       engine-measured rate (the provider's output count over
+                       the request's own duration, plus ttft and a decode-only
+                       rate) and, separately and always labelled as such, the
+                       chars/4 streaming estimate
   model-display.ts    shared display-only model-label formatter; route identifiers remain untouched
   npx.ts               npx runner used by skill install
   permission-request.ts pure client-side readers for an ACP engine's approval
@@ -1756,6 +1761,28 @@ handled or safely ignored.
   and an accent sparkle beside the model name read as "auto-picked".
 - **Display names and picker controls stay presentation-only.** `formatModelDisplayName()` in `lib/model-display.ts` is the shared display boundary for the composer, transcript, and usage surfaces; it may improve a catalog label but never changes the routing identifier. Fast remains beside the existing Composer model picker, and its adjacent Manage models gear opens Settings › Models. Only Smart is pinned; the ordinary named-model list has no sticky selection.
 - **Composer quota is model-scoped, but the popup covers the whole session.** The RING gauges the selected/live model: select usage windows for that model; a reported tier explicitly scopes its bucket even when it is also marked shared; only untiered buckets apply to the account as a whole. Render the raw engine-reported plan without inferring a `$tier` convention. Saved resets are a separate single summary that keeps explicit zero visible; only meaningful positive account rows expand it. Under Smart routing, subagents and fallback chains other providers consume quota in the same session, so `lib/session-active-models.ts` derives every model in use this run (live model, Smart resolution, each subagent's `resolvedModel`, fallback `to`, this run's assistant turns) and the popup renders their windows EXPANDED under "Also in use", each attributed to what uses it ("Subagent scout (research)", "Fallback for this conversation"); OpenRouter credits appear the same way when only a subagent rides that gateway. Limits nothing in the session touches stay in the collapsed "Other limits" section that says they cannot stop the selected model.
+- **The ring says whose quota it is, and how old the reading is.** With more
+  than one account on a provider, every window label carries the account's
+  POSITION (`brandedAccountLabel` → "Claude · Primary · 5-hour window"), and
+  that label is what the ring's tooltip and the popover headline quote — so a
+  percentage can never be read as the wrong subscription's. The per-account
+  rows say `Serving next`, not `Serving`: the ranking is Cody's read of what
+  the engine WOULD pick from this reading, and the engine re-ranks per
+  request (it rotates onto a sibling credential mid-run without telling
+  anyone), so claiming the present tense would be a claim the snapshot cannot
+  support.
+- **Freshness is refreshed where it changes, and stated where it is read.** A
+  usage read happens on mount, on a session switch, when the popover OPENS,
+  on an explicit Refresh in the popover footer, and — the one that matters —
+  on the falling edge of a run (`isStreaming` true→false in `ChatInput`),
+  because a turn ending is the only moment the numbers provably moved. The
+  hook's 90 s/5 min cadence alone left the ring quoting a pre-turn reading
+  for up to a minute and a half after the reply landed. The footer tells the
+  three states apart: `Reading…` while a read is out, `Updated <ago>` (plus
+  `May be out of date` for a server-flagged stale snapshot), and
+  `Could not refresh · last read <ago>` in warning colour when the last
+  attempt FAILED — where the numbers on screen are the previous good ones and
+  claiming an age for them would be claiming an answer that never arrived.
 - **Engine-initiated model switches wear a persistent marker and name the
   job** (`autoModelSwitch`): `retry_fallback_applied` (error and usage-aware
   routing both emit it) and any bare `model_changed` whose model differs
@@ -1875,6 +1902,39 @@ handled or safely ignored.
   mounted instead of removing the control.
 - Per-model token totals include input, output, cache-read, and cache-write
   tokens.
+
+### Token rate: measured from the engine's own numbers, never guessed
+- The transcript's `t/s` badge is the provider's **output-token count over
+  the request's measured duration** — the same arithmetic the engine reports
+  for its own status line (omp's `utils/token-rate.ts`: `output * 1000 /
+  duration`, 100 ms floor). omp records `duration`, `ttft` and `completedAt`
+  on every assistant message it writes AND sends them on `message_end`, so
+  `lib/message-rate.ts` computes the identical number client-side, per
+  message, with no poll lag. omp also reports `tokensPerSecond` on
+  `get_state`; Cody deliberately does NOT read it — same formula, but only as
+  fresh as the 15 s reconcile poll and scoped to the session's last message.
+- **The estimate is labelled as one.** Before any output count exists (a
+  provider that reports usage only at the end, or an ACP engine, which
+  accounts for itself in `usage_event` frames and puts nothing on its
+  messages) the badge falls back to `chars / 4` and wears a `~` plus a
+  tooltip saying so. That heuristic is not a tokenizer: it understates CJK by
+  ~3x and dense code somewhat, and its rate is a cumulative average that
+  every pause (a tool call mid-message, a stall) drags down. The two live in
+  one module so no call site can confuse them.
+- **A rate needs enough output to mean throughput** (`MIN_RATE_OUTPUT_TOKENS`,
+  48). Measured: a four-token "ok" whose 1.7 s was almost entirely the wait
+  for the provider computes to 2.3 t/s and wore the SLOWEST colour on a model
+  that was in fact answering at ~90 t/s. Below the floor there is no badge at
+  all rather than a misleading one; the tooltip on a real one names the ttft
+  and the decode-only rate, so a long provider wait reads as a wait instead
+  of as a slow model.
+- **`message.timestamp` is when the request STARTED, not when it ended.**
+  `completedAt` is the end. Tool durations therefore measure from
+  `completedAt` (the moment the tools were dispatched); measuring from
+  `timestamp`, as the code used to, charged the model's whole generation time
+  to the first tool call. A thinking box's generation time is `duration`
+  itself, not the wall-clock gap to the previous message, which also contains
+  whatever ran in between.
 
 ### Distill: summaries that never break with the engine
 - **What it is.** A user-chosen model (Settings › Models › Assignments ›

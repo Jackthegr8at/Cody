@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, Footprints, ListChecks, Loader2, Paperclip, Pin, ShieldCheck, SlidersHorizontal, Sparkles, Split, Target, TriangleAlert, Zap, ZapOff } from "lucide-react";
+import { ChevronDown, Footprints, ListChecks, Loader2, Paperclip, Pin, RefreshCw, ShieldCheck, SlidersHorizontal, Sparkles, Split, Target, TriangleAlert, Zap, ZapOff } from "lucide-react";
 import type { SessionModeOption } from "@/hooks/useAgentSession";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import { ALL_CAPABILITIES, OMP_ENGINE_ID, type ActiveEngineInfo, type EngineCapabilities } from "./SettingsTabs";
@@ -942,6 +942,9 @@ export function QuotaPopover({
   provider,
   modelName,
   now,
+  failed = false,
+  refreshing = false,
+  onRefresh,
   anchorTop = null,
   anchorRight = null,
 }: {
@@ -957,6 +960,15 @@ export function QuotaPopover({
   provider: string | null;
   modelName: string | null;
   now: number;
+  /** The last usage read did not land. The numbers on screen are the previous
+   * good ones, and saying "updated 2 min ago" about them would be a claim the
+   * read never supported. */
+  failed?: boolean;
+  /** A read is in flight right now, so the age is about to change. */
+  refreshing?: boolean;
+  /** Re-read usage on demand. The ring is a snapshot of a moving number: the
+   * only honest answer to "is this current?" is a way to ask again. */
+  onRefresh?: () => void;
   anchorTop?: number | null;
   anchorRight?: number | null;
 }) {
@@ -1008,12 +1020,18 @@ export function QuotaPopover({
   const percentText = quota.known ? t("usage.percentUsed", { percent: Math.round(quota.percent) }) : t("usage.unavailable");
   const headlineReset = quota.known ? formatResetTime(quota.resetsAt, locale, now) : null;
   const age = quota.known && quota.fetchedAt ? formatRelativeTime(quota.fetchedAt, locale, now) : null;
-  // Age is only claimed when the snapshot carries a usable timestamp, and a
-  // snapshot the server flagged stale says so rather than passing for fresh.
-  const freshness = age
-    ? [t("usage.updatedAgo", { ago: age }), quota.known && quota.stale ? t("usage.stale") : null]
-      .filter(Boolean).join(" · ")
-    : null;
+  // Three different things, and the footer must not conflate them: a read
+  // that just landed, a snapshot the server itself flagged as possibly out of
+  // date, and a read that FAILED — where the numbers on screen are the last
+  // good ones and their age is the age of that read, not of an answer.
+  const freshness = refreshing
+    ? t("usage.refreshing")
+    : failed
+      ? (age ? t("usage.refreshFailedAge", { ago: age }) : t("usage.refreshFailed"))
+      : age
+        ? [t("usage.updatedAgo", { ago: age }), quota.known && quota.stale ? t("usage.stale") : null]
+          .filter(Boolean).join(" · ")
+        : null;
   const anchor = anchorTop != null && anchorRight != null ? { top: anchorTop, right: anchorRight } : null;
 
   return (
@@ -1267,13 +1285,35 @@ export function QuotaPopover({
         )}
 
         {/* Footer — the primary window is all-session; the added section is
-            explicitly scoped to this run. */}
-        <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)", fontSize: 11, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
-          {[
-            !quota.known ? t(quota.scopeKey) : provider ? t("usage.modelScope") : t("usage.accountWide"),
-            hasSessionUsage ? t("usage.sessionInUseScope") : null,
-            freshness,
-          ].filter(Boolean).join(" · ")}
+            explicitly scoped to this run, and the age says how old the
+            reading is with a way to take a new one. */}
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)", display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8, fontSize: 11, color: failed ? "var(--status-warning)" : "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
+          <div style={{ minWidth: 0 }}>
+            {[
+              !quota.known ? t(quota.scopeKey) : provider ? t("usage.modelScope") : t("usage.accountWide"),
+              hasSessionUsage ? t("usage.sessionInUseScope") : null,
+              freshness,
+            ].filter(Boolean).join(" · ")}
+          </div>
+          {onRefresh && (
+            <button
+              type="button"
+              data-testid="usage-refresh"
+              onClick={onRefresh}
+              disabled={refreshing}
+              title={t("usage.refresh")}
+              aria-label={t("usage.refresh")}
+              style={{
+                flexShrink: 0, display: "flex", alignItems: "center", gap: 4,
+                background: "none", border: "none", padding: "2px 4px", borderRadius: 5,
+                color: "var(--text-dim)", cursor: refreshing ? "default" : "pointer",
+                fontSize: 11, fontWeight: 400,
+              }}
+            >
+              <RefreshCw size={11} strokeWidth={1.8} className={refreshing ? "icon-spin" : undefined} aria-hidden="true" />
+              {t("usage.refresh")}
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -3009,6 +3049,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   useEffect(() => {
     refreshUsage();
   }, [draftKey, refreshUsage]);
+  // A turn ending is the ONE moment the numbers provably changed: the run
+  // just spent quota. Waiting out the hook's 90s cadence leaves the ring
+  // reporting a pre-turn reading for up to a minute and a half after the
+  // reply lands — long enough to pick the next model from a stale number.
+  // Only the falling edge fires, so a run's start costs nothing, and the
+  // hook's own in-flight guard drops a refresh that races the poll.
+  const wasStreamingRef = useRef(false);
+  useEffect(() => {
+    const wasStreaming = wasStreamingRef.current;
+    wasStreamingRef.current = Boolean(isStreaming);
+    if (wasStreaming && !isStreaming) refreshUsage();
+  }, [isStreaming, refreshUsage]);
 
   const thinkingLevelOptions = React.useMemo(
     () => selectableThinkingLevels(availableThinkingLevels),
@@ -4356,6 +4408,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     provider={quotaProvider ?? null}
                     modelName={displayModelName}
                     now={usageNow}
+                    failed={usageFailed}
+                    refreshing={usageLoading}
+                    onRefresh={refreshUsage}
                     anchorTop={contextPopoverAnchor?.top ?? null}
                     anchorRight={contextPopoverAnchor?.right ?? null}
                   />
