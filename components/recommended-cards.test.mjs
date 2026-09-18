@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { createJiti } from "jiti";
 
+import { ompTestPackageBin } from "../lib/omp/omp-test-package.mjs";
 /**
  * The Behavior hub's Recommended layer is data: `RECOMMENDED_CARDS` (25
  * cards in five groups), `MCP_CARDS` (4, rendered by Extensions) and
@@ -86,13 +87,13 @@ test("the 24/8 split holds against the checked-in schema key snapshot", () => {
 
 /** The installed omp, when one can be read here. */
 function installedOmpBin() {
-  const candidates = [process.env.CODY_OMP_BIN, "/tmp/ompkg/package/bin/omp"].filter(Boolean);
+  const candidates = [process.env.CODY_OMP_BIN, "/tmp/ompkg/package/bin/omp", ompTestPackageBin()].filter(Boolean);
   return candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
 }
 
 const ompBin = installedOmpBin();
 
-test("the same split holds against the installed omp schema", { skip: !ompBin && "no omp package to read" }, async () => {
+test("every curated card is renderable against the installed omp schema", { skip: !ompBin && "no omp package to read" }, async () => {
   const previous = process.env.CODY_OMP_BIN;
   process.env.CODY_OMP_BIN = ompBin;
   try {
@@ -104,8 +105,13 @@ test("the same split holds against the installed omp schema", { skip: !ompBin &&
     const keys = new Set(schema.settings.map((setting) => setting.key));
     const declared = ALL_CURATED_CARDS.filter((card) => keys.has(card.key)).map((card) => card.key);
     const missing = ALL_CURATED_CARDS.filter((card) => !keys.has(card.key)).map((card) => card.key);
-    assert.equal(declared.length, 24, `installed ${schema.source.version}: 24 schema-declared keys, got ${declared.length}`);
-    assert.deepEqual(missing.sort(), [...CURATED_ONLY_KEYS].sort(), `installed ${schema.source.version}: the undeclared keys are the curated-only eight`);
+    // The split is DERIVED: the hub prefers a schema row and falls back to the
+    // curated table, so a key the engine starts declaring simply moves sides
+    // (18.2.5 moved two). What must hold is that every card has one of the
+    // two, or its control cannot render at all.
+    assert.ok(declared.length > 0, `installed ${schema.source.version}: no curated key is schema-declared`);
+    const unrenderable = missing.filter((key) => !CURATED_ONLY_KEYS.includes(key));
+    assert.deepEqual(unrenderable, [], `installed ${schema.source.version}: curated cards with neither a schema row nor a curated-only entry`);
     // A card's control must fit the type the engine declares for the key.
     for (const card of ALL_CURATED_CARDS) {
       const setting = schema.settings.find((entry) => entry.key === card.key);

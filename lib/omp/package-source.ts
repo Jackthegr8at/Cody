@@ -84,7 +84,15 @@ export function ompPackageVersion(packageRoot: string): string | null {
  * read omp's source must still run.
  */
 export function loadOmpPackageSource(packageRoot: string, ...segments: string[]): Record<string, unknown> | null {
-  const file = path.join(packageRoot, ...segments);
+  return loadOmpSourceFile(path.join(packageRoot, ...segments));
+}
+
+/** The same evaluation, addressed by absolute path — the form the re-export
+ * hop below needs, since the file it lands on lives in a sibling package.
+ *
+ * `depth` bounds the bridging below: a dependency's own file is loaded with
+ * every import stubbed, so one hop is all that is ever needed. */
+function loadOmpSourceFile(file: string, depth = 0): Record<string, unknown> | null {
   let stubDir: string | null = null;
   try {
     if (!fs.existsSync(file)) return null;
@@ -93,7 +101,10 @@ export function loadOmpPackageSource(packageRoot: string, ...segments: string[])
     stubDir = fs.mkdtempSync(path.join(os.tmpdir(), "cody-omp-source-"));
     const stubPath = path.join(stubDir, STUB_FILENAME);
     fs.writeFileSync(stubPath, STUB_SOURCE, "utf8");
-    const alias = Object.fromEntries(imports.map((specifier) => [specifier, stubPath]));
+    const alias: Record<string, string> = {};
+    for (const specifier of imports) {
+      alias[specifier] = bridgeFor(specifier, file, stubDir, depth) ?? stubPath;
+    }
     const jiti = createJiti(__filename, { alias, interopDefault: true, moduleCache: false });
     return jiti(file) as Record<string, unknown>;
   } catch {
@@ -107,4 +118,185 @@ export function loadOmpPackageSource(packageRoot: string, ...segments: string[])
       }
     }
   }
+}
+
+/** Values a stubbed import would have destroyed, keyed for the bridge modules
+ * below. Process-global because a generated CJS file is the only thing jiti's
+ * alias map can point at. */
+const bridgedModules: Record<string, Record<string, unknown>> = {};
+let bridgeCounter = 0;
+
+/**
+ * A real module for an import of a SIBLING PACKAGE, when its source can be
+ * read the same stubbed way.
+ *
+ * The generic stub is fine for a type-only import and unavoidable for a
+ * Bun-only runtime, but it also destroys plain literal data — and 18.2.5 moved
+ * a lot of that data out into `@oh-my-pi/pi-tui`. `treeFilterMode`'s enum
+ * values now live there, and under the stub the setting rendered no choices at
+ * all and dropped out of Cody's panel entirely. Reading the dependency's own
+ * source brings the literals back.
+ *
+ * Relative imports are deliberately left stubbed: their behaviour is unchanged
+ * from before the split, and stub-loading dozens of in-package modules is a
+ * much larger blast radius than this fix needs.
+ */
+function bridgeFor(specifier: string, fromFile: string, stubDir: string, depth: number): string | null {
+  if (depth > 0 || specifier.startsWith(".") || specifier.startsWith("node:")) return null;
+  const resolved = resolveSourceSpecifier(fromFile, specifier);
+  if (resolved === null) return null;
+  const exported = loadOmpSourceFile(resolved, depth + 1);
+  if (exported === null) return null;
+  const id = `bridge-${bridgeCounter += 1}`;
+  bridgedModules[id] = exported;
+  const bridgePath = path.join(stubDir, `${id}.cjs`);
+  try {
+    fs.writeFileSync(bridgePath, `module.exports = require(${JSON.stringify(__filename)}).__codyBridgedModule(${JSON.stringify(id)});\n`, "utf8");
+  } catch {
+    return null;
+  }
+  return bridgePath;
+}
+
+/** Bridge accessor. Exported only so a generated module can reach it. */
+export function __codyBridgedModule(id: string): Record<string, unknown> {
+  return bridgedModules[id] ?? {};
+}
+
+/**
+ * Follow a re-export into the module that actually declares a symbol.
+ *
+ * Upstream keeps splitting modules out into sibling packages (18.2.5 moved the
+ * whole terminal UI, `MODEL_ROLE_IDS` included, into `@oh-my-pi/pi-tui`), and
+ * the file left behind is a one-line `export { X } from "@oh-my-pi/pi-tui/…"`.
+ * Under the stub-every-import loader above, that re-export resolves to the
+ * stub, so the symbol comes back as a Proxy and the caller silently falls back
+ * to its frozen copy — which is the exact failure reading the source exists to
+ * prevent. So: load the file, and when the symbol is not what the caller
+ * expects, resolve the specifier it is re-exported from to that package's OWN
+ * source file and read it there.
+ *
+ * The hop is bounded (a chain of re-exports is still only a few files) and
+ * every failure returns null, because every caller has a fallback.
+ */
+export function loadOmpPackageSymbol<T>(
+  packageRoot: string,
+  segments: string[],
+  symbol: string,
+  isValid: (value: unknown) => value is T,
+): T | null {
+  const start = path.join(packageRoot, ...segments);
+  const seen = new Set<string>();
+  let file: string | null = start;
+  for (let hop = 0; hop < 4 && file !== null; hop += 1) {
+    if (seen.has(file)) return null;
+    seen.add(file);
+    const loaded = loadOmpSourceFile(file);
+    const value = loaded?.[symbol];
+    if (isValid(value)) return value;
+    file = reExportSourceFor(file, symbol);
+  }
+  return null;
+}
+
+/** The file a symbol is re-exported from, resolved to real source. */
+function reExportSourceFor(file: string, symbol: string): string | null {
+  let source: string;
+  try {
+    source = fs.readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+  // `export { X } from "…"` / `export { X as Y } from "…"`, then a bare
+  // `export * from "…"` as the fallback for a barrel file.
+  const named = new RegExp(`export\\s*(?:type\\s*)?\\{[^}]*\\b${symbol}\\b[^}]*\\}\\s*from\\s*"([^"]+)"`);
+  const specifier = named.exec(source)?.[1]
+    ?? /export\s*\*\s*from\s*"([^"]+)"/.exec(source)?.[1]
+    ?? null;
+  return specifier === null ? null : resolveSourceSpecifier(file, specifier);
+}
+
+/**
+ * A module specifier as written in the engine's source, resolved to the source
+ * FILE it names — relative paths against their importer, bare ones through the
+ * dependency's own `exports` map (these packages publish `src/*.ts` under it,
+ * which is why this works at all).
+ */
+export function resolveSourceSpecifier(fromFile: string, specifier: string): string | null {
+  if (specifier.startsWith(".")) {
+    return firstExistingSource(path.resolve(path.dirname(fromFile), specifier));
+  }
+  const parts = specifier.split("/");
+  const name = specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
+  const subpath = specifier.slice(name.length).replace(/^\//, "");
+  const packageDir = findDependencyDir(path.dirname(fromFile), name);
+  if (packageDir === null) return null;
+  let manifest: { exports?: unknown; main?: unknown };
+  try {
+    manifest = JSON.parse(fs.readFileSync(path.join(packageDir, "package.json"), "utf8")) as typeof manifest;
+  } catch {
+    return null;
+  }
+  const relative = exportTarget(manifest.exports, subpath === "" ? "." : `./${subpath}`);
+  if (relative !== null) return firstExistingSource(path.join(packageDir, relative));
+  // No usable exports entry: a source layout mirroring the subpath is the only
+  // other thing worth trying, and a miss is a null like any other.
+  return subpath === "" ? null : firstExistingSource(path.join(packageDir, "src", subpath));
+}
+
+/** `node_modules/<name>` from the importer's directory upwards. */
+function findDependencyDir(fromDir: string, name: string): string | null {
+  let current = fromDir;
+  for (let depth = 0; depth < 12; depth += 1) {
+    const candidate = path.join(current, "node_modules", name);
+    if (fs.existsSync(path.join(candidate, "package.json"))) return candidate;
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return null;
+}
+
+/** The `import`/`default` target for one subpath of an `exports` map,
+ * including a single-`*` pattern key. Conditions other than import/default are
+ * ignored: this only ever wants the source entry. */
+function exportTarget(exports: unknown, subpath: string): string | null {
+  if (!exports || typeof exports !== "object") return null;
+  const table = exports as Record<string, unknown>;
+  const pick = (entry: unknown): string | null => {
+    if (typeof entry === "string") return entry;
+    if (!entry || typeof entry !== "object") return null;
+    const conditions = entry as Record<string, unknown>;
+    for (const key of ["import", "default", "require"]) {
+      const value = conditions[key];
+      if (typeof value === "string") return value;
+    }
+    return null;
+  };
+  const exact = pick(table[subpath]);
+  if (exact !== null) return exact;
+  for (const [key, entry] of Object.entries(table)) {
+    const star = key.indexOf("*");
+    if (star < 0) continue;
+    const prefix = key.slice(0, star);
+    const suffix = key.slice(star + 1);
+    if (!subpath.startsWith(prefix) || !subpath.endsWith(suffix)) continue;
+    if (subpath.length < prefix.length + suffix.length) continue;
+    const target = pick(entry);
+    if (target === null) continue;
+    return target.replace("*", subpath.slice(prefix.length, subpath.length - suffix.length));
+  }
+  return null;
+}
+
+/** A specifier may name a file, a `.ts` sibling, or a directory barrel. */
+function firstExistingSource(base: string): string | null {
+  for (const candidate of [base, `${base}.ts`, path.join(base, "index.ts")]) {
+    try {
+      if (fs.statSync(candidate).isFile()) return candidate;
+    } catch {
+      // Next candidate.
+    }
+  }
+  return null;
 }

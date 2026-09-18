@@ -60,6 +60,10 @@ const TERMINAL_ONLY_KEYS = new Set([
   "recap.idleSeconds",
   // Voice input is a terminal-session feature.
   "stt.enabled",
+  // omp 18.2.4: the TUI working row's own smoothed tokens-per-second readout.
+  // Cody measures its own from the engine's per-message numbers and draws it
+  // on the message (lib/message-rate.ts), so this one reaches nothing here.
+  "composer.tokenRate",
 ]);
 
 /** Dotted-path prefixes (matched at a segment boundary) that are terminal-only
@@ -75,6 +79,10 @@ const TERMINAL_ONLY_PREFIXES = [
   // autocomplete, autocorrect) act on the TUI composer; Cody's composer has
   // the browser's own spellcheck.
   "spelling.",
+  // omp 18.2.5: `omp stream` livestreams the TERMINAL screen to a stream
+  // server. Cody draws no such screen, but the CLI a user runs in a Cody
+  // terminal does — which is exactly why these are labelled, not hidden.
+  "stream.",
 ];
 
 /** Whether a setting configures the harness's terminal UI and therefore has no

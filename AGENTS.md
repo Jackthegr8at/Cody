@@ -1130,6 +1130,27 @@ setting added upstream appears without a Cody change.
   permissive Proxy stub and jiti transpiles what is left. The stub must return
   `undefined` for `then`, or the module becomes thenable and the load hangs
   forever on an unsettled top-level await.
+- **Upstream keeps moving modules into sibling packages, and the stub destroys
+  data.** 18.2.5 moved the whole terminal UI into `@oh-my-pi/pi-tui`, leaving
+  `export { MODEL_ROLE_IDS } from "@oh-my-pi/pi-tui/…"` behind and enum values
+  like `treeFilterMode`'s in that package. pi-tui is Bun-only (a real import
+  dies on `Bun is not defined`), so two mechanisms read the data anyway, both
+  in `package-source.ts`:
+  - `loadOmpPackageSymbol(root, segments, symbol, isValid)` follows a
+    re-export — load the file, and when the symbol is not what the caller
+    expects, resolve the specifier it is re-exported from and read the
+    declaring file. Without it `getOmpModelRoleIds` silently fell back to its
+    frozen copy, which is the exact failure reading the source prevents.
+  - A BARE import is bridged rather than stubbed: the dependency's own source
+    is loaded (with all of ITS imports stubbed, one hop only) and handed to
+    the parent through a generated CJS module. This is what keeps
+    `treeFilterMode` in the panel at all — under the plain stub its enum had
+    no values and the row dropped out. Relative imports stay stubbed on
+    purpose: their behaviour is unchanged from before the split, and
+    stub-loading dozens of in-package modules is a far larger blast radius.
+  - Both resolve a specifier through the dependency's own `exports` map
+    (`resolveSourceSpecifier`), because these packages publish `src/*.ts`
+    under it. Every failure returns null; every caller has a fallback.
 - `lib/omp/settings-schema.ts` — reads `<omp package>/src/config/settings-schema.ts`
   through it. There is **no settings-schema RPC command**, so it goes through the
   installed package's source. Credentials, `ui.secret` settings, and settings
@@ -1161,7 +1182,25 @@ setting added upstream appears without a Cody change.
   no notion of a second front end), so those rows get a "Terminal only" chip
   rather than being hidden — the same file still drives the CLI.
   `settings-surface.test.mjs` fails if a rule stops matching the installed
-  schema, so an upstream rename surfaces as a test failure, not a vanished chip.
+  schema, so an upstream rename surfaces as a test failure, not a vanished
+  chip — with one necessary refinement: a rule that names a setting the
+  installed engine does not declare is ambiguous (renamed away, or targeting a
+  NEWER engine), so the unmatched-rule check only judges an engine at least as
+  new as `HarnessAdapter.verifiedVersion`.
+- **This whole pipeline is tested against a REAL omp package, and for a long
+  time it was not.** Six test files (`settings-schema`, `settings-values`,
+  `settings-surface`, `model-roles`, `recommended-roundtrip`,
+  `recommended-cards`) looked for `/tmp/ompkg/package/bin/omp`, which nothing
+  in this repo creates, so every one of them SKIPPED — locally and in CI — and
+  18.2.5's package split went undetected until it was read by hand.
+  `lib/omp/omp-test-package.mjs` now resolves whatever omp is actually
+  available (`CODY_OMP_BIN`, that extraction, the tools prefix, PATH), so they
+  run; point `CODY_OMP_BIN` at an unpacked newer engine to audit it before
+  updating. Two consequences for what these tests may assert: the curated-card
+  split (schema-declared vs curated-only) and the settings-tab ORDER are
+  DERIVED from whichever engine is installed — 18.2.5 moved two keys and
+  reordered every tab — so they are asserted as invariants ("every card can
+  render", "these tabs exist"), never as counts or positions.
 - `components/settings/engine/SchemaSettingsList.tsx` — the Behavior hub's
   "All settings" list: the complete schema, chip-grouped, secrets masked.
   Indexed for search by `hooks/useSchemaIndex.ts`, the one component-facing

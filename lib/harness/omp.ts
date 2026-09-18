@@ -63,12 +63,21 @@ export const ompHarness: HarnessAdapter = {
   binaryName: "omp",
   tagline: "The oh-my-pi coding agent. Cody's founding engine, every surface enabled.",
   installSpec: "@oh-my-pi/pi-coding-agent@latest",
-  // Audited against 18.1.21's changelog and installed source (settings schema
-  // conditions, model-role list, rpc-mode command surface, retry-fallback chain
-  // grammar, session entry types), then exercised live through the settings
-  // schema, redacted usage, and negotiated rpc-ui state/catalog/subagent-
-  // snapshot paths.
-  verifiedVersion: "18.1.21",
+  // Audited against 18.2.5's changelog and installed source (settings schema
+  // conditions and the five keys it adds, model-role list, rpc-mode command
+  // surface, retry-fallback chain grammar, session entry types), then
+  // exercised live through the settings schema, redacted usage, and negotiated
+  // rpc-ui state/catalog/subagent-snapshot paths.
+  //
+  // 18.2.5 moved the terminal UI into @oh-my-pi/pi-tui and left re-exports
+  // behind, which is why lib/omp/package-source follows a symbol into the
+  // package that declares it: pi-tui is Bun-only and cannot be imported under
+  // Node, so the source file is read the same stubbed way omp's own is.
+  // `login` now REFUSES a provider whose flow needs secret input (an API key
+  // typed at a prompt) instead of asking for it over RPC — the command fails
+  // with the engine's own message, which Cody already surfaces in the sign-in
+  // panel, and such a provider is reachable through a Cody terminal.
+  verifiedVersion: "18.2.5",
   capabilities: {
     liveSessions: true,
     models: true,
