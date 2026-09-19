@@ -56,6 +56,7 @@ async function main() {
   const endpoint = process.env.CODY_DISPLAY_ENDPOINT;
   const todoEndpoint = process.env.CODY_TODO_ENDPOINT;
   const sessionsEndpoint = process.env.CODY_SESSIONS_ENDPOINT;
+  const devicesEndpoint = process.env.CODY_DEVICES_ENDPOINT;
   const capability = process.env.CODY_DISPLAY_CAPABILITY;
   const sessionId = process.env.CODY_DISPLAY_SESSION_ID;
   if (!endpoint || !capability) throw new Error("Cody display capability is unavailable");
@@ -74,6 +75,23 @@ async function main() {
       // sweep over every running session), and a timeout here costs the model
       // a whole tool call.
       signal: AbortSignal.timeout(15_000),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "HTTP " + response.status);
+    return typeof body.text === "string" ? body.text : "";
+  }
+
+  /** Same envelope as callSessionTool, for the six device tools. Its
+   * timeout is longer than the session calls' 15s: a device op can wait up
+   * to DEVICE_OP_TIMEOUT_MS (20s, lib/devices/protocol.ts) for the browser
+   * to answer, and this fetch must outlast that. */
+  async function callDeviceTool(tool, toolArgs) {
+    if (!devicesEndpoint || !sessionId) throw new Error("Cody device capability is unavailable");
+    const response = await fetch(devicesEndpoint, {
+      method: "POST",
+      headers: { Authorization: "Bearer " + capability, "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId, tool, arguments: toolArgs }),
+      signal: AbortSignal.timeout(25_000),
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "HTTP " + response.status);
@@ -192,6 +210,99 @@ async function main() {
       return { content: [{ type: "text", text }] };
     } catch (error) {
       return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to read the session transcript" }] };
+    }
+  });
+  server.registerTool("device_list", {
+    description: "List what this session's browser can reach: its Web Serial/WebUSB/Web Bluetooth capabilities, whether a browser is attached, and one line per device (id, label, kind, open/closed, buffered bytes).",
+    inputSchema: {},
+  }, async () => {
+    try {
+      const text = await callDeviceTool("device_list", {});
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to list devices" }] };
+    }
+  });
+  server.registerTool("device_open", {
+    description: "Open a device: serial.open (baud default 115200) for a serial port, ble.connect for BLE, or usb.open for a raw USB device — dispatched from the device's kind.",
+    inputSchema: {
+      device: z.string().optional().describe("Device id or a case-insensitive substring of its label; omit when exactly one device is attached."),
+      baudRate: z.number().optional().describe("Serial only. Baud rate; defaults to 115200."),
+      dataBits: z.number().optional().describe("Serial only. 7 or 8."),
+      stopBits: z.number().optional().describe("Serial only. 1 or 2."),
+      parity: z.enum(["none", "even", "odd"]).optional().describe("Serial only."),
+      flowControl: z.enum(["none", "hardware"]).optional().describe("Serial only."),
+    },
+  }, async (input) => {
+    try {
+      const text = await callDeviceTool("device_open", input);
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to open the device" }] };
+    }
+  });
+  server.registerTool("device_write", {
+    description: "Write bytes to an open serial device. Exactly one of text (UTF-8) or base64 is required. For BLE use ble_gatt; raw USB writes are not exposed by a tool.",
+    inputSchema: {
+      device: z.string().optional().describe("Device id or a case-insensitive substring of its label; omit when exactly one device is attached."),
+      text: z.string().optional().describe("UTF-8 text to write."),
+      base64: z.string().optional().describe("Base64-encoded bytes to write."),
+    },
+  }, async (input) => {
+    try {
+      const text = await callDeviceTool("device_write", input);
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to write to the device" }] };
+    }
+  });
+  server.registerTool("device_read", {
+    description: "Drain buffered bytes from an open device: serial RX, a BLE notification after ble_gatt subscribes, or a streamed USB IN transfer.",
+    inputSchema: {
+      device: z.string().optional().describe("Device id or a case-insensitive substring of its label; omit when exactly one device is attached."),
+      waitMs: z.number().optional().describe("Milliseconds to wait for at least one byte; default 0 (read whatever is already buffered), capped at 10000."),
+      maxBytes: z.number().optional().describe("Maximum bytes to drain in one call."),
+      encoding: z.enum(["text", "base64"]).optional().describe('"text" (default, lossy UTF-8) or "base64".'),
+      characteristic: z.string().optional().describe("BLE only: read notifications from this characteristic. Each subscribed characteristic buffers separately; omit for a serial or USB device."),
+    },
+  }, async (input) => {
+    try {
+      const text = await callDeviceTool("device_read", input);
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to read from the device" }] };
+    }
+  });
+  server.registerTool("device_close", {
+    description: "Close an open device.",
+    inputSchema: {
+      device: z.string().optional().describe("Device id or a case-insensitive substring of its label; omit when exactly one device is attached."),
+    },
+  }, async (input) => {
+    try {
+      const text = await callDeviceTool("device_close", input);
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to close the device" }] };
+    }
+  });
+  server.registerTool("ble_gatt", {
+    description: 'Bluetooth GATT operations: "services" lists them, "read"/"write" need service and characteristic, "subscribe"/"unsubscribe" toggle notifications (which then arrive via device_read).',
+    inputSchema: {
+      device: z.string().optional().describe("Device id or a case-insensitive substring of its label; omit when exactly one device is attached."),
+      op: z.enum(["services", "read", "write", "subscribe", "unsubscribe"]).describe("GATT operation to perform."),
+      service: z.string().optional().describe("GATT service UUID. Required for read, write, subscribe, unsubscribe."),
+      characteristic: z.string().optional().describe("GATT characteristic UUID. Required for read, write, subscribe, unsubscribe."),
+      text: z.string().optional().describe('UTF-8 text to write. For op "write", exactly one of text or base64 is required.'),
+      base64: z.string().optional().describe('Base64-encoded bytes to write. For op "write", exactly one of text or base64 is required.'),
+      withoutResponse: z.boolean().optional().describe('For op "write": true sends without waiting for a peripheral response.'),
+    },
+  }, async (input) => {
+    try {
+      const text = await callDeviceTool("ble_gatt", input);
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to perform the BLE operation" }] };
     }
   });
   await server.connect(new StdioServerTransport());

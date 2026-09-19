@@ -33,6 +33,7 @@ const PUBLIC_EXACT = new Set([
   "/api/internal/display",
   "/api/internal/todo",
   "/api/internal/sessions",
+  "/api/internal/devices",
 ]);
 
 function isPublicPath(pathname: string): boolean {

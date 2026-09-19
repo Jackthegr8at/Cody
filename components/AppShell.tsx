@@ -14,7 +14,7 @@ import { BranchNavigator } from "./BranchNavigator";
 import { ThemePicker } from "./ThemePicker";
 import { TitleBar } from "./TitleBar";
 import { useDesktopShell } from "@/hooks/useDesktopShell";
-import { AppWindow, Check, Copy, ExternalLink, Files, GitBranch, History, Info, ListTodo, Menu, MessageCircle, PanelLeft, ScrollText, Settings, Terminal, TriangleAlert } from "lucide-react";
+import { AppWindow, Check, Copy, ExternalLink, Files, GitBranch, History, Info, ListTodo, Menu, MessageCircle, PanelLeft, ScrollText, Settings, Terminal, TriangleAlert, Usb } from "lucide-react";
 import { formatApiCost, formatCompactNumber, formatPercent, usageToneColor } from "@/lib/format";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
@@ -76,12 +76,16 @@ const PreviewPanel = dynamic(() => import("./PreviewPanel").then((module) => mod
   ssr: false,
   loading: () => <PanelLoadingFallback />,
 });
+const DevicePanel = dynamic(() => import("./DevicePanel").then((module) => module.DevicePanel), {
+  ssr: false,
+  loading: () => <PanelLoadingFallback />,
+});
 
 /** The tools of the right workspace panel, in tab order (pi-web parity:
  * Files | Git | Terminal | Tasks | Info). Update status lives in Settings ›
  * System, not in a panel. */
-type WorkspacePanelId = "chat" | "file" | "git" | "terminal" | "preview" | "tasks" | "info";
-const WORKSPACE_PANEL_IDS: readonly WorkspacePanelId[] = ["chat", "file", "git", "terminal", "preview", "tasks", "info"];
+type WorkspacePanelId = "chat" | "file" | "git" | "terminal" | "preview" | "tasks" | "info" | "devices";
+const WORKSPACE_PANEL_IDS: readonly WorkspacePanelId[] = ["chat", "file", "git", "terminal", "preview", "tasks", "info", "devices"];
 
 function isWorkspacePanelId(value: string | null): value is WorkspacePanelId {
   return (WORKSPACE_PANEL_IDS as readonly string[]).includes(value ?? "");
@@ -596,7 +600,7 @@ export function AppShell() {
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [rightPanelMode, setRightPanelModeState] = useState<WorkspacePanelId>("file");
   // file + terminal always mount (pre-existing behavior); the rest join on first activation.
-  const [mountedPanels, setMountedPanels] = useState<ReadonlySet<WorkspacePanelId>>(() => new Set(["file", "terminal"]));
+  const [mountedPanels, setMountedPanels] = useState<ReadonlySet<WorkspacePanelId>>(() => new Set(["file", "terminal", "devices"]));
   const setRightPanelMode = useCallback((mode: WorkspacePanelId) => {
     setRightPanelModeState(mode);
     setMountedPanels((prev) => (prev.has(mode) ? prev : new Set([...prev, mode])));
@@ -2037,6 +2041,7 @@ export function AppShell() {
               { id: "preview", icon: <AppWindow size={15} aria-hidden="true" />, label: t("workspace.preview") },
               { id: "tasks", icon: <ListTodo size={15} aria-hidden="true" />, label: t("workspace.tasks") },
               { id: "info", icon: <Info size={15} aria-hidden="true" />, label: t("workspace.info") },
+              { id: "devices", icon: <Usb size={15} aria-hidden="true" />, label: t("workspace.devices") },
             ];
             const selectPanelAt = (index: number) => {
               const panel = panels[(index + panels.length) % panels.length];
@@ -2226,6 +2231,14 @@ export function AppShell() {
               gitRepoRoot={gitMeta.repoRoot}
             />
           )}
+        </div>
+        <div
+          id="workspace-devices-tool"
+          role="tabpanel"
+          aria-labelledby="workspace-devices-tab"
+          style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "devices" ? "flex" : "none", flexDirection: "column" }}
+        >
+          {mountedPanels.has("devices") && <DevicePanel sessionId={selectedSession?.id ?? null} />}
         </div>
 
     </div>

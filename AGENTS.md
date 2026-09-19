@@ -1711,6 +1711,74 @@ paged).
   `capability.sid` alone — a body may name any session id, but it must match
   the token, and the caller's identity is derived server-side from it.
 
+### Browser-hosted hardware (`lib/devices/`)
+
+The agent runs on the server; the hardware is plugged into the human's
+machine. So the BROWSER is the device host: a tool call goes server → the
+session's WebSocket → the page, which performs it against a real
+`SerialPort` / `USBDevice` / GATT characteristic, and the result comes back.
+The server holds no handles and never sees a device — it holds the grant's
+session scope and the inbound byte buffers.
+
+- **The grant is the browser's, and it is per session.** Web Serial/USB/
+  Bluetooth only hand a page a device the user picked in the browser's own
+  chooser, in a secure context. Cody cannot widen that and does not try: the
+  Devices panel is where a human picks, and the socket
+  (`/api/devices/socket?sessionId=`) is gated exactly like the display
+  socket — a credential that may see that session, same-origin, and the
+  session must really exist (`canAccessDisplaySession`).
+- **Tools materialize only while hardware is attached**
+  (`deviceToolsForSession()` / `watchDeviceBridge()` in `lib/rpc-manager.ts`).
+  Registering six schemas in every conversation would spend tokens on a
+  capability most sessions cannot use, and offering `device_write` with
+  nothing attached invites a model to try. When a device appears the tool list
+  is re-published and ONE notice says so — a tool that silently materializes
+  mid-conversation is a capability the model has no reason to go looking for.
+- **Inbound bytes are buffered per SOURCE, not per device**
+  (`sourceKey()`, `lib/devices/bus.ts`). A BLE peripheral can notify on
+  several characteristics at once; merging those into one stream is not a
+  formatting problem but corruption, since nothing downstream could tell which
+  characteristic produced which bytes. Serial and USB have one source, so
+  their key is the device itself, and `device_read` takes an optional
+  `characteristic` to choose among a BLE device's streams.
+- **Waiting is event-driven** (`waitForData`): the page tells the server the
+  moment bytes land, so a long `waitMs` costs nothing while the line is quiet.
+  Polling traded latency for wakeups and bought neither.
+- **A drop is always reported.** The per-source ring buffer is
+  `DEVICE_BUFFER_BYTES` (256 KiB); a console that overflowed and one that
+  merely paused must never read the same.
+- **Serial is a shape, not an API.** The client prefers real Web Serial and
+  falls back to `web-serial-polyfill` over WebUSB on Android (no Chrome there
+  has Web Serial), constructing the polyfill's `SerialPort` from a
+  `navigator.usb` device it picked itself — the polyfill's own singleton
+  hands back a wrapper with no way to recover the USB product string, and the
+  panel needs a label a human recognizes. Downstream code (esptool-js later)
+  sees one port shape either way.
+- **`usb_transfer` is how an unknown device gets interrogated.** Control
+  transfers (descriptors, vendor requests) and bulk/interrupt endpoints are
+  what a raw USB device speaks before anything higher-level exists —
+  fastboot's ASCII command protocol, a MediaTek BROM handshake. Without it an
+  attached device could only be opened and looked at.
+- **Capability reporting is honest and per browser.** `device_list` leads with
+  what THIS browser can do (secure context, serial, usb, bluetooth, platform)
+  because the answer differs per device and per origin: no Web Serial on
+  Android, no Web Bluetooth in several desktop builds, nothing at all outside
+  a secure context. The panel says the same thing beside each greyed button,
+  naming the reason rather than disabling silently.
+- **Windows binds a USB interface to one driver.** Chrome reaches a device
+  only through WinUSB, so an interface held by a vendor driver (Google's ADB
+  driver, a MediaTek VCOM) enumerates but cannot be claimed; Zadig rebinding
+  that interface to WinUSB is the fix. This is a host fact, not something Cody
+  can work around — it belongs in whatever the panel tells a stuck user.
+- **ACP engines reach the tools over MCP**, like display/todo/sessions:
+  `POST /api/internal/devices` with a session-scoped capability token, tools
+  declared in `bin/cody-display-mcp.js`, route on `proxy.ts`'s `PUBLIC_EXACT`.
+  The bridge is keyed by the VERIFIED `capability.sid`, so a body naming
+  another session cannot reach its hardware.
+- **Trap**: the bridge registry and the capability secret are process-local,
+  exactly like the display bus — a multi-process deployment needs a shared
+  store before either survives crossing processes.
+
 ### Disk exhaustion is a first-class failure (`lib/disk-space.ts`)
 - The instance data dir is finite and often quota-capped (a ZFS dataset on
   Unraid appdata). When it fills, npm dies with `errno -122` — EDQUOT, which

@@ -31,6 +31,8 @@ import { isRecord } from "./type-guards";
 import { SIDEBAR_CONTEXT_TOOLS } from "./sidebar-context-tools";
 import { SESSION_AWARENESS_TOOLS, type SessionLivePhase, type SessionToolContext } from "./session-tools";
 import { findUserById, hasAnyUser, type UserRecord } from "./auth/users";
+import { DEVICE_TOOLS } from "./devices/tools";
+import { aliasDeviceBridge, getDeviceBridge, peekDeviceBridge } from "./devices/bus";
 import type {
   BashResultInfo,
   HostToolDefinition,
@@ -240,6 +242,7 @@ FORGE_HOST_TOOL];
 const SERVER_HOST_TOOL_NAMES = new Set([
   ...SERVER_HOST_TOOLS.map((tool) => tool.name),
   ...SIDEBAR_CONTEXT_TOOLS.map((tool) => tool.name),
+  ...DEVICE_TOOLS.map((tool) => tool.name),
 ]);
 /** One session-tool result's char budget for a MAIN chat. The sidebar's own
  * budget assumes the smallest supported window (6 KB); a main session runs on
@@ -669,6 +672,8 @@ export class AgentSessionWrapper {
   private restarting = false;
   private _alive = true;
   private mcpListWaiter: { resolve: (text: string) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+  /** Unsubscribe for the device-bridge watch, set once the session id is known. */
+  private deviceWatch: (() => void) | null = null;
   /** Host tools the web UI registered via set_host_tools (agent-callable). */
   private hostToolNames: Set<string> = new Set();
   private hostTools: Array<Record<string, unknown>> = [];
@@ -717,7 +722,48 @@ export class AgentSessionWrapper {
    * schemas cost 416 tokens, which even an 8k local model can afford. */
   private hostToolsForCurrentProfile() {
     if (this.engine.kind === "sidebar") return SIDEBAR_CONTEXT_TOOLS.map(({ handler: _handler, ...tool }) => tool);
-    return this.localProfileLaunch?.profileId === "minimal" ? [] : [...this.hostTools, ...SERVER_HOST_TOOLS];
+    if (this.localProfileLaunch?.profileId === "minimal") return [];
+    return [...this.hostTools, ...SERVER_HOST_TOOLS, ...this.deviceToolsForSession()];
+  }
+
+  /**
+   * The device tools exist only while a page is actually holding hardware for
+   * this session. Registering them unconditionally would spend schema tokens
+   * in every conversation for a capability most of them cannot use — and
+   * offering a model `device_write` with nothing attached invites it to try.
+   * They appear when a browser connects a device and leave with it.
+   */
+  private deviceToolsForSession(): HostToolDefinition[] {
+    if (!this._sessionId) return [];
+    const bridge = peekDeviceBridge(this._sessionId);
+    if (!bridge?.attached || bridge.list().length === 0) return [];
+    return DEVICE_TOOLS.map(({ handler: _handler, ...tool }) => tool);
+  }
+
+  /** Re-publish the tool list when hardware comes or goes, and say so once in
+   * the transcript: a tool that silently materializes mid-conversation is a
+   * capability the model has no reason to go looking for. */
+  private watchDeviceBridge(): void {
+    if (!this._sessionId || this.deviceWatch) return;
+    const bridge = peekDeviceBridge(this._sessionId);
+    if (!bridge) return;
+    let lastCount = bridge.attached ? bridge.list().length : 0;
+    this.deviceWatch = bridge.onChange(() => {
+      const count = bridge.attached ? bridge.list().length : 0;
+      if (count === lastCount) return;
+      const previous = lastCount;
+      lastCount = count;
+      if (!this.engine.rpcUi.hostTools || !this.isAlive()) return;
+      void this.proc.sendCommand({ type: "set_host_tools", tools: this.hostToolsForCurrentProfile() }).catch(() => {});
+      if (count > 0 && previous === 0) {
+        const labels = bridge.list().map((device) => device.label).join(", ");
+        this.emit({
+          type: "notice",
+          level: "info",
+          message: `Hardware attached in the browser: ${labels}. device_list, device_open, device_write, device_read, device_close and ble_gatt now work against it.`,
+        });
+      }
+    });
   }
 
   /** The phase flags a status call reports, read straight off this wrapper.
@@ -869,8 +915,14 @@ export class AgentSessionWrapper {
     if (this._sessionId && this._sessionId !== id) {
       this.planKeeper?.dispose();
       this.planKeeper = null;
+      // A re-keyed session takes its device grants with it: the page is still
+      // holding the same hardware, it is just filed under a new id now.
+      aliasDeviceBridge(this._sessionId, id);
+      this.deviceWatch?.();
+      this.deviceWatch = null;
     }
     this._sessionId = id;
+    this.watchDeviceBridge();
   }
 
   private applyIdentity(state: RpcSessionState): void {
@@ -1205,6 +1257,17 @@ export class AgentSessionWrapper {
       const text = await sidebarTool.handler(isRecord(event.arguments) ? event.arguments : {}, {
         cwd: this.engine.contextCwd ?? this.cwd,
         ...this.sessionToolContext(),
+      });
+      this.sendHostToolResult({ type: "host_tool_result", id, result: { content: [{ type: "text", text }] } });
+      return;
+    }
+    const deviceTool = this.engine.kind === "sidebar" ? undefined : DEVICE_TOOLS.find((tool) => tool.name === toolName);
+    if (deviceTool) {
+      // Same contract as the session tools: plain text either way, and the
+      // bridge is addressed by THIS session's id — a tool call can never
+      // reach hardware granted to another conversation.
+      const text = await deviceTool.handler(isRecord(event.arguments) ? event.arguments : {}, {
+        bridge: getDeviceBridge(this._sessionId),
       });
       this.sendHostToolResult({ type: "host_tool_result", id, result: { content: [{ type: "text", text }] } });
       return;
@@ -2029,6 +2092,8 @@ export class AgentSessionWrapper {
       this.sessionFileSignalTimer = null;
     }
     this.planKeeper?.dispose();
+    this.deviceWatch?.();
+    this.deviceWatch = null;
     this.unsubscribeFrames?.();
     this.clearPendingUiRequests();
     if (this.mcpListWaiter) {
