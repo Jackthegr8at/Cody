@@ -3,6 +3,7 @@ import { homedir } from "os";
 import path from "path";
 import { getSessionOwner, renameSessionOwner, setSessionOwner } from "./auth/session-owners";
 import { aliasDisplaySession, publishDisplayRequest } from "./display/bus";
+import { startSharedBrowser } from "./display/shared-browser";
 import { isLoopbackHost } from "./display/ladder";
 import { ForgeError } from "./forge/client";
 import { FORGE_HOST_TOOL, runForgeTool } from "./forge/tool";
@@ -199,6 +200,18 @@ const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
       url: { type: "string", description: "Container-local http(s) URL, for example http://127.0.0.1:3000" },
       title: { type: "string", description: "Optional short preview title." },
       mode: { type: "string", enum: ["auto", "stream", "native"], description: "Prefer auto: Cody picks the highest-fidelity preview that actually works. Pass stream or native only when one specifically is required." },
+    },
+    required: ["url"],
+  },
+}, {
+  name: "shared_browser",
+  description:
+    "Open a URL in a browser the user WATCHES LIVE in Cody's Preview panel, and get back a DevTools endpoint to drive it with. Use this instead of launching your own headless browser whenever you verify a web UI: the user sees every click and navigation as it happens, and can take the mouse themselves mid-run. Attach your browser automation to the returned endpoint as a CDP url and operate the existing tab. Loopback URLs only.",
+  parameters: {
+    type: "object",
+    properties: {
+      url: { type: "string", description: "Container-local http(s) URL to open, for example http://127.0.0.1:3000" },
+      title: { type: "string", description: "Optional short preview title." },
     },
     required: ["url"],
   },
@@ -1359,6 +1372,28 @@ export class AgentSessionWrapper {
           id,
           isError: true,
           result: { content: [{ type: "text", text: error instanceof Error ? error.message : "Invalid preview request" }] },
+        });
+      }
+      return;
+    }
+    if (toolName === "shared_browser") {
+      try {
+        const handle = await startSharedBrowser(this._sessionId, isRecord(event.arguments) ? event.arguments : {});
+        // The endpoint is only half the answer: automation that opens its own
+        // tab would be driving a surface nobody streams, so say plainly that
+        // the existing tab is the one on screen.
+        const text = [
+          `Shared browser is open at ${handle.request.source.url} and streaming to the user's Preview panel — they can see it and take the mouse at any time.`,
+          `Attach your browser automation to this CDP endpoint and drive the tab that is already open: ${handle.endpoint}`,
+          "Opening a second tab is fine — the user sees whatever that browser shows.",
+        ].join(" ");
+        this.sendHostToolResult({ type: "host_tool_result", id, result: { content: [{ type: "text", text }] } });
+      } catch (error) {
+        this.sendHostToolResult({
+          type: "host_tool_result",
+          id,
+          isError: true,
+          result: { content: [{ type: "text", text: error instanceof Error ? error.message : "Could not start a shared browser" }] },
         });
       }
       return;

@@ -123,6 +123,32 @@ async function main() {
       return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to open preview" }] };
     }
   });
+  server.registerTool("shared_browser", {
+    title: "Open a shared browser",
+    description: "Open a URL in a browser the user WATCHES LIVE in Cody's Preview panel, and get back a DevTools endpoint to drive it with. Use this instead of your own headless browser whenever you verify a web UI: the user sees every click as it happens and can take the mouse mid-run. Attach browser automation to the returned endpoint as a CDP url and drive the tab that is already open. Loopback URLs only.",
+    inputSchema: {
+      url: z.string().describe("Container-local http(s) URL, for example http://127.0.0.1:3000"),
+      title: z.string().max(160).optional().describe("Short label for the preview"),
+    },
+  }, async (input) => {
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { Authorization: "Bearer " + capability, "Content-Type": "application/json" },
+        body: JSON.stringify({ ...input, shared: true }),
+        // Starting a renderer means launching Chromium, which is slower than
+        // publishing a request; the 5s publish budget would time out on a
+        // cold first call.
+        signal: AbortSignal.timeout(60_000),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "HTTP " + response.status);
+      const text = `Shared browser is open at ${body.url} and streaming to the user's Preview panel — they can watch and take the mouse at any time. Attach your browser automation to this CDP endpoint and drive the tab that is already open: ${body.endpoint}`;
+      return { content: [{ type: "text", text }], structuredContent: { url: body.url, endpoint: body.endpoint, requestId: body.requestId } };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to start a shared browser" }] };
+    }
+  });
   server.registerTool("cody_todo", {
     title: "Manage Cody To-do",
     description: "The user's own project to-do list (.cody/todo.json). Separate from your task plan: it holds what the user asked to remember. Use list before working through it, complete an item only when its work is actually done, reopen if you completed it by mistake, note to leave a short note on an item. The user sees every change with your name in the list's history.",

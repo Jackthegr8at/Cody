@@ -1663,6 +1663,43 @@ must name the panel that fixes it.
   multi-process deployment (multiple Next.js workers or replicas) would need a
   shared store for both before display requests survive crossing processes.
 
+### The shared browser (`lib/display/shared-browser.ts`)
+
+A browser the agent drives and the human watches at the same time. The
+streamed rung already renders a URL in a server-side Chromium and carries
+real pointer/keyboard input back; `shared_browser` hands the agent the
+DevTools endpoint of THAT Chromium, so automation acts on the exact surface
+on screen. The alternative it replaces — the agent launching its own headless
+browser and posting screenshots afterwards — means the human watches a copy
+that never moves, which was the complaint that produced this.
+
+- **Streamed, never auto.** The ladder's higher rungs frame the dev server in
+  the human's OWN browser, which by construction cannot show them anything
+  the agent's browser does. A shared request is published with
+  `mode: "stream"`, so there is exactly one candidate and it is the one Cody
+  renders.
+- **Raster, never H.264.** The H.264 rung degrades into a *different*
+  Chromium when a client turns out to have no decoder — which would strand
+  the agent on a browser nobody streams any more, with a CDP endpoint that
+  still answers. An endpoint handed to automation has to stay valid for the
+  whole run, and JPEG stills are plenty for watching a test drive itself.
+- **Handing out the endpoint IS the share**, and it lengthens the idle window
+  (`SHARED_IDLE_DISPOSE_MS`, 10 min, vs `IDLE_DISPOSE_MS`, 30 s). A human
+  closing the panel or switching tabs is not a reason to kill a browser an
+  agent is mid-run on; it would fail the automation with a dead endpoint and
+  no explanation.
+- **Discoverability is the whole feature.** A capability nothing reaches for
+  does not exist, so the instruction rides three places: the tool
+  DESCRIPTION (always in the schema, for every engine), the MCP declaration
+  in `bin/cody-display-mcp.js` (so an ACP engine gets the same tool through
+  `POST /api/internal/display` with `shared: true`), and a standing rule in
+  the operator's user-level `RULES.md`, which reaches every session and
+  subagent rather than only sessions that happen to read this file.
+- **The automation adopts the open tab.** `browser.open({app:{cdp_url}})`
+  connects to the provider's Chromium and takes over the page it is already
+  streaming; a second tab is fine too, since the provider streams the browser
+  the human is watching either way.
+
 ### Cross-session awareness (`lib/session-tools.ts`)
 
 One conversation regularly needs to know what another is doing, and Cody is
