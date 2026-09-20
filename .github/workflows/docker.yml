@@ -86,7 +86,12 @@ jobs:
           fail() {
             echo "::error::$1" >&2
             docker logs cody-smoke >&2 || true
-            docker rm -f cody-smoke >/dev/null || true
+            # `-v`: the image declares a VOLUME for /data, so each smoke
+            # container mints an anonymous volume with a full engine install
+            # (~3.5GB). Harmless on an ephemeral runner, ruinous on the
+            # forge's shared host daemon — kept identical in both workflows
+            # so the difference is never reintroduced here and copied there.
+            docker rm -f -v cody-smoke >/dev/null || true
             exit 1
           }
 
@@ -219,7 +224,7 @@ jobs:
           else
             echo "::warning::omp settings schema did not load in the image"
           fi
-          docker rm -f cody-smoke >/dev/null
+          docker rm -f -v cody-smoke >/dev/null
           echo "fresh-install verified (locked, setup mints an admin, omp installs via npm and runs, screenshots capture)"
 
           # ------------------------------------------------------------------
@@ -243,7 +248,7 @@ jobs:
             || fail "engine-first SSH login profile is missing"
           docker exec cody-smoke sh -c 'grep -q "root:.*:/data/home:" /etc/passwd' \
             || fail "root home was not moved to the persistent /data/home"
-          docker rm -f cody-smoke >/dev/null
+          docker rm -f -v cody-smoke >/dev/null
           echo "password-mode Basic Auth + SSH verified"
 
       - name: Build and push

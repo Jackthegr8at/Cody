@@ -128,7 +128,14 @@ jobs:
           fail() {
             echo "::error::$1" >&2
             docker logs "$SMOKE_NAME" >&2 || true
-            docker rm -f "$SMOKE_NAME" >/dev/null || true
+            # `-v` is load-bearing on this runner: the image declares a
+            # VOLUME for /data, so every smoke container mints an anonymous
+            # volume holding a full engine install (~3.5GB). `docker rm`
+            # without it orphans that volume on the HOST daemon, where
+            # nothing reclaims it — `docker volume prune` is unsafe here
+            # because the same daemon runs the owner's real containers.
+            # 32 of them (112GB) accumulated before this was found.
+            docker rm -f -v "$SMOKE_NAME" >/dev/null || true
             exit 1
           }
 
@@ -288,7 +295,7 @@ jobs:
           else
             echo "::warning::omp settings schema did not load in the image"
           fi
-          docker rm -f "$SMOKE_NAME" >/dev/null
+          docker rm -f -v "$SMOKE_NAME" >/dev/null
           echo "fresh-install verified (locked, setup mints an admin, omp installs via npm and runs, screenshots capture)"
 
           # ------------------------------------------------------------------
@@ -312,7 +319,7 @@ jobs:
             || fail "engine-first SSH login profile is missing"
           docker exec "$SMOKE_NAME" sh -c 'grep -q "root:.*:/data/home:" /etc/passwd' \
             || fail "root home was not moved to the persistent /data/home"
-          docker rm -f "$SMOKE_NAME" >/dev/null
+          docker rm -f -v "$SMOKE_NAME" >/dev/null
           echo "password-mode Basic Auth + SSH verified"
 
       - name: Build and push
