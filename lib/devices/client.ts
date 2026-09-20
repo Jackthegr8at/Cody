@@ -429,9 +429,9 @@ export const DEFAULT_BLE_OPTIONAL_SERVICES = [
   "device_information",
   "battery_service",
   "6e400001-b5a3-f393-e0a9-e50e24dcca9e", // Nordic UART Service
-  "18f0",
-  "fff0",
-  "ffe0",
+  "0x18f0",
+  "0xfff0",
+  "0xffe0",
 ] as const;
 
 function normalizedOptionalServices(extra: readonly string[]): string[] {
@@ -439,10 +439,11 @@ function normalizedOptionalServices(extra: readonly string[]): string[] {
   for (const raw of extra) {
     const value = raw.trim().toLowerCase();
     if (!value) continue;
-    if (!/^(?:[0-9a-f]{4}|[0-9a-f]{8}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.test(value)) {
+    const uuid = value.startsWith("0x") ? value.slice(2) : value;
+    if (!/^(?:[0-9a-f]{4}|[0-9a-f]{8}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.test(uuid)) {
       throw new Error("Invalid BLE service UUID: " + raw + ". Use a 16-bit, 32-bit, or canonical 128-bit UUID.");
     }
-    values.add(value);
+    values.add(uuid.length === 4 || uuid.length === 8 ? "0x" + uuid : uuid);
   }
   return [...values];
 }
