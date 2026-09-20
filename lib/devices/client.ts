@@ -34,6 +34,8 @@ import {
   type DeviceKind,
   type DeviceOpName,
   type DeviceRequestFrame,
+  type UsbInterfaceInfo,
+  type UsbOpenResult,
 } from "./protocol";
 
 /**
@@ -239,12 +241,7 @@ export async function requestSerialPort(): Promise<DeviceInfo> {
   return deriveDeviceInfo(id, entry);
 }
 
-export async function requestUsbDevice(): Promise<DeviceInfo> {
-  if (!detectDeviceCapabilities().usb) throw new Error("This browser has no WebUSB support.");
-  // A single empty filter matches every device; an empty filters ARRAY
-  // matches none (WebUSB spec §5: a device is kept only if it matches a
-  // filter in the list, so an empty list keeps nothing).
-  const device = await navigator.usb.requestDevice({ filters: [{}] });
+function registerUsbDevice(device: USBDevice): DeviceInfo {
   const id = mintDeviceId("usb");
   const entry: UsbEntry = {
     kind: "usb",
@@ -256,6 +253,65 @@ export async function requestUsbDevice(): Promise<DeviceInfo> {
   };
   registry.set(id, entry);
   return deriveDeviceInfo(id, entry);
+}
+
+export async function requestUsbDevice(): Promise<DeviceInfo> {
+  if (!detectDeviceCapabilities().usb) throw new Error("This browser has no WebUSB support.");
+  // A single empty filter matches every device; an empty filters ARRAY
+  // matches none (WebUSB spec §5: a device is kept only if it matches a
+  // filter in the list, so an empty list keeps nothing).
+  return registerUsbDevice(await navigator.usb.requestDevice({ filters: [{}] }));
+}
+
+/** The browser hands back the SAME `USBDevice` object for a device the origin
+ * already knows, so identity is exact here rather than a vendor/product
+ * heuristic — and the polyfill's backing device counts, or a granted serial
+ * port would be adopted a second time as raw USB. */
+function findUsbDeviceId(device: USBDevice): string | undefined {
+  for (const [id, entry] of registry) {
+    if (entry.kind === "usb" && entry.device === device) return id;
+    if (entry.kind === "serial" && entry.transport === "webusb-polyfill" && entry.usbDevice === device) return id;
+  }
+  return undefined;
+}
+
+/** A device exposing a CDC control interface is a serial port in this
+ * codebase's own terms — `USB_CDC_CONTROL_CLASS` is exactly what the serial
+ * picker filters on. Left for the panel's Serial button rather than adopted
+ * as raw USB: on Android, where a serial port IS a WebUSB device underneath,
+ * adopting it would silently downgrade a granted port into something
+ * `device_write` refuses. */
+function looksLikeSerialPort(device: USBDevice): boolean {
+  return device.configurations.some((configuration) =>
+    configuration.interfaces.some((iface) =>
+      (iface.alternate ?? iface.alternates[0])?.interfaceClass === USB_CDC_CONTROL_CLASS));
+}
+
+/**
+ * Re-register every USB device this origin already has permission for, with
+ * no picker and no user gesture.
+ *
+ * A WebUSB grant is persistent and keyed by (vendor, product, serial), so a
+ * device that is unplugged and replugged — or that REBOOTS back into the same
+ * USB identity, which is every step of a flashing loop — is still ours the
+ * moment it re-enumerates. Without this the grant survived in the browser
+ * while Cody's list went empty, stranding the agent behind a chooser only a
+ * human can click, on every reboot and every page reload.
+ *
+ * A device that comes back with a DIFFERENT identity (a bootloader at
+ * 0bb4:0c01 that boots into an adb interface at another id) is a different
+ * device to the browser and genuinely does need a new grant. That is the
+ * permission model, not something to paper over.
+ */
+export async function adoptPermittedUsbDevices(): Promise<DeviceInfo[]> {
+  if (!detectDeviceCapabilities().usb) return [];
+  const devices = await navigator.usb.getDevices().catch(() => [] as USBDevice[]);
+  const adopted: DeviceInfo[] = [];
+  for (const device of devices) {
+    if (findUsbDeviceId(device) || looksLikeSerialPort(device)) continue;
+    adopted.push(registerUsbDevice(device));
+  }
+  return adopted;
 }
 
 /**
@@ -523,6 +579,61 @@ interface DeviceOpHooks {
   onBleNotify: (deviceId: string, characteristic: string, bytes: Uint8Array) => void;
 }
 
+/**
+ * Claim what the agent is about to transfer on.
+ *
+ * WebUSB refuses EVERY endpoint transfer until the interface owning that
+ * endpoint is claimed, and the DOMException it throws names neither the
+ * interface nor the remedy — so an unclaimed open looks exactly like a device
+ * that will not talk. Opening therefore claims, and by default claims every
+ * interface of the active configuration: a raw USB device reached this way is
+ * being driven wholesale, and a device speaking one protocol (fastboot, a
+ * BROM loader, a DFU target) exposes exactly one interface anyway.
+ *
+ * Claims are attempted independently. On Windows an interface bound to a
+ * vendor driver cannot be taken at all (see AGENTS.md), and abandoning the
+ * whole open over one of those would strand every composite device whose
+ * OTHER interface is the interesting one. A caller that named a single
+ * interface gets the failure thrown instead — there is no partial success to
+ * report when only one thing was asked for.
+ */
+async function claimUsbInterfaces(device: USBDevice, only: number | undefined): Promise<UsbOpenResult> {
+  const configuration = device.configuration;
+  const result: UsbOpenResult = { configuration: configuration?.configurationValue, interfaces: [] };
+  if (!configuration) return result;
+
+  for (const iface of configuration.interfaces) {
+    if (only !== undefined && iface.interfaceNumber !== only) continue;
+    // `alternate` is the selected setting; before any claim some browsers
+    // leave it unset, so the default setting stands in for descriptor data.
+    const alternate = iface.alternate ?? iface.alternates[0];
+    const info: UsbInterfaceInfo = {
+      interfaceNumber: iface.interfaceNumber,
+      claimed: iface.claimed,
+      classCode: alternate?.interfaceClass ?? 0,
+      subclassCode: alternate?.interfaceSubclass ?? 0,
+      protocolCode: alternate?.interfaceProtocol ?? 0,
+      endpoints: (alternate?.endpoints ?? []).map((endpoint) => ({
+        endpointNumber: endpoint.endpointNumber,
+        direction: endpoint.direction,
+        type: endpoint.type,
+        packetSize: endpoint.packetSize,
+      })),
+    };
+    if (!info.claimed) {
+      try {
+        await device.claimInterface(iface.interfaceNumber);
+        info.claimed = true;
+      } catch (error) {
+        if (only !== undefined) throw error;
+        info.error = error instanceof Error ? error.message : String(error);
+      }
+    }
+    result.interfaces.push(info);
+  }
+  return result;
+}
+
 function startSerialPump(deviceId: string, entry: SerialEntry, onChunk: (deviceId: string, bytes: Uint8Array) => void): void {
   const readable = entry.port.readable;
   if (!readable) return;
@@ -687,9 +798,7 @@ async function performDeviceOp(rawOp: string, deviceId: string, params: Record<s
         // transfers work without the agent needing to know its number.
         await entry.device.selectConfiguration(entry.device.configurations[0].configurationValue);
       }
-      const iface = num(params, "interface");
-      if (iface !== undefined) await entry.device.claimInterface(iface);
-      return undefined;
+      return claimUsbInterfaces(entry.device, num(params, "interface"));
     }
     case "usb.control": {
       const entry = getUsbEntry(deviceId);
@@ -813,6 +922,9 @@ export class DeviceBridgeConnection {
   private readonly listeners = new Set<() => void>();
   private readonly lifecycleUnsubs = new Map<string, () => void>();
   private readonly coalescer: DataCoalescer;
+  /** Kept so `destroy` can detach it; a stale listener on the page-global
+   * `navigator.usb` would outlive the session it adopts devices for. */
+  private usbConnectListener: ((event: USBConnectionEvent) => void) | null = null;
 
   constructor(sessionId: string) {
     this.sessionId = sessionId;
@@ -841,12 +953,31 @@ export class DeviceBridgeConnection {
   }
 
   /** Any device already granted before this connection existed (an earlier
-   * session in this same page, or a reload that restored a mounted grant)
-   * rides along on the first `hello` — the server treats an attach as
+   * session in this same page, a reload that restored a mounted grant, or a
+   * USB device this origin was permitted in an entirely earlier visit) rides
+   * along on the first `hello` — the server treats an attach as
    * authoritative for the whole set, never a delta. */
   start(): void {
     for (const info of listDeviceInfos()) this.watchLifecycle(info.id);
+    this.watchUsbArrivals();
+    void this.adoptPermitted();
     this.openSocket();
+  }
+
+  /** A permitted device that turns up later — replugged, or rebooted back
+   * into the same USB identity — is adopted the moment the browser sees it,
+   * so a flashing loop does not stop at a chooser between every reboot. */
+  private watchUsbArrivals(): void {
+    if (!this.capabilities.usb || this.usbConnectListener) return;
+    this.usbConnectListener = () => { void this.adoptPermitted(); };
+    navigator.usb.addEventListener("connect", this.usbConnectListener);
+  }
+
+  private async adoptPermitted(): Promise<void> {
+    const adopted = await adoptPermittedUsbDevices();
+    if (this.destroyed || adopted.length === 0) return;
+    for (const info of adopted) this.watchLifecycle(info.id);
+    this.refresh();
   }
 
   destroy(): void {
@@ -854,6 +985,10 @@ export class DeviceBridgeConnection {
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
     this.coalescer.destroy();
+    if (this.usbConnectListener) {
+      navigator.usb.removeEventListener("connect", this.usbConnectListener);
+      this.usbConnectListener = null;
+    }
     for (const unsubscribe of this.lifecycleUnsubs.values()) unsubscribe();
     this.lifecycleUnsubs.clear();
     this.listeners.clear();

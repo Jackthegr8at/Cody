@@ -740,31 +740,49 @@ export class AgentSessionWrapper {
   }
 
   /**
-   * The device tools exist only while a page is actually holding hardware for
-   * this session. Registering them unconditionally would spend schema tokens
-   * in every conversation for a capability most of them cannot use — and
-   * offering a model `device_write` with nothing attached invites it to try.
-   * They appear when a browser connects a device and leave with it.
+   * The working tools exist only while a page is actually holding hardware
+   * for this session. Registering all seven unconditionally would spend
+   * schema tokens in every conversation for a capability most of them cannot
+   * use — and offering a model `device_write` with nothing attached invites
+   * it to try.
+   *
+   * `device_list` is the exception, and is published whenever a browser is
+   * attached at all. A capability the model cannot SEE is one it never
+   * suggests: with nothing granted yet, an agent asked to talk to a plugged-in
+   * board had no way to learn that the browser it is being read in can reach
+   * USB, serial and BLE directly. One small schema buys that, and the tool's
+   * own output names the next step (grant a device in the Devices panel) and
+   * reports what this particular browser can do — which differs per machine,
+   * since the human may be on a laptop, a phone or a tablet.
    */
   private deviceToolsForSession(): HostToolDefinition[] {
     if (!this._sessionId) return [];
     const bridge = peekDeviceBridge(this._sessionId);
-    if (!bridge?.attached || bridge.list().length === 0) return [];
-    return DEVICE_TOOLS.map(({ handler: _handler, ...tool }) => tool);
+    if (!bridge?.attached) return [];
+    const published = bridge.list().length > 0
+      ? DEVICE_TOOLS
+      : DEVICE_TOOLS.filter((tool) => tool.name === "device_list");
+    return published.map(({ handler: _handler, ...tool }) => tool);
   }
 
-  /** Re-publish the tool list when hardware comes or goes, and say so once in
-   * the transcript: a tool that silently materializes mid-conversation is a
-   * capability the model has no reason to go looking for. */
+  /** Re-publish the tool list when a browser or its hardware comes or goes,
+   * and say so once in the transcript: a tool that silently materializes
+   * mid-conversation is a capability the model has no reason to go looking
+   * for. Attachment is tracked alongside the device count because a browser
+   * arriving with nothing granted still changes the published set — that is
+   * when `device_list` appears. */
   private watchDeviceBridge(): void {
     if (!this._sessionId || this.deviceWatch) return;
     const bridge = peekDeviceBridge(this._sessionId);
     if (!bridge) return;
+    let lastAttached = bridge.attached;
     let lastCount = bridge.attached ? bridge.list().length : 0;
     this.deviceWatch = bridge.onChange(() => {
-      const count = bridge.attached ? bridge.list().length : 0;
-      if (count === lastCount) return;
+      const attached = bridge.attached;
+      const count = attached ? bridge.list().length : 0;
+      if (count === lastCount && attached === lastAttached) return;
       const previous = lastCount;
+      lastAttached = attached;
       lastCount = count;
       if (!this.engine.rpcUi.hostTools || !this.isAlive()) return;
       void this.proc.sendCommand({ type: "set_host_tools", tools: this.hostToolsForCurrentProfile() }).catch(() => {});
@@ -773,7 +791,7 @@ export class AgentSessionWrapper {
         this.emit({
           type: "notice",
           level: "info",
-          message: `Hardware attached in the browser: ${labels}. device_list, device_open, device_write, device_read, device_close and ble_gatt now work against it.`,
+          message: `Hardware attached in the browser: ${labels}. device_open now claims it and reports its endpoints; device_read, device_write, device_close, usb_transfer and ble_gatt work against it.`,
         });
       }
     });

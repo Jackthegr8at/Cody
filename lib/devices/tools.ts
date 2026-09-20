@@ -1,5 +1,5 @@
 /**
- * The six agent-facing tools over the browser-hosted device bridge
+ * The seven agent-facing tools over the browser-hosted device bridge
  * (./bus.ts, ./protocol.ts). Structurally the same shape as
  * lib/session-tools.ts: a HostToolDefinition per tool, plus a handler that
  * always resolves to plain text — success or a short human-readable failure
@@ -28,7 +28,13 @@ import type { HostToolDefinition } from "../pi-types";
 import { numberArg, stringArg } from "../session-tools";
 import { isRecord } from "../type-guards";
 import { matchDevice, type DeviceBridge } from "./bus";
-import type { DeviceCapabilities, DeviceInfo } from "./protocol";
+import type {
+  DeviceCapabilities,
+  DeviceInfo,
+  UsbEndpointInfo,
+  UsbInterfaceInfo,
+  UsbOpenResult,
+} from "./protocol";
 
 /** What a caller's host-tool dispatch supplies to every handler here. */
 export interface DeviceToolContext {
@@ -185,6 +191,92 @@ function buildSerialOpenParams(args: DeviceToolArgs): SerialOpenResult {
   return { params, baudRate };
 }
 
+/** Android's interface triplets. Naming one turns an open into an ANSWER —
+ * "this device is sitting in fastboot" — rather than three numbers the agent
+ * must go and look up before it knows which protocol to speak. */
+function usbProtocolName(info: UsbInterfaceInfo): string | undefined {
+  if (info.classCode !== 0xff || info.subclassCode !== 0x42) return undefined;
+  if (info.protocolCode === 0x01) return "adb";
+  if (info.protocolCode === 0x03) return "fastboot";
+  return undefined;
+}
+
+/** Windows binds each USB interface to exactly one driver and Chrome can
+ * only reach WinUSB-bound ones, so a claim refused there is a host fact
+ * rather than anything a retry fixes. Said only when nothing could be
+ * claimed ON Windows: printed after a successful open it would be noise,
+ * and printed on Linux it would be wrong. */
+const WINUSB_HINT =
+  "Chrome reaches a Windows USB device only through WinUSB, so an interface already bound to a vendor driver (Google's ADB driver, a MediaTek VCOM) enumerates but cannot be claimed. Rebinding that interface to WinUSB with Zadig is the fix.";
+
+function formatUsbInterface(info: UsbInterfaceInfo): string {
+  const codes = [info.classCode, info.subclassCode, info.protocolCode]
+    .map((code) => code.toString(16).padStart(2, "0"))
+    .join("/");
+  const named = usbProtocolName(info);
+  const head = `interface ${info.interfaceNumber} ${info.claimed ? "claimed" : "NOT claimed"} — ${codes}${named ? ` (${named})` : ""}`;
+  if (!info.claimed) return `${head}: ${info.error ?? "the claim was refused"}`;
+  const endpoints = info.endpoints.length > 0
+    ? info.endpoints
+      .map((endpoint) => `${endpoint.type} ${endpoint.direction.toUpperCase()} ep${endpoint.endpointNumber} (${endpoint.packetSize} B)`)
+      .join(", ")
+    : "no endpoints — control transfers only";
+  return `${head}: ${endpoints}`;
+}
+
+/** The wire carries `unknown`; narrow it rather than cast, so an older page
+ * that still answers `undefined` degrades to the plain "Opened X." line
+ * instead of throwing on a missing field. */
+function parseUsbOpenResult(value: unknown): UsbOpenResult | null {
+  if (!isRecord(value) || !Array.isArray(value.interfaces)) return null;
+  const interfaces: UsbInterfaceInfo[] = [];
+  for (const raw of value.interfaces) {
+    if (!isRecord(raw) || typeof raw.interfaceNumber !== "number") return null;
+    const endpoints: UsbEndpointInfo[] = [];
+    for (const rawEndpoint of Array.isArray(raw.endpoints) ? raw.endpoints : []) {
+      if (!isRecord(rawEndpoint) || typeof rawEndpoint.endpointNumber !== "number") continue;
+      endpoints.push({
+        endpointNumber: rawEndpoint.endpointNumber,
+        direction: rawEndpoint.direction === "in" ? "in" : "out",
+        type: rawEndpoint.type === "interrupt" || rawEndpoint.type === "isochronous" ? rawEndpoint.type : "bulk",
+        packetSize: typeof rawEndpoint.packetSize === "number" ? rawEndpoint.packetSize : 0,
+      });
+    }
+    interfaces.push({
+      interfaceNumber: raw.interfaceNumber,
+      claimed: raw.claimed === true,
+      error: typeof raw.error === "string" ? raw.error : undefined,
+      classCode: typeof raw.classCode === "number" ? raw.classCode : 0,
+      subclassCode: typeof raw.subclassCode === "number" ? raw.subclassCode : 0,
+      protocolCode: typeof raw.protocolCode === "number" ? raw.protocolCode : 0,
+      endpoints,
+    });
+  }
+  return { configuration: typeof value.configuration === "number" ? value.configuration : undefined, interfaces };
+}
+
+function formatUsbOpen(device: DeviceInfo, value: unknown, ctx: DeviceToolContext): string {
+  const result = parseUsbOpenResult(value);
+  if (!result) return `Opened ${device.label}.`;
+  const head = `Opened ${device.label}${result.configuration === undefined ? "" : ` (configuration ${result.configuration})`}.`;
+  if (result.interfaces.length === 0) return `${head} It exposes no interface to claim, so only control transfers are possible.`;
+  const lines = [head, ...result.interfaces.map((info) => `  ${formatUsbInterface(info)}`)];
+  const windows = /win/i.test(ctx.bridge.capabilities.platform);
+  if (windows && result.interfaces.every((info) => !info.claimed)) lines.push(WINUSB_HINT);
+  return lines.join("\n");
+}
+
+/** USB-only open arguments. Omitting both is the normal path: every
+ * interface of the sole configuration gets claimed. */
+function buildUsbOpenParams(args: DeviceToolArgs): Record<string, unknown> {
+  const params: Record<string, unknown> = {};
+  const configuration = numberArg(args, "configuration");
+  if (configuration !== undefined) params.configuration = Math.floor(configuration);
+  const iface = numberArg(args, "interface");
+  if (iface !== undefined) params.interface = Math.floor(iface);
+  return params;
+}
+
 async function deviceOpen(args: DeviceToolArgs, ctx: DeviceToolContext): Promise<string> {
   const resolved = resolveDevice(stringArg(args, "device"), ctx);
   if ("text" in resolved) return resolved.text;
@@ -201,8 +293,7 @@ async function deviceOpen(args: DeviceToolArgs, ctx: DeviceToolContext): Promise
       await ctx.bridge.request("ble.connect", device.id, {});
       return `Connected to ${device.label}.`;
     }
-    await ctx.bridge.request("usb.open", device.id, {});
-    return `Opened ${device.label}.`;
+    return formatUsbOpen(device, await ctx.bridge.request("usb.open", device.id, buildUsbOpenParams(args)), ctx);
   } catch (error) {
     return errorText(error);
   }
@@ -468,7 +559,14 @@ async function usbTransfer(args: DeviceToolArgs, ctx: DeviceToolContext): Promis
       });
     }
   } catch (error) {
-    return errorText(error);
+    const text = errorText(error);
+    // The browser's own wording for this names neither the interface nor the
+    // remedy, and it is the single most likely failure against a device that
+    // was opened by an older page or re-enumerated into a new identity.
+    if (/claimed/i.test(text)) {
+      return `${text}\nThe interface owning that endpoint is not claimed. Run device_open on ${device.label} again (it claims every interface of the active configuration and lists their endpoints); if the device rebooted into a different USB identity, it needs a fresh grant in Cody's Devices panel.`;
+    }
+    return text;
   }
 
   const kind = isControl ? "control" : "transfer";
@@ -503,7 +601,7 @@ export const DEVICE_TOOLS: DeviceToolDefinition[] = [
   },
   {
     name: "device_open",
-    description: "Open a device: serial.open (baud default 115200) for a serial port, ble.connect for BLE, or usb.open for a raw USB device — dispatched from the device's kind.",
+    description: "Open a device: serial.open (baud default 115200) for a serial port, ble.connect for BLE, or usb.open for a raw USB device — dispatched from the device's kind. Opening a USB device also claims its interfaces and reports each one's class/subclass/protocol and endpoints, which is what makes usb_transfer usable without decoding descriptors first.",
     parameters: {
       type: "object",
       properties: {
@@ -513,6 +611,8 @@ export const DEVICE_TOOLS: DeviceToolDefinition[] = [
         stopBits: { type: "number", description: "Serial only. 1 or 2." },
         parity: { type: "string", enum: ["none", "even", "odd"], description: "Serial only." },
         flowControl: { type: "string", enum: ["none", "hardware"], description: "Serial only." },
+        configuration: { type: "number", description: "USB only. Configuration value to select; defaults to the device's sole configuration." },
+        interface: { type: "number", description: "USB only. Claim just this interface instead of every interface of the configuration — use it to leave a sibling interface to the OS. A named interface that cannot be claimed fails the open." },
       },
     },
     handler: deviceOpen,

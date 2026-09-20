@@ -1764,13 +1764,39 @@ session scope and the inbound byte buffers.
   (`/api/devices/socket?sessionId=`) is gated exactly like the display
   socket — a credential that may see that session, same-origin, and the
   session must really exist (`canAccessDisplaySession`).
-- **Tools materialize only while hardware is attached**
+- **Tools materialize with the hardware, except the one that finds it**
   (`deviceToolsForSession()` / `watchDeviceBridge()` in `lib/rpc-manager.ts`).
-  Registering six schemas in every conversation would spend tokens on a
+  Registering all seven schemas in every conversation would spend tokens on a
   capability most sessions cannot use, and offering `device_write` with
-  nothing attached invites a model to try. When a device appears the tool list
-  is re-published and ONE notice says so — a tool that silently materializes
-  mid-conversation is a capability the model has no reason to go looking for.
+  nothing attached invites a model to try. But a capability the model cannot
+  SEE is one it never suggests, so `device_list` alone is published whenever a
+  browser is attached at all — that is how an agent learns the machine it is
+  being read on (laptop, phone, tablet) can reach USB/serial/BLE directly, and
+  its output names the next step. The other six arrive with the first grant,
+  and ONE notice says so.
+- **Opening a USB device claims its interfaces.** WebUSB refuses every
+  endpoint transfer until the owning interface is claimed, and its
+  DOMException names neither the interface nor the fix, so an unclaimed open
+  is indistinguishable from dead hardware — `device_open` used to leave it
+  that way and `usb_transfer` could therefore never work at all.
+  `claimUsbInterfaces` takes every interface of the active configuration
+  (independently, since a claim Windows refuses must not lose the others) and
+  reports each one's class/subclass/protocol and endpoints, naming the Android
+  triplets `ff/42/01` adb and `ff/42/03` fastboot. An agent thus learns what
+  protocol the thing speaks and which endpoints to use without fetching a
+  single descriptor. Pass `interface` to claim just one and leave a sibling to
+  the OS; a named interface that cannot be claimed fails the open, because
+  there is no partial success to report.
+- **A permitted USB device is re-adopted without the human**
+  (`adoptPermittedUsbDevices`). A WebUSB grant is persistent and keyed by
+  (vendor, product, serial), so a replug, a page reload, or a target rebooting
+  back into the same USB identity is still ours — and a flashing loop that
+  stopped at a chooser it cannot click between every reboot was unusable. A
+  device returning with a DIFFERENT identity (a bootloader that boots into an
+  adb interface) is genuinely a new grant; that is the permission model, and
+  the transfer error says so rather than pretending otherwise. Devices
+  exposing a CDC control interface are skipped, or Android's polyfill serial
+  ports would be re-adopted as raw USB after every reload.
 - **Inbound bytes are buffered per SOURCE, not per device**
   (`sourceKey()`, `lib/devices/bus.ts`). A BLE peripheral can notify on
   several characteristics at once; merging those into one stream is not a

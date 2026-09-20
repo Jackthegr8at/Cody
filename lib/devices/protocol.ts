@@ -93,6 +93,40 @@ export interface SerialOpenParams {
   flowControl?: "none" | "hardware";
 }
 
+/** One endpoint of a claimed USB interface, in the terms `usb_transfer`
+ * takes: a bare endpoint NUMBER plus a direction, never the 0x80-tagged
+ * address a raw descriptor carries. Reporting it this way is the difference
+ * between an agent that can talk to an unknown device immediately and one
+ * that has to fetch and decode configuration descriptors first. */
+export interface UsbEndpointInfo {
+  endpointNumber: number;
+  direction: "in" | "out";
+  type: "bulk" | "interrupt" | "isochronous";
+  packetSize: number;
+}
+
+/** An interface of the active configuration, and whether opening took it.
+ * A failed claim is reported with its reason rather than dropped: on Windows
+ * that is the ordinary outcome for an interface a vendor driver already owns
+ * (see AGENTS.md), which is a host fact the agent can neither guess from a
+ * later transfer error nor fix by retrying. */
+export interface UsbInterfaceInfo {
+  interfaceNumber: number;
+  claimed: boolean;
+  /** Why the claim failed; absent when it succeeded. */
+  error?: string;
+  classCode: number;
+  subclassCode: number;
+  protocolCode: number;
+  endpoints: UsbEndpointInfo[];
+}
+
+/** `usb.open`'s result: what the device turned out to be, not just "ok". */
+export interface UsbOpenResult {
+  configuration?: number;
+  interfaces: UsbInterfaceInfo[];
+}
+
 export type DeviceOp =
   | { op: "serial.open"; deviceId: string; params: SerialOpenParams }
   | { op: "serial.write"; deviceId: string; params: { base64: string } }
