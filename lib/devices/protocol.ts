@@ -62,6 +62,20 @@ export interface DeviceArtifactInfo {
   createdAt: number;
 }
 
+export interface BleDescriptorInfo { uuid: string; }
+export interface BleCharacteristicInfo { uuid: string; properties: readonly string[]; descriptors?: readonly BleDescriptorInfo[]; }
+export interface BleServiceInfo { uuid: string; primary: boolean; characteristics: readonly BleCharacteristicInfo[]; }
+
+export interface BleTraceEvent {
+  timestamp: number;
+  type: "connect" | "disconnect" | "discover" | "read" | "write" | "notify" | "error";
+  service?: string;
+  characteristic?: string;
+  base64?: string;
+  detail?: string;
+  writeMode?: "with-response" | "without-response";
+}
+
 export interface DeviceInfo {
   /** Stable for as long as the grant lives; minted by the page. */
   id: string;
@@ -75,8 +89,12 @@ export interface DeviceInfo {
   /** Serial only. */
   transport?: SerialTransport;
   baudRate?: number;
-  /** BLE only: advertised/primary service UUIDs once connected. */
+  /** BLE only: flat compatibility summary of accessible primary services. */
   services?: string[];
+  /** Services requested in the browser picker; expanding this requires reselection. */
+  requestedServices?: string[];
+  /** Full GATT tree that this origin is permitted to discover. */
+  gatt?: readonly BleServiceInfo[];
   /** USB descriptor candidates, not a successful protocol handshake. */
   protocolCandidates?: readonly DeviceProtocolCandidate[];
   /** Bytes buffered server-side and not yet read by the agent. */
@@ -89,7 +107,22 @@ export interface DeviceCapabilities {
   secureContext: boolean;
   serial: boolean;
   usb: boolean;
+  /** Browser Web Bluetooth availability. */
   bluetooth: boolean;
+  /** GATT client surface. It never means unrestricted Bluetooth scanning. */
+  bluetoothGatt: boolean;
+  /** Browser advertisement watching, where actually exposed. */
+  bluetoothAdvertisements: boolean;
+  /** Explicitly paired local companion with native BLE discovery/GATT. */
+  nativeBluetooth: boolean;
+  /** Native Bluetooth Classic support; separate from BLE GATT. */
+  classicBluetooth: boolean;
+  /** Local HCI capture/adapter access. */
+  localHci: boolean;
+  /** Established OTA sniffer integration. */
+  bluetoothOta: boolean;
+  /** Truthful reason for each unavailable Bluetooth surface. */
+  bluetoothReasons?: Partial<Record<"bluetoothGatt" | "bluetoothAdvertisements" | "nativeBluetooth" | "classicBluetooth" | "localHci" | "bluetoothOta", string>>;
   /** No Web Serial but WebUSB present: serial goes through the polyfill. */
   serialViaUsb: boolean;
   /** UA platform hint, for the panel's explanation only. */
@@ -101,6 +134,20 @@ export const NO_CAPABILITIES: DeviceCapabilities = {
   serial: false,
   usb: false,
   bluetooth: false,
+  bluetoothGatt: false,
+  bluetoothAdvertisements: false,
+  nativeBluetooth: false,
+  classicBluetooth: false,
+  localHci: false,
+  bluetoothOta: false,
+  bluetoothReasons: {
+    bluetoothGatt: "No secure browser context is available.",
+    bluetoothAdvertisements: "This browser does not expose Bluetooth advertisement watching.",
+    nativeBluetooth: "No paired local companion is connected.",
+    classicBluetooth: "No paired local companion is connected.",
+    localHci: "No paired local companion is connected.",
+    bluetoothOta: "No established OTA sniffer backend is connected.",
+  },
   serialViaUsb: false,
   platform: "unknown",
 };
@@ -161,6 +208,8 @@ export type DeviceOp =
   | { op: "close"; deviceId: string; params: Record<string, never> }
   | { op: "ble.connect"; deviceId: string; params: Record<string, never> }
   | { op: "ble.services"; deviceId: string; params: Record<string, never> }
+  | { op: "ble.gatt"; deviceId: string; params: Record<string, never> }
+  | { op: "ble.trace"; deviceId: string; params: { action: "list" | "clear" | "export"; since?: number } }
   | { op: "ble.read"; deviceId: string; params: { service: string; characteristic: string } }
   | { op: "ble.write"; deviceId: string; params: { service: string; characteristic: string; base64: string; withoutResponse?: boolean } }
   | { op: "ble.subscribe"; deviceId: string; params: { service: string; characteristic: string; enable: boolean } }

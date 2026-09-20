@@ -32,7 +32,7 @@ import { QuietReadGate, assertQuietReadTimeout, isAbortError } from "./quiet-rea
 import { stableUsbIdentity, USB_REGRANT_MESSAGE } from "./usb-identity";
 import { SessionConnectionPool, type RetainedSessionConnection } from "./session-connections";
 import { reconnectDelayMs } from "@/lib/stream-recovery";
-import { NO_CAPABILITIES, type DeviceActivity, type DeviceCapabilities, type DeviceClientFrame, type DeviceInfo, type DeviceKind, type DeviceOpName, type DeviceProtocolCandidate, type DeviceServerFrame, type UsbOpenResult } from "./protocol";
+import { NO_CAPABILITIES, type BleServiceInfo, type BleTraceEvent, type DeviceActivity, type DeviceCapabilities, type DeviceClientFrame, type DeviceInfo, type DeviceKind, type DeviceOpName, type DeviceProtocolCandidate, type DeviceServerFrame, type UsbOpenResult } from "./protocol";
 
 /**
  * TypeScript's bundled DOM lib does not yet ship the User-Agent Client Hints
@@ -63,13 +63,26 @@ export function detectDeviceCapabilities(): DeviceCapabilities {
   const serial = "serial" in navigator;
   const usb = "usb" in navigator;
   const bluetooth = "bluetooth" in navigator;
+  const bluetoothAdvertisements = false;
   return {
     secureContext: window.isSecureContext,
     serial,
     usb,
     bluetooth,
-    // Android has no Web Serial at all, which is exactly the case a
-    // USB-to-UART adapter lands in — that is what the polyfill is for.
+    bluetoothGatt: bluetooth,
+    bluetoothAdvertisements,
+    nativeBluetooth: false,
+    classicBluetooth: false,
+    localHci: false,
+    bluetoothOta: false,
+    bluetoothReasons: {
+      ...(bluetooth ? {} : { bluetoothGatt: window.isSecureContext ? "This browser does not implement Web Bluetooth." : "Web Bluetooth requires a secure context." }),
+      ...(bluetoothAdvertisements ? {} : { bluetoothAdvertisements: "Browser advertisement watching is unavailable; Web Bluetooth does not provide general BLE scanning." }),
+      nativeBluetooth: "No explicitly paired local Bluetooth companion is connected.",
+      classicBluetooth: "Browser Web Bluetooth is BLE GATT only; no paired Classic companion is connected.",
+      localHci: "A browser does not expose local HCI access.",
+      bluetoothOta: "No established OTA sniffer backend is connected.",
+    },
     serialViaUsb: !serial && usb,
     platform: navigator.userAgentData?.platform ?? navigator.platform,
   };
@@ -122,13 +135,13 @@ interface BleEntry extends RegistryEntryBase {
   kind: "ble";
   device: BluetoothDevice;
   server: BluetoothRemoteGATTServer | null;
-  /** Cached per protocol.ts's instruction: "cache the GATTServer/service/
-   * characteristic lookups per device." Keyed by service UUID. */
+  /** The picker allow-list. It is an audit trail, not a claim of device support. */
+  requestedServices: string[];
   services: Map<string, BluetoothRemoteGATTService>;
-  /** Keyed by `${serviceUuid}:${characteristicUuid}` — two services can
-   * legally expose the same characteristic UUID. */
   characteristics: Map<string, BluetoothRemoteGATTCharacteristic>;
   notifying: Map<string, (this: BluetoothRemoteGATTCharacteristic, ev: Event) => void>;
+  gatt: BleServiceInfo[];
+  trace: BleTraceEvent[];
 }
 
 type RegistryEntry = SerialEntry | UsbEntry | BleEntry;
@@ -210,7 +223,7 @@ function deriveDeviceInfo(id: string, entry: RegistryEntry): DeviceInfo {
     const protocolCandidates = usbProtocolCandidates(entry.device);
     return { ...base, kind: "usb", open: entry.device.opened, ...(protocolCandidates ? { protocolCandidates } : {}) };
   }
-  return { ...base, kind: "ble", open: entry.server?.connected ?? false, services: [...entry.services.keys()] };
+  return { ...base, kind: "ble", open: entry.server?.connected ?? false, services: [...entry.services.keys()], requestedServices: entry.requestedServices, ...(entry.gatt.length > 0 ? { gatt: entry.gatt } : {}) };
 }
 
 function listDeviceInfos(sessionId?: string): DeviceInfo[] {
@@ -405,41 +418,57 @@ export async function adoptPermittedUsbDevices(sessionId: string): Promise<Devic
 }
 
 /**
- * Services the picker is allowed to reveal. The Web Bluetooth security model
- * requires enumerating every GATT service UUID a page may ever touch at
- * request time — there is no "grant everything" option, by design (it is
- * what keeps a site from fingerprinting a device's full service list). A
- * generic hardware-bridge panel cannot know what the agent will ask for
- * ahead of time, so this defaults to the standard SIG services plus the
- * Nordic UART Service, the near-universal serial-over-BLE UUID for the
- * ESP32/Arduino-class boards this bridge targets. A device exposing some
- * other custom service will still pair; `ble.read`/`ble.write` against an
- * unlisted service UUID fails with a clear browser SecurityError, which
- * surfaces to the agent as an ordinary failed result rather than crashing
- * anything.
+ * Services this origin asks the browser to reveal. Web Bluetooth deliberately
+ * has no wildcard: a service that was not named here remains inaccessible even
+ * after a device connected. The Vlink compatibility entries are only picker
+ * hints, not an OBD protocol assumption.
  */
-const DEFAULT_BLE_OPTIONAL_SERVICES = [
+export const DEFAULT_BLE_OPTIONAL_SERVICES = [
   "generic_access",
   "generic_attribute",
   "device_information",
   "battery_service",
   "6e400001-b5a3-f393-e0a9-e50e24dcca9e", // Nordic UART Service
-];
+  "18f0",
+  "fff0",
+  "ffe0",
+] as const;
 
-export async function requestBluetoothDevice(): Promise<DeviceInfo> {
+function normalizedOptionalServices(extra: readonly string[]): string[] {
+  const values = new Set<string>(DEFAULT_BLE_OPTIONAL_SERVICES);
+  for (const raw of extra) {
+    const value = raw.trim().toLowerCase();
+    if (!value) continue;
+    if (!/^(?:[0-9a-f]{4}|[0-9a-f]{8}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.test(value)) {
+      throw new Error("Invalid BLE service UUID: " + raw + ". Use a 16-bit, 32-bit, or canonical 128-bit UUID.");
+    }
+    values.add(value);
+  }
+  return [...values];
+}
+
+/**
+ * Must be called from a click. Expanding optional services always reopens the
+ * browser picker: a previous grant cannot be broadened in place.
+ */
+export async function requestBluetoothDevice(extraOptionalServices: readonly string[] = []): Promise<DeviceInfo> {
   if (!detectDeviceCapabilities().bluetooth) throw new Error("This browser has no Web Bluetooth support.");
+  const requestedServices = normalizedOptionalServices(extraOptionalServices);
   const device = await navigator.bluetooth.requestDevice({
     acceptAllDevices: true,
-    optionalServices: DEFAULT_BLE_OPTIONAL_SERVICES,
+    optionalServices: requestedServices,
   });
   const id = mintDeviceId("ble");
   const entry: BleEntry = {
     kind: "ble",
     device,
     server: null,
+    requestedServices,
     services: new Map(),
     characteristics: new Map(),
     notifying: new Map(),
+    gatt: [],
+    trace: [],
     label: device.name || "Bluetooth device",
   };
   registry.set(id, entry);
@@ -647,6 +676,8 @@ const DEVICE_OP_NAMES: Record<DeviceOpName, true> = {
   "close": true,
   "ble.connect": true,
   "ble.services": true,
+  "ble.gatt": true,
+  "ble.trace": true,
   "ble.read": true,
   "ble.write": true,
   "ble.subscribe": true,
@@ -869,9 +900,48 @@ async function readUsbQuietly(
   return quietRead.gate.read(timeoutMs, signal);
 }
 
+function recordBleTrace(entry: BleEntry, event: Omit<BleTraceEvent, "timestamp">): void {
+  entry.trace.push({ ...event, timestamp: Date.now() });
+  if (entry.trace.length > 2_048) entry.trace.splice(0, entry.trace.length - 2_048);
+}
+
+function characteristicProperties(characteristic: BluetoothRemoteGATTCharacteristic): string[] {
+  const properties = characteristic.properties;
+  return ["broadcast", "read", "writeWithoutResponse", "write", "notify", "indicate", "authenticatedSignedWrites", "reliableWrite", "writableAuxiliaries"]
+    .filter((name) => properties[name as keyof BluetoothCharacteristicProperties]);
+}
+
+async function discoverGatt(entry: BleEntry): Promise<BleServiceInfo[]> {
+  if (!entry.server) throw new Error("Not connected. Call ble.connect first.");
+  const services = await entry.server.getPrimaryServices();
+  entry.services.clear();
+  entry.characteristics.clear();
+  const gatt: BleServiceInfo[] = [];
+  for (const service of services) {
+    entry.services.set(service.uuid, service);
+    const characteristics = await service.getCharacteristics();
+    const described = await Promise.all(characteristics.map(async (characteristic) => {
+      entry.characteristics.set(service.uuid + ":" + characteristic.uuid, characteristic);
+      let descriptors: readonly { uuid: string }[] | undefined;
+      try {
+        descriptors = (await characteristic.getDescriptors()).map((descriptor) => ({ uuid: descriptor.uuid }));
+      } catch (error) {
+        // Descriptor enumeration is optional in browser implementations. The
+        // service/characteristic remains real and must not disappear with it.
+        recordBleTrace(entry, { type: "error", service: service.uuid, characteristic: characteristic.uuid, detail: error instanceof Error ? error.message : String(error) });
+      }
+      return { uuid: characteristic.uuid, properties: characteristicProperties(characteristic), ...(descriptors ? { descriptors } : {}) };
+    }));
+    gatt.push({ uuid: service.uuid, primary: true, characteristics: described });
+  }
+  entry.gatt = gatt;
+  recordBleTrace(entry, { type: "discover", detail: "Discovered " + services.length + " accessible primary service(s)." });
+  return gatt;
+}
+
 async function resolveCharacteristic(entry: BleEntry, serviceUuid: string, characteristicUuid: string): Promise<BluetoothRemoteGATTCharacteristic> {
   if (!entry.server) throw new Error("Not connected. Call ble.connect first.");
-  const cacheKey = `${serviceUuid}:${characteristicUuid}`;
+  const cacheKey = serviceUuid + ":" + characteristicUuid;
   const cached = entry.characteristics.get(cacheKey);
   if (cached) return cached;
   let service = entry.services.get(serviceUuid);
@@ -951,6 +1021,7 @@ async function performDeviceOp(
         await invalidateUsbEntry(entry, "The USB device was closed.");
       } else {
         entry.server?.disconnect();
+        recordBleTrace(entry, { type: "disconnect", detail: "Disconnected by Cody." });
         entry.server = null;
         entry.services.clear();
         entry.characteristics.clear();
@@ -962,28 +1033,50 @@ async function performDeviceOp(
       const entry = getBleEntry(deviceId);
       if (!entry.device.gatt) throw new Error("This device has no GATT server.");
       entry.server = await entry.device.gatt.connect();
+      recordBleTrace(entry, { type: "connect", detail: "Connected to GATT server." });
       return undefined;
     }
     case "ble.services": {
       const entry = getBleEntry(deviceId);
-      if (!entry.server) throw new Error("Not connected. Call ble.connect first.");
-      const services = await entry.server.getPrimaryServices();
-      entry.services.clear();
-      for (const service of services) entry.services.set(service.uuid, service);
-      return { services: services.map((service) => service.uuid) };
+      const gatt = await discoverGatt(entry);
+      return { services: gatt.map((service) => service.uuid) };
+    }
+    case "ble.gatt": {
+      const entry = getBleEntry(deviceId);
+      return { services: await discoverGatt(entry) };
+    }
+    case "ble.trace": {
+      const entry = getBleEntry(deviceId);
+      const action = requireStr(params, "action");
+      if (action === "clear") {
+        entry.trace = [];
+        return { events: [] };
+      }
+      const since = num(params, "since");
+      const events = since === undefined ? entry.trace : entry.trace.filter((event) => event.timestamp >= since);
+      return action === "export"
+        ? { format: "cody-ble-trace/v1", device: entry.label, requestedServices: entry.requestedServices, events }
+        : { events };
     }
     case "ble.read": {
       const entry = getBleEntry(deviceId);
-      const characteristic = await resolveCharacteristic(entry, requireStr(params, "service"), requireStr(params, "characteristic"));
-      const view = await characteristic.readValue();
-      return { base64: toBase64(viewToBytes(view)) };
+      const service = requireStr(params, "service");
+      const characteristicUuid = requireStr(params, "characteristic");
+      const characteristic = await resolveCharacteristic(entry, service, characteristicUuid);
+      const base64 = toBase64(viewToBytes(await characteristic.readValue()));
+      recordBleTrace(entry, { type: "read", service, characteristic: characteristicUuid, base64 });
+      return { base64 };
     }
     case "ble.write": {
       const entry = getBleEntry(deviceId);
-      const characteristic = await resolveCharacteristic(entry, requireStr(params, "service"), requireStr(params, "characteristic"));
+      const service = requireStr(params, "service");
+      const characteristicUuid = requireStr(params, "characteristic");
       const bytes = fromBase64(requireStr(params, "base64"));
-      if (bool(params, "withoutResponse")) await characteristic.writeValueWithoutResponse(bytes);
+      const withoutResponse = bool(params, "withoutResponse");
+      const characteristic = await resolveCharacteristic(entry, service, characteristicUuid);
+      if (withoutResponse) await characteristic.writeValueWithoutResponse(bytes);
       else await characteristic.writeValueWithResponse(bytes);
+      recordBleTrace(entry, { type: "write", service, characteristic: characteristicUuid, base64: toBase64(bytes), writeMode: withoutResponse ? "without-response" : "with-response" });
       return undefined;
     }
     case "ble.subscribe": {
@@ -991,12 +1084,16 @@ async function performDeviceOp(
       const serviceUuid = requireStr(params, "service");
       const characteristicUuid = requireStr(params, "characteristic");
       const characteristic = await resolveCharacteristic(entry, serviceUuid, characteristicUuid);
-      const key = `${serviceUuid}:${characteristicUuid}`;
+      const key = serviceUuid + ":" + characteristicUuid;
       if (bool(params, "enable")) {
         if (!entry.notifying.has(key)) {
           const listener = () => {
             const view = characteristic.value;
-            if (view) hooks.onBleNotify(deviceId, characteristicUuid, viewToBytes(view));
+            if (view) {
+              const bytes = viewToBytes(view);
+              recordBleTrace(entry, { type: "notify", service: serviceUuid, characteristic: characteristicUuid, base64: toBase64(bytes) });
+              hooks.onBleNotify(deviceId, characteristicUuid, bytes);
+            }
           };
           characteristic.addEventListener("characteristicvaluechanged", listener);
           entry.notifying.set(key, listener);
@@ -1690,10 +1787,10 @@ export class DeviceBridgeConnection implements PageOperationBridge {
     };
   }
 
-  async requestDevice(kind: DeviceKind): Promise<DeviceInfo> {
+  async requestDevice(kind: DeviceKind, bleOptionalServices: readonly string[] = []): Promise<DeviceInfo> {
     const info = kind === "serial" ? await requestSerialPort()
       : kind === "usb" ? await requestUsbDevice()
-        : await requestBluetoothDevice();
+        : await requestBluetoothDevice(bleOptionalServices);
     deviceLeases.claim(this.sessionId, info.id);
     const entry = registry.get(info.id);
     if (entry?.kind === "usb" && entry.stableIdentity) rememberUsbOwner(entry.stableIdentity, this.sessionId);

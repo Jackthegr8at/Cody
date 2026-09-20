@@ -32,6 +32,12 @@ function asCapabilities(value: unknown): DeviceCapabilities | null {
     serial: read("serial"),
     usb: read("usb"),
     bluetooth: read("bluetooth"),
+    bluetoothGatt: read("bluetoothGatt"),
+    bluetoothAdvertisements: read("bluetoothAdvertisements"),
+    nativeBluetooth: read("nativeBluetooth"),
+    classicBluetooth: read("classicBluetooth"),
+    localHci: read("localHci"),
+    bluetoothOta: read("bluetoothOta"),
     serialViaUsb: read("serialViaUsb"),
     platform,
   };

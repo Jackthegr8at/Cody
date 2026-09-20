@@ -98,7 +98,8 @@ function formatDeviceLine(device: DeviceInfo): string {
 
 function formatCapabilities(caps: DeviceCapabilities): string {
   const serial = caps.serial ? "yes" : caps.serialViaUsb ? "via WebUSB polyfill" : "no";
-  return `capabilities: secure context ${caps.secureContext ? "yes" : "no"}, serial ${serial}, usb ${caps.usb ? "yes" : "no"}, bluetooth ${caps.bluetooth ? "yes" : "no"}, platform ${caps.platform}`;
+  const surfaces = [["browser GATT", caps.bluetoothGatt, caps.bluetoothReasons?.bluetoothGatt], ["advertisement watching", caps.bluetoothAdvertisements, caps.bluetoothReasons?.bluetoothAdvertisements], ["native BLE companion", caps.nativeBluetooth, caps.bluetoothReasons?.nativeBluetooth], ["Bluetooth Classic", caps.classicBluetooth, caps.bluetoothReasons?.classicBluetooth], ["local HCI", caps.localHci, caps.bluetoothReasons?.localHci], ["OTA sniffer", caps.bluetoothOta, caps.bluetoothReasons?.bluetoothOta]].map(([name, available, reason]) => String(name) + " " + (available ? "available" : "unavailable" + (reason ? " (" + reason + ")" : "")));
+  return "capabilities: secure context " + (caps.secureContext ? "yes" : "no") + ", serial " + serial + ", usb " + (caps.usb ? "yes" : "no") + ", Web Bluetooth " + (caps.bluetooth ? "yes" : "no") + ", platform " + caps.platform + "\nBluetooth surfaces: " + surfaces.join("; ");
 }
 
 function formatCandidates(query: string | undefined, candidates: DeviceInfo[]): string {
@@ -446,7 +447,7 @@ async function deviceClose(args: DeviceToolArgs, ctx: DeviceToolContext): Promis
 // ble_gatt
 // ============================================================================
 
-const BLE_OPS: Record<string, true> = { services: true, read: true, write: true, subscribe: true, unsubscribe: true };
+const BLE_OPS: Record<string, true> = { services: true, discover: true, trace: true, read: true, write: true, subscribe: true, unsubscribe: true };
 
 function formatBleValue(value: unknown): string {
   if (value === undefined || value === null) return "(no data)";
@@ -475,58 +476,41 @@ async function bleGatt(args: DeviceToolArgs, ctx: DeviceToolContext): Promise<st
   if (device.kind !== "ble") return `${device.label} is a ${device.kind} device, not BLE.`;
 
   const op = stringArg(args, "op");
-  if (op === undefined || !BLE_OPS[op]) {
-    return 'op must be one of "services", "read", "write", "subscribe", "unsubscribe".';
-  }
-
-  if (op === "services") {
+  if (op === undefined || !BLE_OPS[op]) return 'op must be one of "services", "discover", "trace", "read", "write", "subscribe", "unsubscribe".';
+  if (op === "services" || op === "discover") {
     try {
-      const value = await ctx.bridge.request("ble.services", device.id, {});
-      return `Services on ${device.label}:\n${formatBleValue(value)}`;
-    } catch (error) {
-      return errorText(error);
-    }
+      const value = await ctx.bridge.request(op === "discover" ? "ble.gatt" : "ble.services", device.id, {});
+      return (op === "discover" ? "Accessible GATT on " : "Services on ") + device.label + ":\n" + formatBleValue(value);
+    } catch (error) { return errorText(error); }
   }
-
+  if (op === "trace") {
+    try { return "Controlled GATT trace for " + device.label + ":\n" + formatBleValue(await ctx.bridge.request("ble.trace", device.id, { action: "export" })); }
+    catch (error) { return errorText(error); }
+  }
   const service = stringArg(args, "service");
   const characteristic = stringArg(args, "characteristic");
-  if (!service || !characteristic) return `${op} requires both service and characteristic.`;
-
+  if (!service || !characteristic) return op + " requires both service and characteristic.";
   if (op === "read") {
     try {
       const value = await ctx.bridge.request("ble.read", device.id, { service, characteristic });
       const base64 = extractBase64(value);
-      if (base64 === null) return `Read from ${service}/${characteristic}: ${formatBleValue(value)}`;
-      return `Read ${byteCount(Buffer.from(base64, "base64").length)} from ${service}/${characteristic}: ${base64}`;
-    } catch (error) {
-      return errorText(error);
-    }
+      return base64 === null ? "Read from " + service + "/" + characteristic + ": " + formatBleValue(value) : "Read " + byteCount(Buffer.from(base64, "base64").length) + " from " + service + "/" + characteristic + ": " + base64;
+    } catch (error) { return errorText(error); }
   }
-
   if (op === "write") {
     const payload = buildWritePayload(args);
     if ("error" in payload) return payload.error;
     const withoutResponse = args.withoutResponse === true;
     try {
       await ctx.bridge.request("ble.write", device.id, { service, characteristic, base64: payload.base64, withoutResponse });
-      const suffix = withoutResponse ? " (without response)" : "";
-      return `Wrote ${byteCount(Buffer.from(payload.base64, "base64").length)} to ${service}/${characteristic}${suffix}.`;
-    } catch (error) {
-      return errorText(error);
-    }
+      return "Wrote " + byteCount(Buffer.from(payload.base64, "base64").length) + " to " + service + "/" + characteristic + (withoutResponse ? " (without response)." : ".");
+    } catch (error) { return errorText(error); }
   }
-
-  // subscribe / unsubscribe both ride the one ble.subscribe op; notification
-  // bytes then arrive through the same per-device buffer device_read drains.
   const enable = op === "subscribe";
   try {
     await ctx.bridge.request("ble.subscribe", device.id, { service, characteristic, enable });
-    return enable
-      ? `Subscribed to ${service}/${characteristic} on ${device.label}. Notifications arrive as bytes via device_read.`
-      : `Unsubscribed from ${service}/${characteristic} on ${device.label}.`;
-  } catch (error) {
-    return errorText(error);
-  }
+    return enable ? "Subscribed to " + service + "/" + characteristic + " on " + device.label + ". Notifications arrive as bytes via device_read." : "Unsubscribed from " + service + "/" + characteristic + " on " + device.label + ".";
+  } catch (error) { return errorText(error); }
 }
 
 // ============================================================================
@@ -702,12 +686,12 @@ export const DEVICE_TOOLS: DeviceToolDefinition[] = [
   },
   {
     name: "ble_gatt",
-    description: 'Bluetooth GATT operations: "services" lists them, "read"/"write" need service and characteristic, "subscribe"/"unsubscribe" toggle notifications (which then arrive via device_read).',
+    description: 'Browser BLE GATT workbench: "discover" returns the accessible service/characteristic/descriptor tree, "trace" exports controlled GATT traffic, "read" is non-mutating, "write" needs service/characteristic plus text or base64, and subscription operations control notifications.',
     parameters: {
       type: "object",
       properties: {
         ...DEVICE_ARG,
-        op: { type: "string", enum: ["services", "read", "write", "subscribe", "unsubscribe"], description: "GATT operation to perform." },
+        op: { type: "string", enum: ["services", "discover", "trace", "read", "write", "subscribe", "unsubscribe"], description: "GATT operation to perform." },
         service: { type: "string", description: "GATT service UUID. Required for read, write, subscribe, unsubscribe." },
         characteristic: { type: "string", description: "GATT characteristic UUID. Required for read, write, subscribe, unsubscribe." },
         text: { type: "string", description: 'UTF-8 text to write. For op "write", exactly one of text or base64 is required.' },
@@ -720,8 +704,7 @@ export const DEVICE_TOOLS: DeviceToolDefinition[] = [
   },
   {
     name: "usb_transfer",
-    description:
-      "Raw USB on an opened device. A control transfer (pass request) interrogates or commands the device; a bulk/interrupt transfer (pass endpoint) moves data on one endpoint. direction \"in\" reads length bytes, \"out\" sends text or base64.",
+    description: "Raw USB on an opened device. A control transfer (pass request) interrogates or commands the device; a bulk/interrupt transfer (pass endpoint) moves data on one endpoint. direction \"in\" reads length bytes, \"out\" sends text or base64.",
     parameters: {
       type: "object",
       properties: {
@@ -733,7 +716,7 @@ export const DEVICE_TOOLS: DeviceToolDefinition[] = [
         value: { type: "number", description: "Control transfer wValue; default 0." },
         index: { type: "number", description: "Control transfer wIndex; default 0." },
         endpoint: { type: "number", description: "Bulk/interrupt transfer: the endpoint number (without the direction bit)." },
-        length: { type: "number", description: "IN transfers: how many bytes to request. Required for direction \"in\"." },
+        length: { type: "number", description: 'IN transfers: how many bytes to request. Required for direction "in".' },
         text: { type: "string", description: 'OUT transfers: UTF-8 text to send. Exactly one of text or base64.' },
         base64: { type: "string", description: "OUT transfers: base64-encoded bytes to send. Exactly one of text or base64." },
         encoding: { type: "string", enum: ["text", "base64"], description: 'How to render an IN result: "text" (default, lossy UTF-8) or "base64".' },

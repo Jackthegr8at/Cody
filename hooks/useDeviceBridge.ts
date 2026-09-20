@@ -19,7 +19,7 @@ export interface UseDeviceBridgeResult extends DeviceBridgeSnapshot {
   operationManager: DeviceOperationManager | null;
   /** Must be called synchronously from a click handler — it spends a real
    * user gesture on the browser's permission prompt. */
-  connect: (kind: DeviceKind) => Promise<void>;
+  connect: (kind: DeviceKind, bleOptionalServices?: readonly string[]) => Promise<void>;
   disconnect: (id: string) => Promise<void>;
 }
 
@@ -58,11 +58,11 @@ export function useDeviceBridge(sessionId: string | null): UseDeviceBridgeResult
     };
   }, [sessionId]);
 
-  const connect = useCallback(async (kind: DeviceKind) => {
+  const connect = useCallback(async (kind: DeviceKind, bleOptionalServices: readonly string[] = []) => {
     const connection = connectionRef.current;
     if (!connection) return;
     try {
-      await connection.requestDevice(kind);
+      await connection.requestDevice(kind, bleOptionalServices);
     } catch (error) {
       if (error instanceof DOMException && error.name === "NotFoundError") return;
       setSnapshot((current) => ({ ...current, error: error instanceof Error ? error.message : String(error) }));

@@ -132,7 +132,9 @@ function activityOperationLabel(op: DeviceOpName, t: Translate): string {
     case "serial.signals": return t("devices.operationSerialSignals");
     case "close": return t("devices.operationClose");
     case "ble.connect": return t("devices.operationBleConnect");
-    case "ble.services": return t("devices.operationBleServices");
+    case "ble.services":
+    case "ble.gatt": return t("devices.operationBleServices");
+    case "ble.trace": return "Bluetooth trace";
     case "ble.read": return t("devices.operationBleRead");
     case "ble.write": return t("devices.operationBleWrite");
     case "ble.subscribe": return t("devices.operationBleSubscribe");
@@ -234,6 +236,7 @@ export function DevicePanel({ sessionId }: DevicePanelProps): React.ReactElement
   const { t } = useI18n();
   const { capabilities, devices, activity, attached, error, connect, disconnect, operationManager } = useDeviceBridge(sessionId);
   const [selectedInputId, setSelectedInputId] = useState<string | null>(null);
+  const [bleOptionalServices, setBleOptionalServices] = useState("");
 
   useEffect(() => setSelectedInputId(null), [sessionId]);
   return (
@@ -303,13 +306,39 @@ export function DevicePanel({ sessionId }: DevicePanelProps): React.ReactElement
                 disabledReason={usbDisabledReason(capabilities, t)}
                 onClick={() => void connect("usb")}
               />
-              <ConnectRow
-                icon={<Bluetooth size={14} aria-hidden="true" />}
-                label={t("devices.kindBluetooth")}
-                buttonLabel={t("devices.connectBluetooth")}
-                disabledReason={bluetoothDisabledReason(capabilities, t)}
-                onClick={() => void connect("ble")}
-              />
+              <div style={{ display: "grid", gap: 6, paddingTop: 8 }}>
+                <label htmlFor="ble-optional-services" style={{ fontSize: 11, color: "var(--text-muted)" }}>Additional GATT service UUIDs (comma or space separated)</label>
+                <input
+                  id="ble-optional-services"
+                  className="ui-focus-ring"
+                  value={bleOptionalServices}
+                  onChange={(event) => setBleOptionalServices(event.target.value)}
+                  placeholder="e.g. 18f0, fff0, ffe0"
+                  style={{ width: "100%", boxSizing: "border-box", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", padding: "6px 8px", font: "11px var(--font-mono)" }}
+                />
+                <div style={{ fontSize: 11, lineHeight: 1.4, color: "var(--text-dim)" }}>
+                  Web Bluetooth has no wildcard or unrestricted scan. These services are requested with the browser picker; changing them requires reselecting the device. Baseline access keeps common standard, Nordic UART, 18F0, FFF0 and FFE0 hints.
+                </div>
+                <ConnectRow
+                  icon={<Bluetooth size={14} aria-hidden="true" />}
+                  label={t("devices.kindBluetooth")}
+                  buttonLabel={t("devices.connectBluetooth")}
+                  disabledReason={bluetoothDisabledReason(capabilities, t)}
+                  onClick={() => void connect("ble", bleOptionalServices.split(/[\s,]+/).filter(Boolean))}
+                />
+              </div>
+              <div aria-label="Bluetooth capability matrix" style={{ display: "grid", gap: 3, paddingTop: 8, fontSize: 11, color: "var(--text-dim)" }}>
+                {([
+                  ["Browser GATT", capabilities.bluetoothGatt, capabilities.bluetoothReasons?.bluetoothGatt],
+                  ["Advertisement watching", capabilities.bluetoothAdvertisements, capabilities.bluetoothReasons?.bluetoothAdvertisements],
+                  ["Native BLE companion", capabilities.nativeBluetooth, capabilities.bluetoothReasons?.nativeBluetooth],
+                  ["Bluetooth Classic", capabilities.classicBluetooth, capabilities.bluetoothReasons?.classicBluetooth],
+                  ["Local HCI", capabilities.localHci, capabilities.bluetoothReasons?.localHci],
+                  ["OTA sniffer", capabilities.bluetoothOta, capabilities.bluetoothReasons?.bluetoothOta],
+                ] as const).map(([name, available, reason]) => (
+                  <div key={name}><strong style={{ color: available ? "var(--status-success)" : "var(--text-muted)" }}>{name}: {available ? "available" : "unavailable"}</strong>{!available && reason ? " — " + reason : ""}</div>
+                ))}
+              </div>
             </div>
 
             {devices.length === 0 ? (
