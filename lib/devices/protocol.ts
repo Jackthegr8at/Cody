@@ -153,6 +153,49 @@ export interface DeviceRequestFrame {
   params: Record<string, unknown>;
 }
 
+/**
+ * What is actually moving over one device's link, so a long transfer is
+ * visible while it runs instead of only in its result.
+ *
+ * Counted SERVER-side, because the server is the one party that sees every
+ * byte in both directions: an op's outbound payload on the way to the page,
+ * the answer on the way back, and buffered inbound bytes. Counting in the
+ * page instead would leave the agent's own view (`device_list`) and the
+ * user's panel disagreeing about the same link.
+ */
+export interface DeviceActivity {
+  deviceId: string;
+  /** Cumulative since the device was granted, both directions. */
+  bytesIn: number;
+  bytesOut: number;
+  /** Bytes/second over the recent window; 0 when the link has gone quiet. */
+  rateIn: number;
+  rateOut: number;
+  /** Completed operations, and the one still running if any. */
+  ops: number;
+  inFlight: { op: DeviceOpName; startedAt: number } | null;
+  /** Epoch ms of the last byte or op in either direction; null if never. */
+  lastActivityAt: number | null;
+  /** Unread bytes held for the agent, and bytes the ring buffer had to drop. */
+  buffered: number;
+  dropped: number;
+  /** The last failure on this device, so a stalled link says why. */
+  lastError: string | null;
+}
+
+/** Server -> page. Sent while a link is busy and once when it falls idle. */
+export interface DeviceActivityFrame {
+  type: "activity";
+  devices: DeviceActivity[];
+}
+
+export type DeviceServerFrame = DeviceRequestFrame | DeviceActivityFrame;
+
+/** How often the activity feed is pushed while a link is busy. Faster than a
+ * person reads a changing number, slow enough to cost nothing next to the
+ * traffic it describes. */
+export const ACTIVITY_FEED_MS = 500;
+
 /** Page -> server. */
 export type DeviceClientFrame =
   | { type: "hello"; capabilities: DeviceCapabilities; devices: DeviceInfo[] }

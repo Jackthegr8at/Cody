@@ -15,9 +15,10 @@ import {
   DeviceBridgeConnection,
   type DeviceBridgeSnapshot,
 } from "@/lib/devices/client";
-import type { DeviceKind } from "@/lib/devices/protocol";
+import type { DeviceActivity, DeviceKind } from "@/lib/devices/protocol";
 
 export interface UseDeviceBridgeResult extends DeviceBridgeSnapshot {
+  activity: Record<string, DeviceActivity>;
   /** Must be called synchronously from a click handler — it spends a real
    * user gesture on the browser's permission prompt. */
   connect: (kind: DeviceKind) => Promise<void>;
@@ -30,9 +31,11 @@ function initialSnapshot(): DeviceBridgeSnapshot {
 
 export function useDeviceBridge(sessionId: string | null): UseDeviceBridgeResult {
   const [snapshot, setSnapshot] = useState<DeviceBridgeSnapshot>(initialSnapshot);
+  const [activity, setActivity] = useState<Record<string, DeviceActivity>>({});
   const connectionRef = useRef<DeviceBridgeConnection | null>(null);
 
   useEffect(() => {
+    setActivity({});
     if (!sessionId) {
       connectionRef.current = null;
       setSnapshot(initialSnapshot());
@@ -41,10 +44,12 @@ export function useDeviceBridge(sessionId: string | null): UseDeviceBridgeResult
     const connection = new DeviceBridgeConnection(sessionId);
     connectionRef.current = connection;
     const unsubscribe = connection.subscribe(() => setSnapshot(connection.getSnapshot()));
+    const unsubscribeActivity = connection.onActivity(setActivity);
     setSnapshot(connection.getSnapshot());
     connection.start();
     return () => {
       unsubscribe();
+      unsubscribeActivity();
       connection.destroy();
       if (connectionRef.current === connection) connectionRef.current = null;
     };
@@ -73,5 +78,5 @@ export function useDeviceBridge(sessionId: string | null): UseDeviceBridgeResult
     }
   }, []);
 
-  return { ...snapshot, connect, disconnect };
+  return { ...snapshot, activity, connect, disconnect };
 }

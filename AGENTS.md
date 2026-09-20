@@ -1810,6 +1810,29 @@ session scope and the inbound byte buffers.
 - **A drop is always reported.** The per-source ring buffer is
   `DEVICE_BUFFER_BYTES` (256 KiB); a console that overflowed and one that
   merely paused must never read the same.
+- **A transfer is visible while it runs, not only in its result**
+  (`DeviceActivity`, `activitySnapshot()`, the `activity` frame). Counted
+  SERVER-side, because the server is the one party that sees every byte in
+  both directions — an op's outbound payload on its way to the page, the
+  answer on its way back, and buffered inbound bytes — so the agent's
+  `device_list` and the user's panel can never disagree about the same link.
+  Pushed at a fixed 500 ms cadence while anything is moving (per-event would
+  be a second flood beside the data itself), plus exactly ONE trailing frame
+  when everything falls idle: without it the panel's last painted state is
+  mid-transfer, and a finished push looks identical to a stalled one. Rates
+  divide by the WINDOW (3 s), not by the span of the samples held, so a burst
+  that ended decays to zero instead of reporting its peak forever.
+- **Losing the link says so.** A device or browser going away used to be
+  silent — the tools simply vanished mid-conversation and the next call
+  failed with nothing to connect it to (measured on a long ADB push whose
+  socket dropped: the agent kept retrying a device that was gone).
+  `watchDeviceBridge` now emits a warning notice on the falling edge, and
+  distinguishes the browser disconnecting from the grant being released.
+- **The internal route's body cap is a transfer budget, not a form limit.**
+  A device write carries base64 in that body, and 16 KB rejected every real
+  bulk push (64 KB chunks base64 to ~87 KB) before it reached hardware. It is
+  1 MiB, matching the RPC frame budget the omp host-tool path already had, so
+  both callers can send the same thing.
 - **Serial is a shape, not an API.** The client prefers real Web Serial and
   falls back to `web-serial-polyfill` over WebUSB on Android (no Chrome there
   has Web Serial), constructing the polyfill's `SerialPort` from a

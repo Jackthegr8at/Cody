@@ -28,12 +28,14 @@ import { SerialPort as PolyfillSerialPort } from "web-serial-polyfill";
 import { reconnectDelayMs } from "@/lib/stream-recovery";
 import {
   NO_CAPABILITIES,
+  type DeviceActivity,
   type DeviceCapabilities,
   type DeviceClientFrame,
   type DeviceInfo,
   type DeviceKind,
   type DeviceOpName,
   type DeviceRequestFrame,
+  type DeviceServerFrame,
   type UsbInterfaceInfo,
   type UsbOpenResult,
 } from "./protocol";
@@ -542,16 +544,27 @@ function isDeviceOpName(value: string): value is DeviceOpName {
   return value in DEVICE_OP_NAMES;
 }
 
-/** protocol.ts exports `isDeviceClientFrame` for the server's own inbound
- * frames but nothing for this direction — the browser validates what the
- * server sends it itself. The assertion below is the typed boundary: every
- * field is checked before anything relies on it. `op` is only checked for
- * being a string, not a known one: an op this client does not recognize
- * (e.g. a newer server after a protocol change) still has a valid `id`, so
- * it is worth a fast `result: false` from performDeviceOp's own check below
- * rather than a silent drop that leaves the agent's tool call waiting out
- * the full DEVICE_OP_TIMEOUT_MS. */
-function parseRequestFrame(raw: unknown): DeviceRequestFrame | null {
+/** The browser validates every server frame before executing an operation or
+ * exposing its activity, keeping malformed or newer frames harmless. */
+function isNonNegativeFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isDeviceActivity(value: unknown): value is DeviceActivity {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as DeviceActivity;
+  if (typeof candidate.deviceId !== "string") return false;
+  if (![candidate.bytesIn, candidate.bytesOut, candidate.rateIn, candidate.rateOut, candidate.ops, candidate.buffered, candidate.dropped].every(isNonNegativeFiniteNumber)) return false;
+  if (candidate.lastActivityAt !== null && !isNonNegativeFiniteNumber(candidate.lastActivityAt)) return false;
+  if (candidate.lastError !== null && typeof candidate.lastError !== "string") return false;
+  if (candidate.inFlight === null) return true;
+  return typeof candidate.inFlight === "object"
+    && candidate.inFlight !== null
+    && isDeviceOpName(candidate.inFlight.op)
+    && isNonNegativeFiniteNumber(candidate.inFlight.startedAt);
+}
+
+function parseServerFrame(raw: unknown): DeviceServerFrame | null {
   let payload: unknown = raw;
   if (typeof raw === "string") {
     try {
@@ -561,13 +574,16 @@ function parseRequestFrame(raw: unknown): DeviceRequestFrame | null {
     }
   }
   if (typeof payload !== "object" || payload === null) return null;
-  const candidate = payload as DeviceRequestFrame;
-  if (candidate.type !== "op") return null;
-  if (typeof candidate.id !== "string") return null;
-  if (typeof candidate.op !== "string") return null;
-  if (typeof candidate.deviceId !== "string") return null;
-  if (typeof candidate.params !== "object" || candidate.params === null) return null;
-  return { type: "op", id: candidate.id, op: candidate.op, deviceId: candidate.deviceId, params: candidate.params };
+  const candidate = payload as DeviceServerFrame;
+  if (candidate.type === "op") {
+    if (typeof candidate.id !== "string") return null;
+    if (typeof candidate.op !== "string") return null;
+    if (typeof candidate.deviceId !== "string") return null;
+    if (typeof candidate.params !== "object" || candidate.params === null) return null;
+    return { type: "op", id: candidate.id, op: candidate.op, deviceId: candidate.deviceId, params: candidate.params };
+  }
+  if (candidate.type !== "activity" || !Array.isArray(candidate.devices) || !candidate.devices.every(isDeviceActivity)) return null;
+  return { type: "activity", devices: candidate.devices };
 }
 
 // ============================================================================
@@ -920,6 +936,8 @@ export class DeviceBridgeConnection {
   private readonly capabilities: DeviceCapabilities;
   private snapshot: DeviceBridgeSnapshot;
   private readonly listeners = new Set<() => void>();
+  private readonly activityListeners = new Set<(activity: Record<string, DeviceActivity>) => void>();
+  private activityDeviceCount = 0;
   private readonly lifecycleUnsubs = new Map<string, () => void>();
   private readonly coalescer: DataCoalescer;
   /** Kept so `destroy` can detach it; a stale listener on the page-global
@@ -942,6 +960,22 @@ export class DeviceBridgeConnection {
     return () => { this.listeners.delete(listener); };
   }
 
+  onActivity(listener: (activity: Record<string, DeviceActivity>) => void): () => void {
+    this.activityListeners.add(listener);
+    return () => { this.activityListeners.delete(listener); };
+  }
+
+  private publishActivity(devices: DeviceActivity[]): void {
+    const activity = Object.fromEntries(devices.map((device) => [device.deviceId, device]));
+    this.activityDeviceCount = devices.length;
+    for (const listener of this.activityListeners) listener(activity);
+  }
+
+  private clearActivity(): void {
+    if (this.activityDeviceCount === 0) return;
+    this.activityDeviceCount = 0;
+    for (const listener of this.activityListeners) listener({});
+  }
   private setSnapshot(patch: Partial<DeviceBridgeSnapshot>): void {
     this.snapshot = { ...this.snapshot, ...patch };
     for (const listener of this.listeners) listener();
@@ -991,7 +1025,9 @@ export class DeviceBridgeConnection {
     }
     for (const unsubscribe of this.lifecycleUnsubs.values()) unsubscribe();
     this.lifecycleUnsubs.clear();
+    this.clearActivity();
     this.listeners.clear();
+    this.activityListeners.clear();
     this.socket?.close();
     this.socket = null;
   }
@@ -1010,6 +1046,7 @@ export class DeviceBridgeConnection {
     socket.onclose = () => {
       if (this.socket !== socket) return; // superseded by a newer socket already
       this.socket = null;
+      this.clearActivity();
       this.setSnapshot({ attached: false });
       if (this.destroyed) return;
       this.scheduleReconnect();
@@ -1044,8 +1081,12 @@ export class DeviceBridgeConnection {
   }
 
   private async handleMessage(event: MessageEvent): Promise<void> {
-    const frame = parseRequestFrame(event.data);
+    const frame = parseServerFrame(event.data);
     if (!frame) return; // not a frame shape we understand; ignore rather than crash the socket
+    if (frame.type === "activity") {
+      this.publishActivity(frame.devices);
+      return;
+    }
     try {
       const value = await performDeviceOp(frame.op, frame.deviceId, frame.params, {
         onSerialData: (deviceId, bytes) => this.coalescer.push(deviceId, bytes),

@@ -794,6 +794,19 @@ export class AgentSessionWrapper {
           message: `Hardware attached in the browser: ${labels}. device_open now claims it and reports its endpoints; device_read, device_write, device_close, usb_transfer and ble_gatt work against it.`,
         });
       }
+      // The loss matters more than the arrival, and used to be silent: the
+      // tools simply vanished mid-conversation and the next call failed with
+      // nothing to connect it to. Measured on a long ADB push where the
+      // socket dropped — the agent kept retrying a device that was gone.
+      if (count === 0 && previous > 0) {
+        this.emit({
+          type: "notice",
+          level: "warning",
+          message: attached
+            ? "The browser released its hardware (unplugged, or the grant was revoked). Any transfer in progress did not finish; reconnect it in Cody's Devices panel."
+            : "The browser holding this session's hardware disconnected (tab closed, reloaded, or offline). Any transfer in progress did not finish; reopen Cody's Devices panel to reconnect.",
+        });
+      }
     });
   }
 

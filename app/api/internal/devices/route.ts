@@ -7,7 +7,15 @@ import { isRecord } from "@/lib/type-guards";
 
 export const dynamic = "force-dynamic";
 
-const MAX_INTERNAL_DEVICES_BODY_BYTES = 16 * 1024;
+/**
+ * A device write carries its payload as base64 in this body, so the cap is a
+ * limit on how much an ACP engine can send per call. 16 KB was arbitrary and
+ * too small to matter: bulk transfers move in 64 KB chunks (adb's own unit),
+ * which base64 to ~87 KB, so every real push failed the cap before reaching
+ * a device. 1 MiB matches the RPC frame budget the omp host-tool path gets,
+ * so the two callers can send the same thing.
+ */
+const MAX_INTERNAL_DEVICES_BODY_BYTES = 1024 * 1024;
 const NO_STORE = { "Cache-Control": "no-store" };
 
 function invalidResponse(error: string, status = 400) {

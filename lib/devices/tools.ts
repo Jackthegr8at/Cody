@@ -26,9 +26,11 @@
 
 import type { HostToolDefinition } from "../pi-types";
 import { numberArg, stringArg } from "../session-tools";
+import { formatBytes } from "../format-bytes";
 import { isRecord } from "../type-guards";
 import { matchDevice, type DeviceBridge } from "./bus";
 import type {
+  DeviceActivity,
   DeviceCapabilities,
   DeviceInfo,
   UsbEndpointInfo,
@@ -142,6 +144,34 @@ function resolveDevice(query: string | undefined, ctx: DeviceToolContext): Devic
 // device_list
 // ============================================================================
 
+/**
+ * One device's traffic in words. An agent driving a long push is in exactly
+ * the position the user is — it cannot tell a slow link from a dead one from
+ * the return value of a call that has not come back yet — so the same
+ * accounting the panel renders is readable here.
+ */
+function formatActivity(activity: DeviceActivity, now: number): string | null {
+  const parts: string[] = [];
+  const moving = activity.rateOut > 0 || activity.rateIn > 0;
+  if (activity.inFlight) {
+    parts.push(`${activity.inFlight.op} running for ${Math.round((now - activity.inFlight.startedAt) / 100) / 10}s`);
+  }
+  if (moving) parts.push(`${formatBytes(activity.rateOut)}/s out, ${formatBytes(activity.rateIn)}/s in`);
+  if (activity.bytesOut > 0 || activity.bytesIn > 0) {
+    parts.push(`${formatBytes(activity.bytesOut)} sent, ${formatBytes(activity.bytesIn)} received over ${activity.ops} ops`);
+  }
+  // Stated whenever the link is quiet, not only when nothing ever happened:
+  // "is anything happening?" is exactly the question this answers, and a
+  // cumulative total alone cannot distinguish a finished transfer from a
+  // stalled one.
+  if (!moving && !activity.inFlight && activity.lastActivityAt !== null) {
+    parts.push(`idle for ${Math.round((now - activity.lastActivityAt) / 1000)}s`);
+  }
+  if (activity.dropped > 0) parts.push(`${formatBytes(activity.dropped)} dropped`);
+  if (activity.lastError) parts.push(`last error: ${activity.lastError}`);
+  return parts.length > 0 ? parts.join(", ") : null;
+}
+
 async function deviceList(_args: DeviceToolArgs, ctx: DeviceToolContext): Promise<string> {
   if (!ctx.bridge.attached) return NO_BROWSER_TEXT;
   const devices = ctx.bridge.list();
@@ -149,7 +179,14 @@ async function deviceList(_args: DeviceToolArgs, ctx: DeviceToolContext): Promis
   if (devices.length === 0) {
     lines.push("No devices are attached. Open Cody's Devices panel and grant access to one.");
   } else {
-    lines.push(...devices.map(formatDeviceLine));
+    const now = Date.now();
+    const activity = new Map(ctx.bridge.activitySnapshot().map((entry) => [entry.deviceId, entry]));
+    for (const device of devices) {
+      lines.push(formatDeviceLine(device));
+      const found = activity.get(device.id);
+      const summary = found ? formatActivity(found, now) : null;
+      if (summary) lines.push(`  ${summary}`);
+    }
   }
   return lines.join("\n");
 }

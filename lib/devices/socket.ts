@@ -9,7 +9,7 @@
  */
 
 import { getDeviceBridge } from "./bus";
-import { isDeviceClientFrame, type DeviceCapabilities, type DeviceInfo, type DeviceRequestFrame } from "./protocol";
+import { ACTIVITY_FEED_MS, isDeviceClientFrame, type DeviceCapabilities, type DeviceInfo, type DeviceRequestFrame } from "./protocol";
 
 /** The subset of a `ws` socket this module uses, so the launcher can hand one
  * over without this file importing `ws` (and Next bundling it). */
@@ -77,6 +77,30 @@ export function attachDeviceSocket(sessionId: string, socket: DeviceSocket): voi
   };
   const detach = bridge.attach(send);
 
+  /**
+   * The activity feed: what is moving on each link, pushed at a fixed cadence
+   * while anything is happening and once more when it stops.
+   *
+   * Cadence rather than per-event, because a serial console or a bulk push
+   * produces thousands of events a second and a frame each would be a second
+   * flood beside the data itself. Two a second is faster than a person reads
+   * a changing number and slow enough to be free. The trailing send matters
+   * as much as the rest: without it the panel's last painted state is
+   * mid-transfer, so a finished push looks identical to a stalled one.
+   */
+  let wasActive = false;
+  const feed = setInterval(() => {
+    if (socket.readyState !== OPEN) return;
+    const devices = bridge.activitySnapshot();
+    const active = devices.some((device) => device.inFlight !== null || device.rateIn > 0 || device.rateOut > 0);
+    if (!active && !wasActive) return;
+    wasActive = active;
+    socket.send(JSON.stringify({ type: "activity", devices }));
+  }, ACTIVITY_FEED_MS);
+  // An unref'd timer never holds the process open on its own; the socket's
+  // close is what ends the feed.
+  feed.unref?.();
+
   socket.on("message", (raw, isBinary) => {
     // Everything is JSON: device payloads ride as base64 inside a frame, so a
     // binary message is a client that does not speak this protocol.
@@ -119,6 +143,10 @@ export function attachDeviceSocket(sessionId: string, socket: DeviceSocket): voi
     }
   });
 
-  socket.on("close", detach);
-  socket.on("error", detach);
+  const release = (): void => {
+    clearInterval(feed);
+    detach();
+  };
+  socket.on("close", release);
+  socket.on("error", release);
 }

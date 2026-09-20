@@ -20,6 +20,7 @@ import {
   DEVICE_BUFFER_BYTES,
   DEVICE_OP_TIMEOUT_MS,
   NO_CAPABILITIES,
+  type DeviceActivity,
   type DeviceCapabilities,
   type DeviceInfo,
   type DeviceOpName,
@@ -32,6 +33,24 @@ interface Pending {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  /** Which device the answer belongs to, so its bytes are attributed. */
+  deviceId: string;
+}
+
+/** Bytes a frame's `base64` payload carries, wherever it sits: an op's own
+ * params, or an answer given either as a bare string or wrapped in an object.
+ * Base64 is 4 chars per 3 bytes, minus padding — computed rather than
+ * decoded, since this runs on every frame and the buffer would be thrown
+ * away immediately. */
+function base64Bytes(value: unknown): number {
+  const encoded = typeof value === "string"
+    ? value
+    : value && typeof value === "object" && typeof (value as { base64?: unknown }).base64 === "string"
+      ? (value as { base64: string }).base64
+      : null;
+  if (encoded === null) return 0;
+  const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((encoded.length * 3) / 4) - padding);
 }
 
 /** Newest-window byte buffer for one device, with an honest drop count. */
@@ -40,6 +59,11 @@ class DeviceBuffer {
   private bytes = 0;
   private dropped = 0;
 
+  /** Lifetime drops, never reset by a drain — `dropped` below is the
+   * per-read gap, which a reader consumes; this is what the activity feed
+   * reports, where a total that went backwards would be nonsense. */
+  droppedTotal = 0;
+
   push(chunk: Buffer): void {
     this.chunks.push(chunk);
     this.bytes += chunk.length;
@@ -47,6 +71,7 @@ class DeviceBuffer {
       const oldest = this.chunks.shift()!;
       this.bytes -= oldest.length;
       this.dropped += oldest.length;
+      this.droppedTotal += oldest.length;
     }
   }
 
@@ -87,6 +112,57 @@ function sourceCharacteristic(key: string): string | null {
   return separator < 0 ? null : key.slice(separator + 1);
 }
 
+/** How far back a rate is measured. Short enough to track a transfer that
+ * starts and stops, long enough that one 64 KB chunk does not read as a
+ * megabyte per second. */
+const RATE_WINDOW_MS = 3_000;
+
+/** Per-device byte and operation accounting behind `DeviceActivity`. */
+class ActivityRecord {
+  bytesIn = 0;
+  bytesOut = 0;
+  ops = 0;
+  dropped = 0;
+  lastActivityAt: number | null = null;
+  lastError: string | null = null;
+  inFlight: { op: DeviceOpName; startedAt: number } | null = null;
+  /** (timestamp, in, out) samples inside the rate window. */
+  private samples: Array<{ at: number; in: number; out: number }> = [];
+
+  record(direction: "in" | "out", bytes: number, now = Date.now()): void {
+    if (bytes <= 0) return;
+    if (direction === "in") this.bytesIn += bytes;
+    else this.bytesOut += bytes;
+    this.lastActivityAt = now;
+    this.samples.push({ at: now, in: direction === "in" ? bytes : 0, out: direction === "out" ? bytes : 0 });
+    this.prune(now);
+  }
+
+  touch(now = Date.now()): void {
+    this.lastActivityAt = now;
+  }
+
+  private prune(now: number): void {
+    const cutoff = now - RATE_WINDOW_MS;
+    while (this.samples.length > 0 && this.samples[0].at < cutoff) this.samples.shift();
+  }
+
+  /** Bytes/second over the window. Divided by the WINDOW, not by the span
+   * between the samples held: a burst that ended two seconds ago must decay
+   * toward zero rather than keep reporting its peak forever. */
+  rates(now = Date.now()): { rateIn: number; rateOut: number } {
+    this.prune(now);
+    let inBytes = 0;
+    let outBytes = 0;
+    for (const sample of this.samples) {
+      inBytes += sample.in;
+      outBytes += sample.out;
+    }
+    const seconds = RATE_WINDOW_MS / 1000;
+    return { rateIn: Math.round(inBytes / seconds), rateOut: Math.round(outBytes / seconds) };
+  }
+}
+
 export class DeviceBridge {
   capabilities: DeviceCapabilities = NO_CAPABILITIES;
   private devices = new Map<string, DeviceInfo>();
@@ -97,6 +173,8 @@ export class DeviceBridge {
   private send: Sender | null = null;
   private nextOpId = 1;
   private listeners = new Set<() => void>();
+  /** Byte/op accounting per device, kept across a device's whole grant. */
+  private activity = new Map<string, ActivityRecord>();
 
   get attached(): boolean {
     return this.send !== null;
@@ -114,6 +192,7 @@ export class DeviceBridge {
       this.send = null;
       // Every grant belonged to that page: nothing is reachable now.
       this.devices.clear();
+      this.activity.clear();
       this.failAllPending("The browser holding this device disconnected.");
       this.notify();
     };
@@ -144,7 +223,10 @@ export class DeviceBridge {
     for (const device of devices) next.set(device.id, device);
     this.devices = next;
     for (const id of [...this.buffers.keys()]) {
-      if (!next.has(id)) this.buffers.delete(id);
+      if (!next.has(sourceDevice(id))) this.buffers.delete(id);
+    }
+    for (const id of [...this.activity.keys()]) {
+      if (!next.has(id)) this.activity.delete(id);
     }
     this.notify();
   }
@@ -154,8 +236,42 @@ export class DeviceBridge {
     for (const key of [...this.buffers.keys()]) {
       if (sourceDevice(key) === deviceId) this.buffers.delete(key);
     }
+    this.activity.delete(deviceId);
     this.wake(deviceId);
     this.notify();
+  }
+
+  private activityFor(deviceId: string): ActivityRecord {
+    let record = this.activity.get(deviceId);
+    if (!record) {
+      record = new ActivityRecord();
+      this.activity.set(deviceId, record);
+    }
+    return record;
+  }
+
+  /** What is moving on each granted device right now. Devices with no
+   * traffic yet are included with zeroes: "nothing has happened on this
+   * link" is an answer, and omitting the row would read as "no such link". */
+  activitySnapshot(): DeviceActivity[] {
+    const now = Date.now();
+    return [...this.devices.keys()].map((deviceId) => {
+      const record = this.activityFor(deviceId);
+      const { rateIn, rateOut } = record.rates(now);
+      return {
+        deviceId,
+        bytesIn: record.bytesIn,
+        bytesOut: record.bytesOut,
+        rateIn,
+        rateOut,
+        ops: record.ops,
+        inFlight: record.inFlight,
+        lastActivityAt: record.lastActivityAt,
+        buffered: this.buffered(deviceId),
+        dropped: record.dropped,
+        lastError: record.lastError,
+      };
+    });
   }
 
   list(): DeviceInfo[] {
@@ -181,7 +297,11 @@ export class DeviceBridge {
       buffer = new DeviceBuffer();
       this.buffers.set(key, buffer);
     }
+    const droppedBefore = buffer.droppedTotal;
     buffer.push(data);
+    const record = this.activityFor(deviceId);
+    record.record("in", data.length);
+    record.dropped += buffer.droppedTotal - droppedBefore;
     this.wake(deviceId);
   }
 
@@ -243,6 +363,16 @@ export class DeviceBridge {
     if (!pending) return;
     this.pending.delete(id);
     clearTimeout(pending.timer);
+    const record = this.activityFor(pending.deviceId);
+    record.ops += 1;
+    record.inFlight = null;
+    // An answer's payload is real inbound traffic — a 4 MB bulk IN read is
+    // the transfer, not an aside to it — so it is counted the same way the
+    // buffered stream is, rather than showing up nowhere.
+    record.record("in", base64Bytes(value));
+    record.lastError = ok ? null : (error || "The browser could not complete that device operation.");
+    record.touch();
+    this.notify();
     if (ok) pending.resolve(value);
     else pending.reject(new Error(error || "The browser could not complete that device operation."));
   }
@@ -267,17 +397,30 @@ export class DeviceBridge {
       return Promise.reject(new Error("No browser is attached to this session, so its hardware is unreachable. Open the Devices panel in Cody and connect the device."));
     }
     const id = String(this.nextOpId++);
+    const record = this.activityFor(deviceId);
+    record.inFlight = { op, startedAt: Date.now() };
+    record.record("out", base64Bytes(params));
+    record.touch();
+    this.notify();
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`The browser did not answer ${op} within ${Math.round(DEVICE_OP_TIMEOUT_MS / 1000)}s.`));
+        // A timeout leaves the link in an unknown state; saying so is the
+        // whole point of the feed the panel renders.
+        record.inFlight = null;
+        record.lastError = `The browser did not answer ${op} within ${Math.round(DEVICE_OP_TIMEOUT_MS / 1000)}s.`;
+        this.notify();
+        reject(new Error(record.lastError));
       }, DEVICE_OP_TIMEOUT_MS);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve, reject, timer, deviceId });
       try {
         send({ type: "op", id, op, deviceId, params });
       } catch (error) {
         this.pending.delete(id);
         clearTimeout(timer);
+        record.inFlight = null;
+        record.lastError = error instanceof Error ? error.message : String(error);
+        this.notify();
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
