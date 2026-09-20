@@ -9,8 +9,7 @@
  */
 
 import { getDeviceBridge } from "./bus";
-import { ACTIVITY_FEED_MS, isDeviceClientFrame, type DeviceCapabilities, type DeviceInfo, type DeviceRequestFrame } from "./protocol";
-
+import { ACTIVITY_FEED_MS, isDeviceClientFrame, type DeviceCapabilities, type DeviceInfo, type DeviceServerFrame } from "./protocol";
 /** The subset of a `ws` socket this module uses, so the launcher can hand one
  * over without this file importing `ws` (and Next bundling it). */
 export interface DeviceSocket {
@@ -60,6 +59,16 @@ function asDevices(value: unknown): DeviceInfo[] {
       ...(record.transport === "web-serial" || record.transport === "webusb-polyfill" ? { transport: record.transport } : {}),
       ...(typeof record.baudRate === "number" ? { baudRate: record.baudRate } : {}),
       ...(Array.isArray(record.services) ? { services: record.services.filter((s): s is string => typeof s === "string") } : {}),
+      ...(Array.isArray(record.protocolCandidates) ? {
+        protocolCandidates: record.protocolCandidates.flatMap((candidate) => {
+          if (!candidate || typeof candidate !== "object") return [];
+          const item = candidate as Record<string, unknown>;
+          if ((item.protocol !== "adb" && item.protocol !== "fastboot" && item.protocol !== "dfu")
+            || typeof item.interfaceNumber !== "number" || !Number.isInteger(item.interfaceNumber)
+            || typeof item.alternateSetting !== "number" || !Number.isInteger(item.alternateSetting)) return [];
+          return [{ protocol: item.protocol, interfaceNumber: item.interfaceNumber, alternateSetting: item.alternateSetting }];
+        }),
+      } : {}),
     });
   }
   return devices;
@@ -71,11 +80,13 @@ function asDevices(value: unknown): DeviceInfo[] {
  */
 export function attachDeviceSocket(sessionId: string, socket: DeviceSocket): void {
   const bridge = getDeviceBridge(sessionId);
-  const send = (frame: DeviceRequestFrame): void => {
+  const send = (frame: DeviceServerFrame): void => {
     if (socket.readyState !== OPEN) throw new Error("The device socket is closed.");
     socket.send(JSON.stringify(frame));
   };
-  const detach = bridge.attach(send);
+  const detach = bridge.attach(send, () => {
+    if (socket.readyState === OPEN) socket.close(4001, "Device host authority replaced.");
+  });
 
   /**
    * The activity feed: what is moving on each link, pushed at a fixed cadence
@@ -90,7 +101,7 @@ export function attachDeviceSocket(sessionId: string, socket: DeviceSocket): voi
    */
   let wasActive = false;
   const feed = setInterval(() => {
-    if (socket.readyState !== OPEN) return;
+    if (socket.readyState !== OPEN || !detach.isCurrent()) return;
     const devices = bridge.activitySnapshot();
     const active = devices.some((device) => device.inFlight !== null || device.rateIn > 0 || device.rateOut > 0);
     if (!active && !wasActive) return;
@@ -111,6 +122,7 @@ export function attachDeviceSocket(sessionId: string, socket: DeviceSocket): voi
     } catch {
       return;
     }
+    if (!detach.isCurrent()) return;
     if (!isDeviceClientFrame(parsed)) return;
     switch (parsed.type) {
       case "hello": {
@@ -131,12 +143,18 @@ export function attachDeviceSocket(sessionId: string, socket: DeviceSocket): voi
         );
         break;
       }
-      case "result": {
-        if (typeof parsed.id !== "string") break;
-        if (parsed.ok) bridge.settle(parsed.id, true, parsed.value);
-        else bridge.settle(parsed.id, false, undefined, typeof parsed.error === "string" ? parsed.error : undefined);
+      case "result":
+        bridge.settle(parsed);
         break;
-      }
+      case "operation.progress":
+        if (parsed.snapshot.sessionId === sessionId) bridge.receiveOperationProgress(parsed);
+        break;
+      case "operation.snapshot":
+        if (parsed.snapshot.sessionId === sessionId) bridge.receiveOperationSnapshot(parsed);
+        break;
+      case "operation.result":
+        if (parsed.snapshot.sessionId === sessionId) bridge.receiveOperationResult(parsed);
+        break;
       case "gone":
         if (typeof parsed.deviceId === "string") bridge.removeDevice(parsed.deviceId);
         break;

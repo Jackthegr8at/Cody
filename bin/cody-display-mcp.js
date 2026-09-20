@@ -81,17 +81,18 @@ async function main() {
     return typeof body.text === "string" ? body.text : "";
   }
 
-  /** Same envelope as callSessionTool, for the six device tools. Its
-   * timeout is longer than the session calls' 15s: a device op can wait up
-   * to DEVICE_OP_TIMEOUT_MS (20s, lib/devices/protocol.ts) for the browser
-   * to answer, and this fetch must outlast that. */
+  /** Same envelope as callSessionTool, for browser-hosted hardware. A page
+   * quiet read may legitimately use the full 60s bridge budget, while the
+   * liveness watchdog is 65s; never cut that short with a fixed MCP timeout. */
   async function callDeviceTool(tool, toolArgs) {
     if (!devicesEndpoint || !sessionId) throw new Error("Cody device capability is unavailable");
+    const requestedQuiet = Number.isSafeInteger(toolArgs?.timeoutMs) ? toolArgs.timeoutMs : 60_000;
+    const quietBudget = Math.max(1, Math.min(60_000, requestedQuiet));
     const response = await fetch(devicesEndpoint, {
       method: "POST",
       headers: { Authorization: "Bearer " + capability, "Content-Type": "application/json" },
       body: JSON.stringify({ sessionId, tool, arguments: toolArgs }),
-      signal: AbortSignal.timeout(25_000),
+      signal: AbortSignal.timeout(quietBudget + 5_000),
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "HTTP " + response.status);
@@ -329,6 +330,72 @@ async function main() {
       return { content: [{ type: "text", text }] };
     } catch (error) {
       return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to perform the BLE operation" }] };
+    }
+  });
+
+  const operationInput = {
+    device: z.string().describe("Exact browser device id from device_list."),
+    protocol: z.enum(["esp", "adb", "fastboot", "gecko", "stm32", "stk500", "dfu"]).describe("Protocol implementation to run."),
+    target: z.string().optional().describe("Exact destination, path, partition, or address."),
+    offset: z.number().int().nonnegative().optional(),
+    length: z.number().int().positive().optional(),
+    fileId: z.string().optional().describe("Session artifact id displayed in Cody's Devices panel."),
+    sha256: z.string().regex(/^[a-fA-F0-9]{64}$/).optional().describe("Exact artifact SHA-256; required with fileId."),
+    baudRate: z.number().int().positive().optional(),
+    interfaceNumber: z.number().int().nonnegative().optional(),
+    command: z.string().max(16 * 1024).optional(),
+    options: z.object({}).passthrough().optional().describe("Protocol-specific validated configuration, such as safety or DFU descriptor data. It cannot approve a risk."),
+  };
+  const startOperationTools = [
+    ["device_detect", "Start protocol detection in the browser."],
+    ["device_flash", "Start a verified flash. Any destructive write pauses for direct browser UI confirmation bound to the exact target, hash, and offset."],
+    ["device_dump", "Start a dump or backup; resulting bytes remain a session-owned browser artifact."],
+    ["device_exec", "Start a protocol command. State-changing commands pause for direct browser UI confirmation."],
+    ["device_push", "Start a resumable file push from a session artifact."],
+    ["device_pull", "Start a file pull into a session-owned browser artifact."],
+    ["device_monitor", "Start an exclusive serial monitor. Use device_monitor_send with its operation id for input."],
+  ];
+  for (const [name, description] of startOperationTools) {
+    server.registerTool(name, { description, inputSchema: operationInput }, async (input) => {
+      try {
+        const text = await callDeviceTool(name, input);
+        return { content: [{ type: "text", text }] };
+      } catch (error) {
+        return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to start device operation" }] };
+      }
+    });
+  }
+  server.registerTool("device_operation_status", {
+    description: "Read the bounded snapshot and recent output for an operation id.",
+    inputSchema: { operationId: z.string() },
+  }, async (input) => {
+    try {
+      const text = await callDeviceTool("device_operation_status", input);
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to read device operation" }] };
+    }
+  });
+  server.registerTool("device_operation_cancel", {
+    description: "Cancel an operation by id. No pending write is replayed after cancellation.",
+    inputSchema: { operationId: z.string() },
+  }, async (input) => {
+    try {
+      const text = await callDeviceTool("device_operation_cancel", input);
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to cancel device operation" }] };
+    }
+  });
+  server.registerTool("device_monitor_send", {
+    description: "Send immediate UTF-8 input to a running serial monitor operation. Input is never queued or replayed after cancel/reconnect.",
+    inputSchema: { operationId: z.string(), text: z.string().min(1).max(16 * 1024) },
+  }, async (input) => {
+    try {
+      const text = await callDeviceTool("device_monitor_send", input);
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to send monitor input" }] };
     }
   });
   await server.connect(new StdioServerTransport());

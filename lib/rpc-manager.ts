@@ -32,6 +32,7 @@ import { isRecord } from "./type-guards";
 import { SIDEBAR_CONTEXT_TOOLS } from "./sidebar-context-tools";
 import { SESSION_AWARENESS_TOOLS, type SessionLivePhase, type SessionToolContext } from "./session-tools";
 import { findUserById, hasAnyUser, type UserRecord } from "./auth/users";
+import { DEVICE_OPERATION_TOOLS } from "./devices/operation-tools";
 import { DEVICE_TOOLS } from "./devices/tools";
 import { aliasDeviceBridge, getDeviceBridge, peekDeviceBridge } from "./devices/bus";
 import type {
@@ -256,6 +257,7 @@ const SERVER_HOST_TOOL_NAMES = new Set([
   ...SERVER_HOST_TOOLS.map((tool) => tool.name),
   ...SIDEBAR_CONTEXT_TOOLS.map((tool) => tool.name),
   ...DEVICE_TOOLS.map((tool) => tool.name),
+  ...DEVICE_OPERATION_TOOLS.map((tool) => tool.name),
 ]);
 /** One session-tool result's char budget for a MAIN chat. The sidebar's own
  * budget assumes the smallest supported window (6 KB); a main session runs on
@@ -685,6 +687,8 @@ export class AgentSessionWrapper {
   private restarting = false;
   private _alive = true;
   private mcpListWaiter: { resolve: (text: string) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+  /** Unsubscribe for durable browser operation transcript updates. */
+  private operationWatch: (() => void) | null = null;
   /** Unsubscribe for the device-bridge watch, set once the session id is known. */
   private deviceWatch: (() => void) | null = null;
   /** Host tools the web UI registered via set_host_tools (agent-callable). */
@@ -760,7 +764,7 @@ export class AgentSessionWrapper {
     const bridge = peekDeviceBridge(this._sessionId);
     if (!bridge?.attached) return [];
     const published = bridge.list().length > 0
-      ? DEVICE_TOOLS
+      ? [...DEVICE_TOOLS, ...DEVICE_OPERATION_TOOLS]
       : DEVICE_TOOLS.filter((tool) => tool.name === "device_list");
     return published.map(({ handler: _handler, ...tool }) => tool);
   }
@@ -775,6 +779,30 @@ export class AgentSessionWrapper {
     if (!this._sessionId || this.deviceWatch) return;
     const bridge = peekDeviceBridge(this._sessionId);
     if (!bridge) return;
+    if (!this.operationWatch) {
+      this.operationWatch = bridge.onOperation((snapshot, event) => {
+        if (!this.isAlive()) return;
+        let message = `Hardware operation ${snapshot.id} is ${snapshot.state}.`;
+        let level: "info" | "warning" = "info";
+        if (event?.type === "progress" && event.progress) {
+          message = `Hardware operation ${snapshot.id}: ${event.progress.phase}${event.progress.message ? ` — ${event.progress.message}` : ""}.`;
+        } else if (event?.type === "output" && event.output) {
+          const output = event.output.line.length > 1024
+            ? event.output.line.slice(0, 1024) + " …[line truncated]"
+            : event.output.line;
+          message = `Hardware operation ${snapshot.id} device output (untrusted): ${output}`;
+        } else if (event?.type === "confirmation" && event.confirmation) {
+          level = "warning";
+          message = `Hardware operation ${snapshot.id} is awaiting direct UI confirmation for ${event.confirmation.binding.action} on ${event.confirmation.binding.target}.`;
+        } else if (snapshot.error) {
+          level = "warning";
+          message = `Hardware operation ${snapshot.id} failed: ${snapshot.error}`;
+        } else if (snapshot.result) {
+          message = `Hardware operation ${snapshot.id} completed: ${snapshot.result.summary}`;
+        }
+        this.emit({ type: "notice", level, message });
+      });
+    }
     let lastAttached = bridge.attached;
     let lastCount = bridge.attached ? bridge.list().length : 0;
     this.deviceWatch = bridge.onChange(() => {
@@ -964,6 +992,8 @@ export class AgentSessionWrapper {
       aliasDeviceBridge(this._sessionId, id);
       this.deviceWatch?.();
       this.deviceWatch = null;
+      this.operationWatch?.();
+      this.operationWatch = null;
     }
     this._sessionId = id;
     this.watchDeviceBridge();
@@ -1305,7 +1335,9 @@ export class AgentSessionWrapper {
       this.sendHostToolResult({ type: "host_tool_result", id, result: { content: [{ type: "text", text }] } });
       return;
     }
-    const deviceTool = this.engine.kind === "sidebar" ? undefined : DEVICE_TOOLS.find((tool) => tool.name === toolName);
+    const deviceTool = this.engine.kind === "sidebar"
+      ? undefined
+      : [...DEVICE_TOOLS, ...DEVICE_OPERATION_TOOLS].find((tool) => tool.name === toolName);
     if (deviceTool) {
       // Same contract as the session tools: plain text either way, and the
       // bridge is addressed by THIS session's id — a tool call can never
@@ -2160,6 +2192,8 @@ export class AgentSessionWrapper {
     this.planKeeper?.dispose();
     this.deviceWatch?.();
     this.deviceWatch = null;
+    this.operationWatch?.();
+    this.operationWatch = null;
     this.unsubscribeFrames?.();
     this.clearPendingUiRequests();
     if (this.mcpListWaiter) {

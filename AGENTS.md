@@ -1750,121 +1750,146 @@ paged).
 
 ### Browser-hosted hardware (`lib/devices/`)
 
-The agent runs on the server; the hardware is plugged into the human's
-machine. So the BROWSER is the device host: a tool call goes server → the
-session's WebSocket → the page, which performs it against a real
-`SerialPort` / `USBDevice` / GATT characteristic, and the result comes back.
-The server holds no handles and never sees a device — it holds the grant's
-session scope and the inbound byte buffers.
+The hardware is connected to the machine running Cody in the browser, not to the
+server. The page owns the real `SerialPort`, `USBDevice`, or BLE
+characteristic; the server only relays frames within that Cody session. Browser
+grants are user-selected, secure-context capabilities. Do not claim, widen, or
+re-use a grant across sessions.
 
-- **The grant is the browser's, and it is per session.** Web Serial/USB/
-  Bluetooth only hand a page a device the user picked in the browser's own
-  chooser, in a secure context. Cody cannot widen that and does not try: the
-  Devices panel is where a human picks, and the socket
-  (`/api/devices/socket?sessionId=`) is gated exactly like the display
-  socket — a credential that may see that session, same-origin, and the
-  session must really exist (`canAccessDisplaySession`).
-- **Tools materialize with the hardware, except the one that finds it**
-  (`deviceToolsForSession()` / `watchDeviceBridge()` in `lib/rpc-manager.ts`).
-  Registering all seven schemas in every conversation would spend tokens on a
-  capability most sessions cannot use, and offering `device_write` with
-  nothing attached invites a model to try. But a capability the model cannot
-  SEE is one it never suggests, so `device_list` alone is published whenever a
-  browser is attached at all — that is how an agent learns the machine it is
-  being read on (laptop, phone, tablet) can reach USB/serial/BLE directly, and
-  its output names the next step. The other six arrive with the first grant,
-  and ONE notice says so.
-- **Opening a USB device claims its interfaces.** WebUSB refuses every
-  endpoint transfer until the owning interface is claimed, and its
-  DOMException names neither the interface nor the fix, so an unclaimed open
-  is indistinguishable from dead hardware — `device_open` used to leave it
-  that way and `usb_transfer` could therefore never work at all.
-  `claimUsbInterfaces` takes every interface of the active configuration
-  (independently, since a claim Windows refuses must not lose the others) and
-  reports each one's class/subclass/protocol and endpoints, naming the Android
-  triplets `ff/42/01` adb and `ff/42/03` fastboot. An agent thus learns what
-  protocol the thing speaks and which endpoints to use without fetching a
-  single descriptor. Pass `interface` to claim just one and leave a sibling to
-  the OS; a named interface that cannot be claimed fails the open, because
-  there is no partial success to report.
-- **A permitted USB device is re-adopted without the human**
-  (`adoptPermittedUsbDevices`). A WebUSB grant is persistent and keyed by
-  (vendor, product, serial), so a replug, a page reload, or a target rebooting
-  back into the same USB identity is still ours — and a flashing loop that
-  stopped at a chooser it cannot click between every reboot was unusable. A
-  device returning with a DIFFERENT identity (a bootloader that boots into an
-  adb interface) is genuinely a new grant; that is the permission model, and
-  the transfer error says so rather than pretending otherwise. Devices
-  exposing a CDC control interface are skipped, or Android's polyfill serial
-  ports would be re-adopted as raw USB after every reload.
-- **Inbound bytes are buffered per SOURCE, not per device**
-  (`sourceKey()`, `lib/devices/bus.ts`). A BLE peripheral can notify on
-  several characteristics at once; merging those into one stream is not a
-  formatting problem but corruption, since nothing downstream could tell which
-  characteristic produced which bytes. Serial and USB have one source, so
-  their key is the device itself, and `device_read` takes an optional
-  `characteristic` to choose among a BLE device's streams.
-- **Waiting is event-driven** (`waitForData`): the page tells the server the
-  moment bytes land, so a long `waitMs` costs nothing while the line is quiet.
-  Polling traded latency for wakeups and bought neither.
-- **A drop is always reported.** The per-source ring buffer is
-  `DEVICE_BUFFER_BYTES` (256 KiB); a console that overflowed and one that
-  merely paused must never read the same.
-- **A transfer is visible while it runs, not only in its result**
-  (`DeviceActivity`, `activitySnapshot()`, the `activity` frame). Counted
-  SERVER-side, because the server is the one party that sees every byte in
-  both directions — an op's outbound payload on its way to the page, the
-  answer on its way back, and buffered inbound bytes — so the agent's
-  `device_list` and the user's panel can never disagree about the same link.
-  Pushed at a fixed 500 ms cadence while anything is moving (per-event would
-  be a second flood beside the data itself), plus exactly ONE trailing frame
-  when everything falls idle: without it the panel's last painted state is
-  mid-transfer, and a finished push looks identical to a stalled one. Rates
-  divide by the WINDOW (3 s), not by the span of the samples held, so a burst
-  that ended decays to zero instead of reporting its peak forever.
-- **Losing the link says so.** A device or browser going away used to be
-  silent — the tools simply vanished mid-conversation and the next call
-  failed with nothing to connect it to (measured on a long ADB push whose
-  socket dropped: the agent kept retrying a device that was gone).
-  `watchDeviceBridge` now emits a warning notice on the falling edge, and
-  distinguishes the browser disconnecting from the grant being released.
-- **The internal route's body cap is a transfer budget, not a form limit.**
-  A device write carries base64 in that body, and 16 KB rejected every real
-  bulk push (64 KB chunks base64 to ~87 KB) before it reached hardware. It is
-  1 MiB, matching the RPC frame budget the omp host-tool path already had, so
-  both callers can send the same thing.
-- **Serial is a shape, not an API.** The client prefers real Web Serial and
-  falls back to `web-serial-polyfill` over WebUSB on Android (no Chrome there
-  has Web Serial), constructing the polyfill's `SerialPort` from a
-  `navigator.usb` device it picked itself — the polyfill's own singleton
-  hands back a wrapper with no way to recover the USB product string, and the
-  panel needs a label a human recognizes. Downstream code (esptool-js later)
-  sees one port shape either way.
-- **`usb_transfer` is how an unknown device gets interrogated.** Control
-  transfers (descriptors, vendor requests) and bulk/interrupt endpoints are
-  what a raw USB device speaks before anything higher-level exists —
-  fastboot's ASCII command protocol, a MediaTek BROM handshake. Without it an
-  attached device could only be opened and looked at.
-- **Capability reporting is honest and per browser.** `device_list` leads with
-  what THIS browser can do (secure context, serial, usb, bluetooth, platform)
-  because the answer differs per device and per origin: no Web Serial on
-  Android, no Web Bluetooth in several desktop builds, nothing at all outside
-  a secure context. The panel says the same thing beside each greyed button,
-  naming the reason rather than disabling silently.
-- **Windows binds a USB interface to one driver.** Chrome reaches a device
-  only through WinUSB, so an interface held by a vendor driver (Google's ADB
-  driver, a MediaTek VCOM) enumerates but cannot be claimed; Zadig rebinding
-  that interface to WinUSB is the fix. This is a host fact, not something Cody
-  can work around — it belongs in whatever the panel tells a stuck user.
-- **ACP engines reach the tools over MCP**, like display/todo/sessions:
-  `POST /api/internal/devices` with a session-scoped capability token, tools
-  declared in `bin/cody-display-mcp.js`, route on `proxy.ts`'s `PUBLIC_EXACT`.
-  The bridge is keyed by the VERIFIED `capability.sid`, so a body naming
-  another session cannot reach its hardware.
-- **Trap**: the bridge registry and the capability secret are process-local,
-  exactly like the display bus — a multi-process deployment needs a shared
-  store before either survives crossing processes.
+- **Discover first.** `device_list` reports the current browser's secure-context
+  and Serial/USB/Bluetooth capabilities plus its granted device IDs. If it has
+  no device, ask the user to use the Devices panel's browser picker. Web Serial
+  is unavailable on Android, where the WebUSB serial polyfill is used when
+  available; browser/OS/driver support is reported rather than assumed.
+- **Grants, identity, and leases are strict.** A device is owned by one session;
+  raw requests and a high-level operation hold mutually exclusive leases.
+  Re-adoption is limited to the same full USB VID/PID/serial identity. A device
+  which re-enumerates into another identity or mode needs a fresh user grant,
+  then a new operation and confirmation. Do not retry or replay a write across
+  disconnect, cancellation, or mode change. Raw USB IN/control-IN calls are
+  bounded (five seconds by default); an expired connection is invalidated.
+- **Use the raw tools only for discovery or a protocol Cody does not implement.**
+  `device_open`, `device_read`, `device_write`, `device_close`,
+  `usb_transfer`, and `ble_gatt` are available after a grant. Opening USB
+  reports claimed interfaces, descriptors, and endpoints; a requested
+  unclaimable interface fails rather than becoming a partial success. On
+  Windows an interface held by another driver cannot be claimed; this is a host
+  driver issue, not a retryable device error. Do not hand-roll packet loops in
+  `eval` for an implemented protocol (ESP, ADB, fastboot, DFU, Gecko, STM32,
+  or STK500).
 
+#### Operations, artifacts, and progress
+
+Use high-level operation tools for supported work:
+`device_detect`, `device_dump`, `device_flash`, `device_exec`,
+`device_push`, `device_pull`, `device_monitor`,
+`device_monitor_send`, `device_operation_status`, and
+`device_operation_cancel`. Start requests name the exact browser `device`,
+`protocol`, and where relevant target, offset, interface, and artifact
+`fileId` with its displayed SHA-256. The operation runs independently in the
+page. Read progress/status or cancel it; never translate approval into a tool
+argument. Phase/state/confirmation/terminal events are immediate; live
+progress and output are coalesced at 200 ms. Status deliberately retains only
+128 terminal records, each bounded to 256 events, 512 output lines, and 64 KiB
+of output.
+
+Input uploads (picker, drop, or an authorized local-path import) and device
+outputs are browser-owned session artifacts. `DeviceArtifactStore` hashes each
+Blob and waits for its IndexedDB commit in `cody-device-artifacts`; hydrate
+restores that session's escrow after reload. Artifacts never become server files
+or cross another session. Use the Devices panel's explicit download to retain an
+important backup outside browser storage. An output backup is selectable as a new input without download/re-upload; selecting it does not itself restore anything, and there is no generic or automatic restore. The panel displays artifact hashes, output,
+progress, cancellation, and the exact confirmation footprint.
+
+#### Verified flashing is intrinsic, never caller-designed
+
+A caller cannot supply a layout, geometry, protections, or approval in
+`options`. The selected protocol must first detect the device and produce its
+own intrinsic plan. Unknown geometry, a mismatched target/offset/chip, missing
+exact readback, or a partial/unknown destructive footprint refuses before a
+write. For an accepted flash, Cody hashes the original payload, expands to the
+complete erase/program footprint, backs up that complete footprint to committed
+artifact escrow, presents exactly one direct browser confirmation, writes once,
+and exact-reads the complete footprint back for SHA-256 verification. The
+confirmation distinguishes the payload digest/range from the actual program
+digest/erase range and names an exact protected-region override when one is
+allowed. ACKs, progress, CRCs, or a successful command are not verification.
+
+Protected region matching is classifier-enforced; only the exact named override
+for the matched protected class is accepted. A lost acknowledgement is unknown
+completion, never permission to retry. This applies to every supported flashing
+protocol and is intentionally stricter than vendor command-line behavior.
+
+#### Supported protocol boundaries
+
+- **ESP serial/SPI:** `detect`, `dump`, and verified `flash` are supported
+  through esptool. Detected ESP targets accept exact caller offsets within detected capacity and
+  `firmware`, `flash`, `factory`, or `spi-boot` targets; a 4 KiB
+  leading/trailing read-modify-write plan preserves the whole erase footprint.
+  ESP32 factory spans the intrinsic prefix/spi-boot/firmware range, and the
+  ESP8266 offset-zero `0..0x10000` range is conservatively spi-boot
+  protected; either needs exact `allow-spi-boot` when intersected. The flasher writes
+  once, uses esptool device MD5, then reads the full footprint back and
+  SHA-256-verifies it. Erase and eFuse actions are refused; detect does not
+  promise secure-boot or encryption discovery.
+- **Fastboot:** `detect`, `dump`, `flash`, and narrowly bounded `exec`
+  are supported. Flash has no inferred eMMC topology: it accepts only a whole
+  named partition at offset zero after exact partition/fetch size discovery,
+  full fetched backup, and full fetch readback hash verification. Every
+  partition is conservatively protected and needs the exact shown override.
+  Erase and partial/unknown-readback flashes refuse. `exec` supports volatile
+  `download` (unverified), readback-verified `set_active`, and reboot/reboot-
+  bootloader (unverified); it is not vendor CLI parity.
+- **USB DFU:** `detect`, `dump`, verified `flash`, and confirmed
+  `abort`/`clear_status` maintenance are descriptor-bound. Flash is allowed
+  only for bcdDFU `0x011a` on the actual selected `@Internal Flash` DfuSe
+  map, with contiguous readable/erasable/writable g-sectors inside the STM32
+  program range; it requires target `internal-flash`, an explicit absolute
+  offset, and raw binary (not a `.dfu` container). All internal flash is
+  conservatively protected and needs exact `allow-bootloader`. Cody escrows,
+  merges, writes, and exact-reads every touched sector without manifestation or
+  reset before proof. Generic bcdDFU `0x0110` remains detect/dump/exec only;
+  flash rejects. No caller descriptor option creates a capability.
+- **ADB:** `detect`, `push`, `pull`/`dump`, typed reboot, and a narrow
+  `exec` surface are authenticated with Cody's persistent browser IndexedDB
+  RSA credential. CNXN validates framing; only a bounded legacy existing-stream
+  OPEN/OKAY/CLSE probe is the fallback, not modern feature negotiation. Push
+  hashes and escrows the old target, confirms the exact target/digest, transfers
+  content-addressed 4 MiB staged chunks, validates its prefix after reconnect,
+  verifies the stage, and atomically replaces only then; a final disconnect
+  hashes the target before any rebuild/move. Exec permits literal `id`,
+  `uname -a`, `df -h`, and `getprop ro.*`; TWRP ORS queues only literal
+  backup/print lines in confirmation details and never executes them. New ADB
+  authorization or a different USB mode needs user re-grant; raw partition,
+  fuse, mount, and shell bypasses refuse.
+- **Serial bootloaders:** Gecko provides detection/XMODEM framing only until a
+  verified readback-capable flash profile exists. STM32 flash is limited to ROM
+  PID `0x0410` (STM32F103 medium-density), factory-size discovery, and 1 KiB
+  page-aligned backup/program/readback; unknown geometry refuses and every
+  program-flash write needs exact `allow-bootloader`. STK500 is limited to
+  ATmega328P signature `1e950f`, 32 KiB flash, 128-byte pages, application
+  `[0,0x7000)`, and its protected top 4 KiB bootloader; bootloader writes need
+  `allow-bootloader`. Both retain full physical-footprint escrow/readback.
+- **CMSIS-DAP/DAPLink and generic UF2 are not shipped.** WebUSB transport is
+  assessed feasible for a future target-specific CMSIS-DAP profile, but there
+  is no DAP dependency, generic memory-write/flash operation, or host helper
+  here. Generic UF2 copy does not prove programming or retention and has no
+  flash capability.
+
+#### Evidence and the optional helper
+
+Browser and fake-transport tests exercise the software guards only. No real browser
+grants or physical hardware operations were performed; hardware behavior is **unverified on real hardware**. Follow
+`docs/hardware-checklist.md` for the manual, recoverable-device evidence
+before treating any protocol as field-verified; it authorizes no destructive
+operation and each real action still needs an exact point-of-risk approval.
+
+`docs/hardware-host-helper.md` is a design, not a shipped component. A future
+optional local helper would be per-user and local-only, signed and bound to one
+origin/session/device/protocol, use typed allowlisted vendor invocations (never
+shell/PATH passthrough), require native point-of-risk confirmation and
+revocation, and enforce the same backup/readback rule. It supplies no current
+vendor CLI parity, elevated capability, CMSIS-DAP, or generic UF2 flashing.
 ### Disk exhaustion is a first-class failure (`lib/disk-space.ts`)
 - The instance data dir is finite and often quota-capped (a ZFS dataset on
   Unraid appdata). When it fills, npm dies with `errno -122` — EDQUOT, which

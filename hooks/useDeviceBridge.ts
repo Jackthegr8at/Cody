@@ -10,15 +10,13 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  detectDeviceCapabilities,
-  DeviceBridgeConnection,
-  type DeviceBridgeSnapshot,
-} from "@/lib/devices/client";
+import { detectDeviceCapabilities, retainDeviceBridgeConnection, type DeviceBridgeSnapshot } from "@/lib/devices/client";
+import { createDefaultPageOperationDelegate, type DeviceOperationManager } from "@/lib/devices/operations";
 import type { DeviceActivity, DeviceKind } from "@/lib/devices/protocol";
 
 export interface UseDeviceBridgeResult extends DeviceBridgeSnapshot {
   activity: Record<string, DeviceActivity>;
+  operationManager: DeviceOperationManager | null;
   /** Must be called synchronously from a click handler — it spends a real
    * user gesture on the browser's permission prompt. */
   connect: (kind: DeviceKind) => Promise<void>;
@@ -32,25 +30,30 @@ function initialSnapshot(): DeviceBridgeSnapshot {
 export function useDeviceBridge(sessionId: string | null): UseDeviceBridgeResult {
   const [snapshot, setSnapshot] = useState<DeviceBridgeSnapshot>(initialSnapshot);
   const [activity, setActivity] = useState<Record<string, DeviceActivity>>({});
-  const connectionRef = useRef<DeviceBridgeConnection | null>(null);
+  const [operationManager, setOperationManager] = useState<{ sessionId: string; manager: DeviceOperationManager } | null>(null);
+  const connectionRef = useRef<ReturnType<typeof retainDeviceBridgeConnection>["connection"] | null>(null);
 
   useEffect(() => {
     setActivity({});
+    setOperationManager(null);
     if (!sessionId) {
       connectionRef.current = null;
       setSnapshot(initialSnapshot());
       return;
     }
-    const connection = new DeviceBridgeConnection(sessionId);
+    const retained = retainDeviceBridgeConnection(sessionId);
+    const connection = retained.connection;
+    if (!connection.operationManager) connection.setOperationDelegate(createDefaultPageOperationDelegate(sessionId, connection));
     connectionRef.current = connection;
     const unsubscribe = connection.subscribe(() => setSnapshot(connection.getSnapshot()));
     const unsubscribeActivity = connection.onActivity(setActivity);
+    const manager = connection.operationManager;
+    setOperationManager(manager ? { sessionId, manager } : null);
     setSnapshot(connection.getSnapshot());
-    connection.start();
     return () => {
       unsubscribe();
       unsubscribeActivity();
-      connection.destroy();
+      retained.release();
       if (connectionRef.current === connection) connectionRef.current = null;
     };
   }, [sessionId]);
@@ -61,8 +64,6 @@ export function useDeviceBridge(sessionId: string | null): UseDeviceBridgeResult
     try {
       await connection.requestDevice(kind);
     } catch (error) {
-      // A user-cancelled picker (NotFoundError) is a normal outcome, not a
-      // failure worth surfacing as an error banner.
       if (error instanceof DOMException && error.name === "NotFoundError") return;
       setSnapshot((current) => ({ ...current, error: error instanceof Error ? error.message : String(error) }));
     }
@@ -78,5 +79,5 @@ export function useDeviceBridge(sessionId: string | null): UseDeviceBridgeResult
     }
   }, []);
 
-  return { ...snapshot, activity, connect, disconnect };
+  return { ...snapshot, activity, operationManager: operationManager?.sessionId === sessionId ? operationManager.manager : null, connect, disconnect };
 }

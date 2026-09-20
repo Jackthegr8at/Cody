@@ -18,16 +18,26 @@
 
 import {
   DEVICE_BUFFER_BYTES,
-  DEVICE_OP_TIMEOUT_MS,
+  DEVICE_LIVENESS_TIMEOUT_MS,
+  DEVICE_NO_DATA,
+  MAX_DEVICE_TIMEOUT_MS,
   NO_CAPABILITIES,
+  DeviceOperationCancelledError,
   type DeviceActivity,
   type DeviceCapabilities,
+  type DeviceClientFrame,
   type DeviceInfo,
   type DeviceOpName,
-  type DeviceRequestFrame,
+  type DeviceServerFrame,
 } from "./protocol";
+import type {
+  DeviceOperationRequest,
+  DeviceOperationSnapshot,
+  OperationEvent,
+  PageOperationCommand,
+} from "./operations";
 
-type Sender = (frame: DeviceRequestFrame) => void;
+type Sender = (frame: DeviceServerFrame) => void;
 
 interface Pending {
   resolve: (value: unknown) => void;
@@ -171,10 +181,17 @@ export class DeviceBridge {
   private waiters = new Map<string, Set<() => void>>();
   private pending = new Map<string, Pending>();
   private send: Sender | null = null;
+  private hostGeneration = 0;
+  private revokeHost: (() => void) | null = null;
   private nextOpId = 1;
   private listeners = new Set<() => void>();
   /** Byte/op accounting per device, kept across a device's whole grant. */
   private activity = new Map<string, ActivityRecord>();
+
+  /** Bounded replayable summaries from the page operation manager. */
+  private operations = new Map<string, DeviceOperationSnapshot>();
+  private operationListeners = new Set<(snapshot: DeviceOperationSnapshot, event?: OperationEvent) => void>();
+  private hostLossTimer: ReturnType<typeof setTimeout> | null = null;
 
   get attached(): boolean {
     return this.send !== null;
@@ -184,18 +201,53 @@ export class DeviceBridge {
    * holding their own grants would make "device 2" mean different hardware
    * depending on which answered, so the newest attach wins and the previous
    * socket is dropped by its own caller. */
-  attach(send: Sender): () => void {
+  attach(send: Sender, revoke: () => void = () => {}): (() => void) & { isCurrent(): boolean } {
+    const generation = ++this.hostGeneration;
+    const previousRevoke = this.revokeHost;
+    this.clearHostLossTimer();
     this.send = send;
+    this.revokeHost = revoke;
+    // Revoke first: a former page must not finish a confirmation or write after
+    // its successor becomes authoritative.
+    if (previousRevoke) {
+      this.failAllPending("Device host authority was replaced by another browser page.");
+      this.markOperationsCompletionUnknown("Device host authority was replaced before operation completion.");
+      previousRevoke();
+    }
     this.notify();
-    return () => {
-      if (this.send !== send) return;
+    const detach = (() => {
+      if (this.hostGeneration !== generation || this.send !== send) return;
       this.send = null;
-      // Every grant belonged to that page: nothing is reachable now.
+      this.revokeHost = null;
       this.devices.clear();
       this.activity.clear();
       this.failAllPending("The browser holding this device disconnected.");
+      this.scheduleHostLoss();
       this.notify();
-    };
+    }) as (() => void) & { isCurrent(): boolean };
+    detach.isCurrent = () => this.hostGeneration === generation && this.send === send;
+    return detach;
+  }
+  private clearHostLossTimer(): void {
+    if (this.hostLossTimer !== null) clearTimeout(this.hostLossTimer);
+    this.hostLossTimer = null;
+  }
+
+  private scheduleHostLoss(): void {
+    this.clearHostLossTimer();
+    this.hostLossTimer = setTimeout(() => {
+      this.hostLossTimer = null;
+      this.markOperationsCompletionUnknown("The browser disconnected before operation completion; completion is unknown.");
+    }, DEVICE_LIVENESS_TIMEOUT_MS);
+    this.hostLossTimer.unref?.();
+  }
+
+  private markOperationsCompletionUnknown(error: string): void {
+    const now = Date.now();
+    for (const snapshot of this.operations.values()) {
+      if (snapshot.state === "succeeded" || snapshot.state === "failed" || snapshot.state === "cancelled") continue;
+      this.storeOperation({ ...snapshot, state: "failed", updatedAt: now, error }, undefined, true);
+    }
   }
 
   onChange(listener: () => void): () => void {
@@ -358,7 +410,8 @@ export class DeviceBridge {
     for (const waiter of [...waiters]) waiter();
   }
 
-  settle(id: string, ok: boolean, value: unknown, error?: string): void {
+  settle(result: Extract<DeviceClientFrame, { type: "result" }>): void {
+    const { id } = result;
     const pending = this.pending.get(id);
     if (!pending) return;
     this.pending.delete(id);
@@ -366,15 +419,18 @@ export class DeviceBridge {
     const record = this.activityFor(pending.deviceId);
     record.ops += 1;
     record.inFlight = null;
-    // An answer's payload is real inbound traffic — a 4 MB bulk IN read is
-    // the transfer, not an aside to it — so it is counted the same way the
-    // buffered stream is, rather than showing up nowhere.
-    record.record("in", base64Bytes(value));
-    record.lastError = ok ? null : (error || "The browser could not complete that device operation.");
+    record.record("in", result.status === "ok" ? base64Bytes(result.value) : 0);
+    record.lastError = result.status === "error"
+      ? result.error
+      : result.status === "cancelled"
+        ? new DeviceOperationCancelledError(result.reason).message
+        : null;
     record.touch();
     this.notify();
-    if (ok) pending.resolve(value);
-    else pending.reject(new Error(error || "The browser could not complete that device operation."));
+    if (result.status === "ok") pending.resolve(result.value);
+    else if (result.status === "no-data") pending.resolve(DEVICE_NO_DATA);
+    else if (result.status === "cancelled") pending.reject(new DeviceOperationCancelledError(result.reason));
+    else pending.reject(new Error(result.error));
   }
 
   private failAllPending(message: string): void {
@@ -391,10 +447,13 @@ export class DeviceBridge {
    * ordinary state (the tab was closed, the phone locked), and a tool call
    * that waits forever on it is the worst possible reading of that.
    */
-  request(op: DeviceOpName, deviceId: string, params: Record<string, unknown>): Promise<unknown> {
+  request(op: DeviceOpName, deviceId: string, params: Record<string, unknown>, timeoutMs?: number): Promise<unknown> {
     const send = this.send;
     if (!send) {
       return Promise.reject(new Error("No browser is attached to this session, so its hardware is unreachable. Open the Devices panel in Cody and connect the device."));
+    }
+    if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_DEVICE_TIMEOUT_MS)) {
+      return Promise.reject(new Error("timeoutMs must be an integer from 1 to " + MAX_DEVICE_TIMEOUT_MS + "."));
     }
     const id = String(this.nextOpId++);
     const record = this.activityFor(deviceId);
@@ -405,16 +464,14 @@ export class DeviceBridge {
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        // A timeout leaves the link in an unknown state; saying so is the
-        // whole point of the feed the panel renders.
         record.inFlight = null;
-        record.lastError = `The browser did not answer ${op} within ${Math.round(DEVICE_OP_TIMEOUT_MS / 1000)}s.`;
+        record.lastError = "The browser did not answer " + op + " within " + Math.round(DEVICE_LIVENESS_TIMEOUT_MS / 1000) + "s.";
         this.notify();
         reject(new Error(record.lastError));
-      }, DEVICE_OP_TIMEOUT_MS);
+      }, DEVICE_LIVENESS_TIMEOUT_MS);
       this.pending.set(id, { resolve, reject, timer, deviceId });
       try {
-        send({ type: "op", id, op, deviceId, params });
+        send({ type: "op", id, op, deviceId, params, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
       } catch (error) {
         this.pending.delete(id);
         clearTimeout(timer);
@@ -424,6 +481,128 @@ export class DeviceBridge {
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
+  }
+
+  /** Starts a durable page-side run and waits only for page acceptance, not completion. */
+  async startOperation(request: DeviceOperationRequest): Promise<string> {
+    const operationId = globalThis.crypto.randomUUID();
+    const command: Extract<PageOperationCommand, { type: "operation.start" }> = {
+      type: "operation.start",
+      id: String(this.nextOpId++),
+      operationId,
+      request,
+    };
+    await this.dispatchOperation(command, request.deviceId);
+    return operationId;
+  }
+
+  async cancelOperation(operationId: string): Promise<void> {
+    const deviceId = this.operations.get(operationId)?.request.deviceId;
+    if (!deviceId) throw new Error("Unknown device operation.");
+    const command: Extract<PageOperationCommand, { type: "operation.cancel" }> = {
+      type: "operation.cancel",
+      id: String(this.nextOpId++),
+      operationId,
+    };
+    await this.dispatchOperation(command, deviceId);
+  }
+
+  async sendOperation(operationId: string, text: string): Promise<void> {
+    const deviceId = this.operations.get(operationId)?.request.deviceId;
+    if (!deviceId) throw new Error("Unknown device operation.");
+    const command: Extract<PageOperationCommand, { type: "operation.send" }> = {
+      type: "operation.send",
+      id: String(this.nextOpId++),
+      operationId,
+      text,
+    };
+    await this.dispatchOperation(command, deviceId);
+  }
+
+  async requestOperationStatus(operationId?: string): Promise<void> {
+    const deviceId = operationId ? this.operations.get(operationId)?.request.deviceId : "operation-status";
+    if (!deviceId) throw new Error("Unknown device operation.");
+    const command: Extract<PageOperationCommand, { type: "operation.status" }> = {
+      type: "operation.status",
+      id: String(this.nextOpId++),
+      ...(operationId ? { operationId } : {}),
+    };
+    await this.dispatchOperation(command, deviceId);
+  }
+
+  operationStatus(operationId: string): DeviceOperationSnapshot | undefined {
+    return this.operations.get(operationId);
+  }
+
+  operationSnapshots(): readonly DeviceOperationSnapshot[] {
+    return [...this.operations.values()];
+  }
+
+  onOperation(listener: (snapshot: DeviceOperationSnapshot, event?: OperationEvent) => void): () => void {
+    this.operationListeners.add(listener);
+    return () => this.operationListeners.delete(listener);
+  }
+
+  receiveOperationProgress(frame: Extract<DeviceClientFrame, { type: "operation.progress" }>): void {
+    this.storeOperation(frame.snapshot, frame.event);
+  }
+
+  receiveOperationSnapshot(frame: Extract<DeviceClientFrame, { type: "operation.snapshot" }>): void {
+    this.storeOperation(frame.snapshot);
+  }
+
+  receiveOperationResult(frame: Extract<DeviceClientFrame, { type: "operation.result" }>): void {
+    this.storeOperation(frame.snapshot, undefined, true);
+  }
+
+  private async dispatchOperation(command: PageOperationCommand, deviceId: string): Promise<void> {
+    const send = this.send;
+    if (!send) {
+      throw new Error("No browser is attached to this session, so its hardware is unreachable. Open the Devices panel in Cody and connect a device.");
+    }
+    await new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(command.id);
+        reject(new Error("The browser did not acknowledge the device operation within " + Math.round(DEVICE_LIVENESS_TIMEOUT_MS / 1000) + "s; its completion is unknown."));
+      }, DEVICE_LIVENESS_TIMEOUT_MS);
+      this.pending.set(command.id, { resolve, reject, timer, deviceId });
+      try {
+        send({ type: "operation", command });
+      } catch (error) {
+        this.pending.delete(command.id);
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+
+  private storeOperation(snapshot: DeviceOperationSnapshot, event?: OperationEvent, terminal = false): void {
+    const previous = this.operations.get(snapshot.id);
+    const previousSequence = previous?.events.at(-1)?.sequence ?? 0;
+    if (event && event.sequence <= previousSequence) return;
+    if (!event && previous && snapshot.updatedAt <= previous.updatedAt && snapshot.state === previous.state) return;
+    this.operations.set(snapshot.id, snapshot);
+    this.pruneOperations();
+    if (event || terminal) {
+      for (const listener of this.operationListeners) {
+        try {
+          listener(snapshot, event);
+        } catch {
+          // Transcript observers cannot break an active hardware operation.
+        }
+      }
+    }
+    this.notify();
+  }
+
+  private pruneOperations(): void {
+    while (this.operations.size > 128) {
+      const oldestTerminal = [...this.operations.entries()].find(([, snapshot]) => {
+        return snapshot.state === "succeeded" || snapshot.state === "failed" || snapshot.state === "cancelled";
+      });
+      if (!oldestTerminal) return;
+      this.operations.delete(oldestTerminal[0]);
+    }
   }
 }
 

@@ -34,11 +34,33 @@
  * straight to esptool-js when real flashing lands.
  */
 
+import type {
+  PageOperationCommand,
+  PageOperationProgressFrame,
+  PageOperationResultFrame,
+  PageOperationSnapshotFrame,
+} from "./operations";
+
 export type DeviceKind = "serial" | "usb" | "ble";
 
 /** How a serial port is actually reached, which decides what can be expected
  * of it (the polyfill has no signal control on some adapters). */
 export type SerialTransport = "web-serial" | "webusb-polyfill";
+export interface DeviceProtocolCandidate {
+  protocol: "adb" | "fastboot" | "dfu";
+  interfaceNumber: number;
+  alternateSetting: number;
+}
+/** Session-scoped browser file metadata. Blobs never cross the device socket. */
+export interface DeviceArtifactInfo {
+  id: string;
+  name: string;
+  size: number;
+  sha256: string;
+  kind: "input" | "output";
+  source: "picker" | "drop" | "server-file" | "device";
+  createdAt: number;
+}
 
 export interface DeviceInfo {
   /** Stable for as long as the grant lives; minted by the page. */
@@ -55,6 +77,8 @@ export interface DeviceInfo {
   baudRate?: number;
   /** BLE only: advertised/primary service UUIDs once connected. */
   services?: string[];
+  /** USB descriptor candidates, not a successful protocol handshake. */
+  protocolCandidates?: readonly DeviceProtocolCandidate[];
   /** Bytes buffered server-side and not yet read by the agent. */
   buffered?: number;
 }
@@ -112,6 +136,8 @@ export interface UsbEndpointInfo {
  * later transfer error nor fix by retrying. */
 export interface UsbInterfaceInfo {
   interfaceNumber: number;
+  /** The alternate setting currently selected for this interface. */
+  alternateSetting: number;
   claimed: boolean;
   /** Why the claim failed; absent when it succeeded. */
   error?: string;
@@ -130,14 +156,15 @@ export interface UsbOpenResult {
 export type DeviceOp =
   | { op: "serial.open"; deviceId: string; params: SerialOpenParams }
   | { op: "serial.write"; deviceId: string; params: { base64: string } }
-  | { op: "serial.signals"; deviceId: string; params: { dtr?: boolean; rts?: boolean; brk?: boolean } }
+  | { op: "serial.baud"; deviceId: string; params: { baudRate: number } }
+  | { op: "serial.signals"; deviceId: string; params: { dataTerminalReady?: boolean; requestToSend?: boolean; break?: boolean } }
   | { op: "close"; deviceId: string; params: Record<string, never> }
   | { op: "ble.connect"; deviceId: string; params: Record<string, never> }
   | { op: "ble.services"; deviceId: string; params: Record<string, never> }
   | { op: "ble.read"; deviceId: string; params: { service: string; characteristic: string } }
   | { op: "ble.write"; deviceId: string; params: { service: string; characteristic: string; base64: string; withoutResponse?: boolean } }
   | { op: "ble.subscribe"; deviceId: string; params: { service: string; characteristic: string; enable: boolean } }
-  | { op: "usb.open"; deviceId: string; params: { configuration?: number; interface?: number } }
+  | { op: "usb.open"; deviceId: string; params: { configuration?: number; interface?: number; alternate?: { interfaceNumber: number; alternateSetting: number } } }
   | { op: "usb.control"; deviceId: string; params: { direction: "in" | "out"; requestType: "standard" | "class" | "vendor"; recipient: "device" | "interface" | "endpoint" | "other"; request: number; value: number; index: number; length?: number; base64?: string } }
   | { op: "usb.transfer"; deviceId: string; params: { direction: "in" | "out"; endpoint: number; length?: number; base64?: string } };
 
@@ -151,6 +178,8 @@ export interface DeviceRequestFrame {
   op: DeviceOpName;
   deviceId: string;
   params: Record<string, unknown>;
+  /** Quiet-read deadline implemented by the page; distinct from server liveness. */
+  timeoutMs?: number;
 }
 
 /**
@@ -189,7 +218,13 @@ export interface DeviceActivityFrame {
   devices: DeviceActivity[];
 }
 
-export type DeviceServerFrame = DeviceRequestFrame | DeviceActivityFrame;
+/** A durable high-level run, distinct from one raw packet request. */
+export interface DeviceOperationRequestFrame {
+  type: "operation";
+  command: PageOperationCommand;
+}
+
+export type DeviceServerFrame = DeviceRequestFrame | DeviceActivityFrame | DeviceOperationRequestFrame;
 
 /** How often the activity feed is pushed while a link is busy. Faster than a
  * person reads a changing number, slow enough to cost nothing next to the
@@ -200,11 +235,17 @@ export const ACTIVITY_FEED_MS = 500;
 export type DeviceClientFrame =
   | { type: "hello"; capabilities: DeviceCapabilities; devices: DeviceInfo[] }
   | { type: "devices"; devices: DeviceInfo[] }
+  | { type: "artifacts"; artifacts: readonly DeviceArtifactInfo[] }
   /** Inbound bytes: serial RX, a BLE notification, or a USB IN transfer the
    * page is streaming. Buffered server-side until the agent reads it. */
   | { type: "data"; deviceId: string; base64: string; characteristic?: string }
-  | { type: "result"; id: string; ok: true; value?: unknown }
-  | { type: "result"; id: string; ok: false; error: string }
+  | { type: "result"; id: string; status: "ok"; value?: unknown }
+  | { type: "result"; id: string; status: "no-data" }
+  | { type: "result"; id: string; status: "cancelled"; reason?: string }
+  | { type: "result"; id: string; status: "error"; error: string }
+  | PageOperationProgressFrame
+  | PageOperationSnapshotFrame
+  | PageOperationResultFrame
   /** The page lost the device (unplugged, GATT disconnect, permission revoked). */
   | { type: "gone"; deviceId: string; reason?: string };
 
@@ -212,13 +253,101 @@ export type DeviceClientFrame =
  * console left running produces output forever; keeping the newest window is
  * the honest bound, and the read result says how much was dropped. */
 export const DEVICE_BUFFER_BYTES = 256 * 1024;
-export function isDeviceClientFrame(value: unknown): value is DeviceClientFrame {
-  if (!value || typeof value !== "object" || !("type" in value)) return false;
-  const { type } = value;
-  return type === "hello" || type === "devices" || type === "data" || type === "result" || type === "gone";
+const OPERATION_STATES: Record<string, true> = {
+  starting: true,
+  running: true,
+  "awaiting-confirmation": true,
+  cancelling: true,
+  succeeded: true,
+  failed: true,
+  cancelled: true,
+};
+const OPERATION_EVENT_TYPES: Record<string, true> = {
+  started: true,
+  progress: true,
+  output: true,
+  confirmation: true,
+  state: true,
+  completed: true,
+};
+
+function recordOf(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
-/** How long an agent-issued operation may wait for the page. A page that has
- * gone away must not hang a tool call: the browser is the device host, so its
- * absence is a normal state, not an error condition to wait out. */
-export const DEVICE_OP_TIMEOUT_MS = 20_000;
+function isArtifactList(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > 128) return false;
+  const ids = new Set<string>();
+  for (const entry of value) {
+    const artifact = recordOf(entry);
+    if (!artifact || typeof artifact.id !== "string" || artifact.id.length === 0 || artifact.id.length > 256 || ids.has(artifact.id)) return false;
+    if (typeof artifact.name !== "string" || artifact.name.length === 0 || artifact.name.length > 256) return false;
+    if (typeof artifact.size !== "number" || !Number.isSafeInteger(artifact.size) || artifact.size < 0) return false;
+    if (typeof artifact.sha256 !== "string" || !/^[a-f0-9]{64}$/i.test(artifact.sha256)) return false;
+    if ((artifact.kind !== "input" && artifact.kind !== "output") || (artifact.source !== "picker" && artifact.source !== "drop" && artifact.source !== "server-file" && artifact.source !== "device")) return false;
+    if (!Number.isFinite(artifact.createdAt)) return false;
+    ids.add(artifact.id);
+  }
+  return true;
+}
+
+function isOperationSnapshot(value: unknown, operationId: string): boolean {
+  const snapshot = recordOf(value);
+  if (!snapshot || snapshot.id !== operationId || typeof snapshot.sessionId !== "string" || !OPERATION_STATES[String(snapshot.state)]) return false;
+  if (!Number.isFinite(snapshot.createdAt) || !Number.isFinite(snapshot.updatedAt)) return false;
+  const request = recordOf(snapshot.request);
+  if (!request || typeof request.protocol !== "string" || typeof request.action !== "string" || typeof request.deviceId !== "string") return false;
+  if (!Array.isArray(snapshot.output) || snapshot.output.length > 512 || !Array.isArray(snapshot.events) || snapshot.events.length > 256) return false;
+  let outputChars = 0;
+  for (const output of snapshot.output) {
+    const line = recordOf(output);
+    if (!line || !Number.isFinite(line.at) || typeof line.line !== "string" || line.line.length > 8 * 1024) return false;
+    outputChars += line.line.length;
+    if (outputChars > 64 * 1024) return false;
+  }
+  for (const event of snapshot.events) {
+    const item = recordOf(event);
+    if (!item || !Number.isSafeInteger(item.sequence) || !Number.isFinite(item.at) || !OPERATION_EVENT_TYPES[String(item.type)]) return false;
+  }
+  if (snapshot.error !== undefined && (typeof snapshot.error !== "string" || snapshot.error.length > 4096)) return false;
+  return true;
+}
+
+function isOperationUpdate(record: Record<string, unknown>): boolean {
+  if (typeof record.operationId !== "string" || record.operationId.length === 0 || record.operationId.length > 256) return false;
+  if (!isOperationSnapshot(record.snapshot, record.operationId)) return false;
+  if (record.type !== "operation.progress") return true;
+  const event = recordOf(record.event);
+  return !!event && Number.isSafeInteger(event.sequence) && Number.isFinite(event.at) && OPERATION_EVENT_TYPES[String(event.type)];
+}
+
+export function isDeviceClientFrame(value: unknown): value is DeviceClientFrame {
+  const record = recordOf(value);
+  if (!record || typeof record.type !== "string") return false;
+  if (record.type === "operation.progress" || record.type === "operation.snapshot" || record.type === "operation.result") {
+    return isOperationUpdate(record);
+  }
+  if (record.type === "artifacts") return isArtifactList(record.artifacts);
+  if (record.type !== "result") return record.type === "hello" || record.type === "devices" || record.type === "data" || record.type === "gone";
+  if (typeof record.id !== "string") return false;
+  return record.status === "ok" || record.status === "no-data" || record.status === "cancelled" || (record.status === "error" && typeof record.error === "string");
+}
+
+/** Bounded quiet-read deadline accepted from tools. */
+export const MAX_DEVICE_TIMEOUT_MS = 60_000;
+
+/** Independent browser liveness watchdog; it must outlast quiet reads. */
+export const DEVICE_LIVENESS_TIMEOUT_MS = 65_000;
+
+export const DEVICE_NO_DATA = { noData: true } as const;
+export type DeviceNoData = typeof DEVICE_NO_DATA;
+export function isDeviceNoData(value: unknown): value is DeviceNoData {
+  return !!value && typeof value === "object" && (value as { noData?: unknown }).noData === true;
+}
+
+export class DeviceOperationCancelledError extends Error {
+  constructor(reason?: string) {
+    super(reason ? "Device operation was cancelled: " + reason : "Device operation was cancelled.");
+    this.name = "DeviceOperationCancelledError";
+  }
+}

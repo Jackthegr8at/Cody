@@ -28,6 +28,7 @@ import type { HostToolDefinition } from "../pi-types";
 import { numberArg, stringArg } from "../session-tools";
 import { formatBytes } from "../format-bytes";
 import { isRecord } from "../type-guards";
+import { isDeviceNoData, MAX_DEVICE_TIMEOUT_MS } from "./protocol";
 import { matchDevice, type DeviceBridge } from "./bus";
 import type {
   DeviceActivity,
@@ -56,11 +57,6 @@ const MAX_CANDIDATES_SHOWN = 10;
 const DEFAULT_READ_MAX_BYTES = 4096;
 const HARD_MAX_READ_BYTES = 65536;
 const MAX_WAIT_MS = 10_000;
-/** How often device_read polls while waiting for bytes. DeviceBridge.push()
- * does not call notify() — only capability/device-list changes do — so there
- * is no event to await instead; a short poll is the only way to honor
- * `waitMs` against the bridge as it stands. */
-const READ_POLL_INTERVAL_MS = 40;
 
 /** The one fix for "nothing is attached" is always the same, so every tool
  * that hits it says it the same way bus.ts's own request() rejection does. */
@@ -238,13 +234,11 @@ function usbProtocolName(info: UsbInterfaceInfo): string | undefined {
   return undefined;
 }
 
-/** Windows binds each USB interface to exactly one driver and Chrome can
- * only reach WinUSB-bound ones, so a claim refused there is a host fact
- * rather than anything a retry fixes. Said only when nothing could be
- * claimed ON Windows: printed after a successful open it would be noise,
- * and printed on Linux it would be wrong. */
+/** A refusal does not identify its owner. Competing browser tabs and native
+ * processes are the first thing to rule out; Windows driver ownership is a
+ * second, uncertain host condition rather than a Cody diagnosis. */
 const WINUSB_HINT =
-  "Chrome reaches a Windows USB device only through WinUSB, so an interface already bound to a vendor driver (Google's ADB driver, a MediaTek VCOM) enumerates but cannot be claimed. Rebinding that interface to WinUSB with Zadig is the fix.";
+  "Every USB interface claim was refused. First close any other tab or application using this device, then run device_open again. On Windows, the installed driver may prevent Chrome from claiming an interface; this error cannot identify that driver, so verify the device's driver requirements with its vendor before changing it.";
 
 function formatUsbInterface(info: UsbInterfaceInfo): string {
   const codes = [info.classCode, info.subclassCode, info.protocolCode]
@@ -281,6 +275,7 @@ function parseUsbOpenResult(value: unknown): UsbOpenResult | null {
     }
     interfaces.push({
       interfaceNumber: raw.interfaceNumber,
+      alternateSetting: typeof raw.alternateSetting === "number" ? raw.alternateSetting : 0,
       claimed: raw.claimed === true,
       error: typeof raw.error === "string" ? raw.error : undefined,
       classCode: typeof raw.classCode === "number" ? raw.classCode : 0,
@@ -311,6 +306,12 @@ function buildUsbOpenParams(args: DeviceToolArgs): Record<string, unknown> {
   if (configuration !== undefined) params.configuration = Math.floor(configuration);
   const iface = numberArg(args, "interface");
   if (iface !== undefined) params.interface = Math.floor(iface);
+  const alternateInterface = numberArg(args, "alternateInterface");
+  const alternateSetting = numberArg(args, "alternateSetting");
+  if (alternateInterface !== undefined || alternateSetting !== undefined) {
+    if (alternateInterface === undefined || alternateSetting === undefined) return {};
+    params.alternate = { interfaceNumber: Math.floor(alternateInterface), alternateSetting: Math.floor(alternateSetting) };
+  }
   return params;
 }
 
@@ -537,6 +538,14 @@ async function bleGatt(args: DeviceToolArgs, ctx: DeviceToolContext): Promise<st
 
 const USB_REQUEST_TYPES = new Set(["standard", "class", "vendor"]);
 const USB_RECIPIENTS = new Set(["device", "interface", "endpoint", "other"]);
+function quietReadTimeout(args: DeviceToolArgs): number | { error: string } | undefined {
+  const timeoutMs = numberArg(args, "timeoutMs");
+  if (timeoutMs === undefined) return undefined;
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_DEVICE_TIMEOUT_MS) {
+    return { error: "timeoutMs must be an integer from 1 to " + MAX_DEVICE_TIMEOUT_MS + "." };
+  }
+  return timeoutMs;
+}
 
 async function usbTransfer(args: DeviceToolArgs, ctx: DeviceToolContext): Promise<string> {
   const resolved = resolveDevice(stringArg(args, "device"), ctx);
@@ -565,6 +574,8 @@ async function usbTransfer(args: DeviceToolArgs, ctx: DeviceToolContext): Promis
   const lengthArg = numberArg(args, "length");
   if (direction === "in" && lengthArg === undefined) return "An IN transfer needs length: how many bytes to request.";
   const length = lengthArg === undefined ? undefined : Math.max(0, Math.min(Math.floor(lengthArg), HARD_MAX_READ_BYTES));
+  const timeoutMs = quietReadTimeout(args);
+  if (timeoutMs && typeof timeoutMs === "object") return timeoutMs.error;
 
   const requestArg = numberArg(args, "request");
   const isControl = requestArg !== undefined;
@@ -584,7 +595,7 @@ async function usbTransfer(args: DeviceToolArgs, ctx: DeviceToolContext): Promis
         index: Math.floor(numberArg(args, "index") ?? 0),
         length,
         base64,
-      });
+      }, timeoutMs);
     } else {
       const endpoint = numberArg(args, "endpoint");
       if (endpoint === undefined) return "A bulk/interrupt transfer needs endpoint (its number); a control transfer needs request instead.";
@@ -593,7 +604,7 @@ async function usbTransfer(args: DeviceToolArgs, ctx: DeviceToolContext): Promis
         endpoint: Math.floor(endpoint),
         length,
         base64,
-      });
+      }, timeoutMs);
     }
   } catch (error) {
     const text = errorText(error);
@@ -611,6 +622,7 @@ async function usbTransfer(args: DeviceToolArgs, ctx: DeviceToolContext): Promis
     const sent = base64 ? Buffer.from(base64, "base64").length : 0;
     return `Sent ${byteCount(sent)} to ${device.label} (${kind} OUT).`;
   }
+  if (isDeviceNoData(value)) return kind + " IN from " + device.label + " timed out quietly with no data.";
   const received = extractBase64(value);
   if (received === null) return `${kind} IN from ${device.label}: ${formatBleValue(value)}`;
   const bytes = Buffer.from(received, "base64");
@@ -725,6 +737,7 @@ export const DEVICE_TOOLS: DeviceToolDefinition[] = [
         text: { type: "string", description: 'OUT transfers: UTF-8 text to send. Exactly one of text or base64.' },
         base64: { type: "string", description: "OUT transfers: base64-encoded bytes to send. Exactly one of text or base64." },
         encoding: { type: "string", enum: ["text", "base64"], description: 'How to render an IN result: "text" (default, lossy UTF-8) or "base64".' },
+        timeoutMs: { type: "number", description: "IN transfers only: bounded quiet-read deadline in milliseconds (1-60000). A quiet deadline reports no data; it is distinct from a disconnected browser." },
       },
       required: ["direction"],
     },

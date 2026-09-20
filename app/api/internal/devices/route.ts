@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { parseJsonWithinLimit } from "@/lib/bounded-form-data";
 import { verifyDisplayCapability } from "@/lib/display/capability";
 import { getDeviceBridge } from "@/lib/devices/bus";
+import { DEVICE_OPERATION_TOOLS } from "@/lib/devices/operation-tools";
 import { DEVICE_TOOLS, type DeviceToolContext } from "@/lib/devices/tools";
 import { isRecord } from "@/lib/type-guards";
 
@@ -51,7 +52,7 @@ export async function POST(request: Request) {
     return invalidResponse("tool is required");
   }
   const toolName = body.tool;
-  const tool = DEVICE_TOOLS.find((candidate) => candidate.name === toolName);
+  const tool = [...DEVICE_TOOLS, ...DEVICE_OPERATION_TOOLS].find((candidate) => candidate.name === toolName);
   if (!tool) {
     return invalidResponse("Unknown device tool");
   }

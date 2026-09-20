@@ -6,6 +6,8 @@ import { useI18n } from "@/lib/i18n";
 import { useDeviceBridge } from "@/hooks/useDeviceBridge";
 import { formatBytes } from "@/lib/format-bytes";
 import type { DeviceActivity, DeviceCapabilities, DeviceInfo, DeviceKind, DeviceOpName } from "@/lib/devices/protocol";
+import { ArtifactPanel } from "@/components/devices/ArtifactPanel";
+import { OperationPanel } from "@/components/devices/OperationPanel";
 
 export interface DevicePanelProps {
   sessionId: string | null;
@@ -126,6 +128,7 @@ function activityOperationLabel(op: DeviceOpName, t: Translate): string {
   switch (op) {
     case "serial.open": return t("devices.operationSerialOpen");
     case "serial.write": return t("devices.operationSerialWrite");
+    case "serial.baud": return t("devices.operationSerialBaud");
     case "serial.signals": return t("devices.operationSerialSignals");
     case "close": return t("devices.operationClose");
     case "ble.connect": return t("devices.operationBleConnect");
@@ -229,8 +232,10 @@ function DeviceRow({ device, activity, t, onDisconnect }: { device: DeviceInfo; 
  * tab; there is no "pause" state tied to this panel's own visibility. */
 export function DevicePanel({ sessionId }: DevicePanelProps): React.ReactElement {
   const { t } = useI18n();
-  const { capabilities, devices, activity, attached, error, connect, disconnect } = useDeviceBridge(sessionId);
+  const { capabilities, devices, activity, attached, error, connect, disconnect, operationManager } = useDeviceBridge(sessionId);
+  const [selectedInputId, setSelectedInputId] = useState<string | null>(null);
 
+  useEffect(() => setSelectedInputId(null), [sessionId]);
   return (
     <section
       aria-label={t("devices.title")}
@@ -317,6 +322,9 @@ export function DevicePanel({ sessionId }: DevicePanelProps): React.ReactElement
                 <div style={{ marginTop: 8, fontSize: 11, lineHeight: 1.4, color: "var(--text-dim)" }}>{t("devices.agentHint")}</div>
               </div>
             )}
+
+            <ArtifactPanel sessionId={sessionId} selectedInputId={selectedInputId} onSelectInput={setSelectedInputId} />
+            <OperationPanel sessionId={sessionId} manager={operationManager} devices={devices} selectedInputId={selectedInputId} />
           </>
         )}
       </div>

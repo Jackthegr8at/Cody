@@ -1,0 +1,294 @@
+import type { OperationArtifacts } from "./operations";
+import { encodeFilePathForApi } from "@/lib/file-paths";
+
+export type DeviceArtifactKind = "input" | "output";
+export type DeviceArtifactSource = "picker" | "drop" | "server-file" | "device";
+
+/** Metadata is intentionally separate from the Blob so consumers can render a
+ * session's artifact list without taking ownership of the bytes. */
+export interface DeviceArtifact {
+  readonly id: string;
+  readonly name: string;
+  readonly size: number;
+  readonly mime: string;
+  readonly sha256: string;
+  readonly kind: DeviceArtifactKind;
+  readonly source: DeviceArtifactSource;
+  readonly createdAt: number;
+}
+
+interface StoredDeviceArtifact extends DeviceArtifact {
+  readonly blob: Blob;
+}
+
+interface PersistedDeviceArtifact {
+  readonly key: string;
+  readonly sessionId: string;
+  readonly artifact: StoredDeviceArtifact;
+}
+
+export class DeviceArtifactError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DeviceArtifactError";
+  }
+}
+
+export interface AddDeviceArtifactOptions {
+  readonly kind?: DeviceArtifactKind;
+  readonly source?: DeviceArtifactSource;
+}
+
+export type DeviceArtifactListener = (artifacts: readonly DeviceArtifact[]) => void;
+
+type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+const DATABASE_NAME = "cody-device-artifacts";
+const DATABASE_VERSION = 1;
+const STORE_NAME = "artifacts";
+
+function cryptoApi(): Crypto {
+  if (!globalThis.crypto?.subtle) throw new DeviceArtifactError("This browser cannot calculate SHA-256 for device artifacts.");
+  return globalThis.crypto;
+}
+
+function normalizeName(value: string): string {
+  const name = value.trim().replace(/[\\/]/g, "_");
+  if (!name) throw new DeviceArtifactError("An artifact name is required.");
+  return name;
+}
+
+function filenameFromPath(filePath: string): string {
+  const segment = filePath.split(/[\\/]/).filter(Boolean).at(-1);
+  return normalizeName(segment ?? "server-file");
+}
+
+function artifactMetadata(artifact: StoredDeviceArtifact): DeviceArtifact {
+  return {
+    id: artifact.id, name: artifact.name, size: artifact.size, mime: artifact.mime, sha256: artifact.sha256,
+    kind: artifact.kind, source: artifact.source, createdAt: artifact.createdAt,
+  };
+}
+function artifactKey(sessionId: string, artifactId: string): string {
+  return `${sessionId}:${artifactId}`;
+}
+
+async function sha256(blob: Blob): Promise<string> {
+  const digest = await cryptoApi().subtle.digest("SHA-256", await blob.arrayBuffer());
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function waitForTransaction<T>(transaction: IDBTransaction, request: IDBRequest<T>): Promise<T> {
+  const { promise, resolve, reject } = Promise.withResolvers<T>();
+    let value: T;
+    let completed = false;
+    request.addEventListener("success", () => {
+      value = request.result;
+      completed = true;
+    }, { once: true });
+    request.addEventListener("error", () => reject(request.error ?? new DeviceArtifactError("Artifact database request failed.")), { once: true });
+    transaction.addEventListener("abort", () => reject(transaction.error ?? new DeviceArtifactError("Artifact database transaction was aborted.")), { once: true });
+    transaction.addEventListener("error", () => reject(transaction.error ?? new DeviceArtifactError("Artifact database transaction failed.")), { once: true });
+    transaction.addEventListener("complete", () => {
+      if (!completed) {
+        reject(new DeviceArtifactError("Artifact database transaction completed without a result."));
+        return;
+      }
+      resolve(value);
+    }, { once: true });
+  return promise;
+}
+
+/**
+ * Browser-owned escrow. A returned id means its Blob transaction has committed,
+ * so a destructive flasher never accepts an in-memory-only backup reference.
+ */
+class IndexedDbArtifactPersistence {
+  private database: Promise<IDBDatabase> | undefined;
+
+  private open(): Promise<IDBDatabase> {
+    if (this.database) return this.database;
+    if (typeof indexedDB === "undefined") {
+      return Promise.reject(new DeviceArtifactError("Persistent browser storage is unavailable; refusing to create device artifact escrow."));
+    }
+    const { promise, resolve, reject } = Promise.withResolvers<IDBDatabase>();
+      const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
+      request.addEventListener("upgradeneeded", () => {
+        const database = request.result;
+        const store = database.objectStoreNames.contains(STORE_NAME)
+          ? request.transaction?.objectStore(STORE_NAME)
+          : database.createObjectStore(STORE_NAME, { keyPath: "key" });
+        if (store && !store.indexNames.contains("sessionId")) store.createIndex("sessionId", "sessionId", { unique: false });
+      });
+      request.addEventListener("success", () => resolve(request.result), { once: true });
+      request.addEventListener("error", () => reject(request.error ?? new DeviceArtifactError("Could not open persistent artifact storage.")), { once: true });
+      request.addEventListener("blocked", () => reject(new DeviceArtifactError("Persistent artifact storage is blocked by another browser tab.")), { once: true });
+    this.database = promise;
+    return this.database;
+  }
+
+  async put(sessionId: string, artifact: StoredDeviceArtifact): Promise<void> {
+    const database = await this.open();
+    const transaction = database.transaction(STORE_NAME, "readwrite");
+    const request = transaction.objectStore(STORE_NAME).put({ key: artifactKey(sessionId, artifact.id), sessionId, artifact } satisfies PersistedDeviceArtifact);
+    await waitForTransaction(transaction, request);
+  }
+
+  async get(sessionId: string, artifactId: string): Promise<StoredDeviceArtifact | undefined> {
+    const database = await this.open();
+    const transaction = database.transaction(STORE_NAME, "readonly");
+    const request = transaction.objectStore(STORE_NAME).get(artifactKey(sessionId, artifactId)) as IDBRequest<PersistedDeviceArtifact | undefined>;
+    const value = await waitForTransaction(transaction, request);
+    return value?.artifact;
+  }
+
+  async list(sessionId: string): Promise<readonly StoredDeviceArtifact[]> {
+    const database = await this.open();
+    const transaction = database.transaction(STORE_NAME, "readonly");
+    const request = transaction.objectStore(STORE_NAME).index("sessionId").getAll(sessionId) as IDBRequest<PersistedDeviceArtifact[]>;
+    return (await waitForTransaction(transaction, request)).map(({ artifact }) => artifact);
+  }
+
+  async delete(sessionId: string, artifactId: string): Promise<void> {
+    const database = await this.open();
+    const transaction = database.transaction(STORE_NAME, "readwrite");
+    const request = transaction.objectStore(STORE_NAME).delete(artifactKey(sessionId, artifactId));
+    await waitForTransaction(transaction, request);
+  }
+}
+
+/**
+ * A page-session artifact store. Browser Blobs remain out of operation frames;
+ * only opaque ids and hashes cross the operation boundary. Each add/save waits
+ * for IndexedDB commit, allowing escrow to survive a reload before a flash.
+ */
+export class DeviceArtifactStore implements OperationArtifacts {
+  private readonly sessions = new Map<string, Map<string, StoredDeviceArtifact>>();
+  private readonly listeners = new Map<string, Set<DeviceArtifactListener>>();
+  private readonly persistence = new IndexedDbArtifactPersistence();
+
+  private entries(sessionId: string): Map<string, StoredDeviceArtifact> {
+    let entries = this.sessions.get(sessionId);
+    if (!entries) {
+      entries = new Map();
+      this.sessions.set(sessionId, entries);
+    }
+    return entries;
+  }
+
+  private publish(sessionId: string): void {
+    const artifacts = this.list(sessionId);
+    for (const listener of this.listeners.get(sessionId) ?? []) listener(artifacts);
+  }
+
+  async hydrate(sessionId: string): Promise<readonly DeviceArtifact[]> {
+    const entries = this.entries(sessionId);
+    const persisted = await this.persistence.list(sessionId);
+    for (const artifact of persisted) entries.set(artifact.id, artifact);
+    this.publish(sessionId);
+    return this.list(sessionId);
+  }
+
+  async add(sessionId: string, file: Blob, name: string, options: AddDeviceArtifactOptions = {}): Promise<DeviceArtifact> {
+    if (!(file instanceof Blob)) throw new DeviceArtifactError("A browser Blob is required for a device artifact.");
+    const artifact: StoredDeviceArtifact = {
+      id: cryptoApi().randomUUID(),
+      name: normalizeName(name),
+      size: file.size,
+      mime: file.type || "application/octet-stream",
+      sha256: await sha256(file),
+      kind: options.kind ?? "input",
+      source: options.source ?? "picker",
+      createdAt: Date.now(),
+      blob: file,
+    };
+    await this.persistence.put(sessionId, artifact);
+    this.entries(sessionId).set(artifact.id, artifact);
+    this.publish(sessionId);
+    return artifactMetadata(artifact);
+  }
+
+  async addInput(sessionId: string, file: File, name = file.name, source: Extract<DeviceArtifactSource, "picker" | "drop"> = "picker"): Promise<DeviceArtifact> {
+    return this.add(sessionId, file, name, { kind: "input", source });
+  }
+
+  async importAuthorizedFile(sessionId: string, filePath: string, fetchImpl: FetchLike = fetch): Promise<DeviceArtifact> {
+    const response = await fetchImpl(authorizedArtifactDownloadUrl(sessionId, filePath), { credentials: "same-origin" });
+    if (!response.ok) throw new DeviceArtifactError(`Could not import the authorized file (${response.status}).`);
+    return this.add(sessionId, await response.blob(), filenameFromPath(filePath), { kind: "input", source: "server-file" });
+  }
+
+  list(sessionId: string): readonly DeviceArtifact[] {
+    return [...this.entries(sessionId).values()]
+      .sort((left, right) => right.createdAt - left.createdAt)
+      .map(artifactMetadata);
+  }
+
+  async getInput(sessionId: string, fileId: string): Promise<Blob | undefined> {
+    const entries = this.entries(sessionId);
+    const inMemory = entries.get(fileId);
+    if (inMemory) return inMemory.blob;
+    const persisted = await this.persistence.get(sessionId, fileId);
+    if (!persisted) return undefined;
+    entries.set(fileId, persisted);
+    this.publish(sessionId);
+    return persisted.blob;
+  }
+
+  async save(sessionId: string, name: string, blob: Blob): Promise<string> {
+    const artifact = await this.add(sessionId, blob, name, { kind: "output", source: "device" });
+    return artifact.id;
+  }
+
+  subscribe(sessionId: string, listener: DeviceArtifactListener): () => void {
+    let listeners = this.listeners.get(sessionId);
+    if (!listeners) {
+      listeners = new Set();
+      this.listeners.set(sessionId, listeners);
+    }
+    listeners.add(listener);
+    listener(this.list(sessionId));
+    return () => {
+      const current = this.listeners.get(sessionId);
+      current?.delete(listener);
+      if (current?.size === 0) this.listeners.delete(sessionId);
+    };
+  }
+
+  async remove(sessionId: string, artifactId: string): Promise<boolean> {
+    const entries = this.entries(sessionId);
+    if (!entries.has(artifactId)) return false;
+    await this.persistence.delete(sessionId, artifactId);
+    entries.delete(artifactId);
+    this.publish(sessionId);
+    return true;
+  }
+
+  /** Deliberate user export: no automatic downloads are created for device output. */
+  download(sessionId: string, artifactId: string): void {
+    const artifact = this.entries(sessionId).get(artifactId);
+    if (!artifact) throw new DeviceArtifactError("This artifact is not available in the current session.");
+    const url = URL.createObjectURL(artifact.blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = artifact.name;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+}
+
+interface DeviceArtifactGlobal {
+  store?: DeviceArtifactStore;
+}
+
+const artifactGlobal = globalThis as typeof globalThis & { __codyDeviceArtifacts?: DeviceArtifactGlobal };
+const singleton = (artifactGlobal.__codyDeviceArtifacts ??= {});
+
+/** Shared by the panel and the page-side operation manager. IndexedDB is the escrow boundary. */
+export const deviceArtifacts = singleton.store ??= new DeviceArtifactStore();
+
+export function authorizedArtifactDownloadUrl(sessionId: string, filePath: string): string {
+  if (!sessionId.trim()) throw new DeviceArtifactError("A device session is required to import a server file.");
+  if (!filePath.trim()) throw new DeviceArtifactError("A file path is required.");
+  return `/api/files/${encodeFilePathForApi(filePath)}?type=download&sessionId=${encodeURIComponent(sessionId)}`;
+}
