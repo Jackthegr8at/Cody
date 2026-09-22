@@ -13,6 +13,7 @@
   "agentSession.modelSwitchApplied": "已切换到模型 {name}。从下一步开始生效。",
   "agentSession.routingSummary": "路由：{count} 次模型切换",
   "agentSession.thinkingLevelApplied": "推理级别已设为 {level}。从下一步开始生效。",
+  "agentSession.localOnlyLeaveFailed": "无法关闭仅本地模式，因此未更改模型。",
   "agentSession.fallbackAppliedUnknownReason": "{job} 请求的 {from} 遇到了用量限制或错误。将改用 {to}。",
   "agentSession.job.default": "此会话",
   "agentSession.job.task": "子代理工作（task 角色）",

@@ -118,10 +118,11 @@ interface Props {
    * the new-models line and its visibility mirror. */
   modelsRefreshKey?: number;
   onModelChange?: (provider: string, modelId: string, selection?: "manual" | "smart") => void | boolean | Promise<boolean>;
-  /** Return a NEW session to auto ("Smart") model resolution. Present only
-   * for a new, not-yet-spawned session — on a live session the Smart row
-   * resolves the OMP roles default itself and calls onModelChange instead. */
-  onSelectSmartModel?: () => void;
+  /** Return a NEW session to auto ("Smart") model resolution. Answers false
+   * once the session has spawned (a Local-only pick spawns it early); the
+   * Smart row then resolves the OMP roles default itself and calls
+   * onModelChange, exactly as on a live session. */
+  onSelectSmartModel?: () => boolean | void;
   /** Backend-confirmed local-only routing for this session. Absent when the
    * active engine cannot support this routing mode. */
   localOnly?: { active: boolean; pending: boolean; supported: boolean; error?: string };
@@ -1175,7 +1176,9 @@ export function QuotaPopover({
                     <span style={{ flexShrink: 0, fontSize: 12, fontVariantNumeric: "tabular-nums", color: "var(--text-muted)" }}>{t("usage.resetCount", { count: account.availableCount })}</span>
                   </div>
                   {expiry && <div style={{ marginTop: 2, fontSize: 11, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>{t("usage.expiresAt", { time: expiry })}</div>}
+                  {credit?.title && <div style={{ marginTop: 2, fontSize: 11, color: "var(--text-muted)" }}>{credit.title}</div>}
                   {account.error && <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)" }}>{account.error}</div>}
+                  {!account.error && !account.canRedeem && account.reason && <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)" }}>{account.reason}</div>}
                   {credit && account.canRedeem && !confirming && (
                     <button type="button" onClick={() => setResetSelection({ accountId: account.id, creditId: credit.id, account: account.label })} style={{ marginTop: 6, padding: "3px 7px", border: "1px solid var(--border)", borderRadius: 5, background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 10 }}>
                       {t("usage.useReset")}
@@ -3939,8 +3942,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       key="smart-model-role"
                       onClick={() => {
                         setModelDropdownOpen(false);
-                        if (onSelectSmartModel) onSelectSmartModel();
-                        else void handleSmartModelForLiveSession();
+                        if (!onSelectSmartModel || onSelectSmartModel() === false) void handleSmartModelForLiveSession();
                       }}
                       style={{
                         display: "flex", alignItems: "flex-start", gap: 8,

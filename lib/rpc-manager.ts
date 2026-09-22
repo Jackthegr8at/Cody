@@ -935,7 +935,43 @@ export class AgentSessionWrapper {
   /** Apply a persisted routing-overlay change only when this wrapper is idle. */
   async restartForRouting(): Promise<boolean> {
     if (this.isRunning()) return false;
-    await this.restart();
+    // The cached launch profile of a Local-only session IS the Local-only
+    // launch: its frozen envelope profile plus the overlay that limits the
+    // engine to local models. Relaunching from it after the mode was turned
+    // off kept that overlay, so the engine went on refusing every cloud
+    // model ("Model not found") while Cody reported Local-only as off. The
+    // base profile is rebuilt from the active model instead; relaunch then
+    // layers the routing overlay back on only while the mode is on.
+    let base: LocalModelProfileLaunch | undefined;
+    let resolution: ResolvedLocalModelProfile | undefined;
+    try {
+      const model = (await this.proc.sendCommand<RpcSessionState>({ type: "get_state" })).model;
+      if (model) {
+        resolution = resolveLocalModelPromptProfile({
+          provider: model.provider,
+          modelId: model.id,
+          contextWindow: model.contextWindow,
+          maxTokens: model.maxTokens,
+        });
+        base = materializeLocalModelProfile(resolution);
+      }
+    } catch {
+      // No readable model: the engine's full default profile is the safe base.
+    }
+    const effective = launchWithLocalRouting(base, this._sessionId);
+    this.localProfileLaunch = effective;
+    this.localProfileResolution = resolution;
+    await this.restart(base);
+    // A resumed session keeps its last model even when the overlay no longer
+    // lists it, so turning Local-only on over a cloud model would have sent
+    // the next turn to the cloud. Move it onto the local primary.
+    const intent = readLocalRoutingIntent(this._sessionId);
+    if (intent.enabled && intent.primary) {
+      const current = (await this.proc.sendCommand<RpcSessionState>({ type: "get_state" })).model;
+      if (!current || !validateLocalRoutingModelSelection(this._sessionId, current.provider, current.id).allowed) {
+        await this.send({ type: "set_model", provider: intent.primary.provider, modelId: intent.primary.modelId });
+      }
+    }
     return true;
   }
 

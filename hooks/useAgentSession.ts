@@ -929,7 +929,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [modelThinkingLevels, setModelThinkingLevels] = useState<Record<string, string[]>>({});
   const [newSessionModel, setNewSessionModel] = useState<SelectedModel | null>(null);
   const [newSessionDefaultModel, setNewSessionDefaultModel] = useState<SelectedModel | null>(null);
-  const [localOnly, setLocalOnly] = useState<{ active: boolean; pending: boolean; supported: boolean; error?: string }>({ active: false, pending: false, supported: false });
+  // `models` is the exact set a Local-only session may select
+  // ("provider/modelId"); anything else must leave the mode first.
+  const [localOnly, setLocalOnly] = useState<{ active: boolean; pending: boolean; supported: boolean; error?: string; models?: string[] }>({ active: false, pending: false, supported: false });
+  const localOnlyRef = useRef(localOnly);
+  localOnlyRef.current = localOnly;
   const [toolPreset, setToolPreset] = useState<ToolPreset>(() => getPreferredToolPreset());
   useEffect(() => subscribeToPreferredToolPreset(setToolPreset), []);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
@@ -1876,6 +1880,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const selectLocalOnly = useCallback(async (): Promise<boolean> => {
     if (localOnly.pending || !localOnly.supported) return false;
+    // Already on: re-selecting must not restart the engine for nothing.
+    if (localOnly.active) return true;
     const sid = sessionIdRef.current;
     setLocalOnly((current) => ({ ...current, pending: true, error: undefined }));
     try {
@@ -1891,9 +1897,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: true }),
       });
-      const body = await response.json() as { active?: unknown; error?: unknown };
+      const body = await response.json() as { active?: unknown; error?: unknown; models?: unknown };
       if (!response.ok || body.active !== true) throw new Error(typeof body.error === "string" ? body.error : "Local-only routing could not be applied.");
-      if (sessionIdRef.current === sid) setLocalOnly((current) => ({ ...current, active: true, pending: false, supported: true }));
+      const models = Array.isArray(body.models) ? body.models.filter((entry): entry is string => typeof entry === "string") : undefined;
+      if (sessionIdRef.current === sid) setLocalOnly((current) => ({ ...current, active: true, pending: false, supported: true, models }));
+      // The server moved the session onto the local primary; show it.
+      void refreshLiveModelState(sid);
       return true;
     } catch (error) {
       if (sessionIdRef.current === sid || sid === null) {
@@ -1902,7 +1911,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       newSessionLocalOnlyRef.current = false;
       return false;
     }
-  }, [ensureNewSession, localOnly.pending, localOnly.supported]);
+  }, [ensureNewSession, localOnly.active, localOnly.pending, localOnly.supported, refreshLiveModelState]);
 
   const loadSlashCommands = useCallback(async () => {
     const sid = sessionIdRef.current ?? await ensureNewSession();
@@ -3583,6 +3592,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             setPendingModel(selectedModel);
             if (existingSid) {
               await sendAgentCommand(sid, { type: "set_model", provider: selectedModel.provider, modelId: selectedModel.modelId });
+              // set_model re-applies the model's own default thinking level, so
+              // a reasoning pick made before the first prompt goes back on top.
+              if (thinkingLevel !== "auto") {
+                await sendAgentCommand(sid, { type: "set_thinking_level", level: thinkingLevel });
+              }
             }
           }
           await ensureEventsConnected(sid);
@@ -3646,7 +3660,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       dispatch({ type: "end" });
       return false;
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef, refreshSubagentRoster, registerHostTools, registerHostUriSchemes]);
+  }, [isNew, newSessionCwd, newSessionModel, session, thinkingLevel, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef, refreshSubagentRoster, registerHostTools, registerHostUriSchemes]);
 
   /** Abort the running agent and send the message as a fresh prompt
    * (abort_and_prompt). Only valid mid-run; the old turn's agent_end is
@@ -3794,14 +3808,63 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     await loadContext(sid, leafId);
   }, [loadContext]);
 
+  /** Turn Local-only off for a live session when a pick needs a model it
+   * forbids. Resolves true when the pick may proceed: the model is inside
+   * the Local-only set (a manual local pick keeps the mode), or the mode was
+   * turned off. A refusal (a turn still running) is reported, never swallowed. */
+  const leaveLocalOnlyFor = useCallback(async (sid: string, provider: string, modelId: string, selection: "manual" | "smart"): Promise<boolean> => {
+    if (!localOnlyRef.current.active) return true;
+    const key = `${provider}/${modelId}`;
+    if (selection === "manual") {
+      let allowed = localOnlyRef.current.models;
+      if (!allowed) {
+        try {
+          const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}/local-routing`);
+          const body = response.ok ? await response.json() as { active?: unknown; models?: unknown } : null;
+          if (body && body.active !== true) {
+            if (sessionIdRef.current === sid) setLocalOnly((current) => ({ ...current, active: false, pending: false, models: undefined }));
+            return true;
+          }
+          allowed = Array.isArray(body?.models) ? body.models.filter((entry): entry is string => typeof entry === "string") : undefined;
+        } catch {
+          allowed = undefined;
+        }
+      }
+      if (allowed?.includes(key)) return true;
+    }
+    setLocalOnly((current) => ({ ...current, pending: true, error: undefined }));
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}/local-routing`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: false }),
+      });
+      const body = await response.json().catch(() => ({})) as { active?: unknown; error?: unknown };
+      if (!response.ok || body.active !== false) throw new Error(typeof body.error === "string" ? body.error : translate("agentSession.localOnlyLeaveFailed"));
+      if (sessionIdRef.current === sid) setLocalOnly((current) => ({ ...current, active: false, pending: false, models: undefined }));
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (sessionIdRef.current === sid) setLocalOnly((current) => ({ ...current, pending: false, error: message }));
+      addNotice({ type: "error", message });
+      return false;
+    }
+  }, [addNotice]);
+
   const handleModelChange = useCallback(async (provider: string, modelId: string, selection: "manual" | "smart" = "manual"): Promise<boolean> => {
     if (isNew) {
-      setNewSessionModel({ provider, modelId });
+      // Smart on an already-spawned new session still reads as Smart.
+      setNewSessionModel(selection === "smart" ? null : { provider, modelId });
       setPendingModel({ provider, modelId });
       updateSessionControlScope(sessionIdRef.current, { provider, modelId });
     }
     const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
     if (!sid) return isNew;
+    if (sessionIdRef.current !== sid) return false;
+    // Smart or a model outside the Local-only set is a request to leave
+    // Local-only. The server refuses such a set_model while the mode is on,
+    // so the mode goes first and the switch follows.
+    if (localOnlyRef.current.active && !(await leaveLocalOnlyFor(sid, provider, modelId, selection))) return false;
     if (sessionIdRef.current !== sid) return false;
     // ACP transports do not yet guarantee that set_model is safe while a
     // prompt is live. The picker is disabled there, and this guards races.
@@ -3850,34 +3913,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     writeModelSwitchPending(pending);
     if (agentRunningRef.current && assistantProviderCallRef.current) return true;
     return dispatchPendingModelSwitch();
-  }, [dispatchPendingModelSwitch, isNew, liveModelMeta, modelCatalogSource, modelNames, sessionModels.list, setNewSessionModel, updateSessionControlScope, writeModelSwitchPending]);
+  }, [dispatchPendingModelSwitch, isNew, leaveLocalOnlyFor, liveModelMeta, modelCatalogSource, modelNames, sessionModels.list, setNewSessionModel, updateSessionControlScope, writeModelSwitchPending]);
 
-  // An unspawned session delegates the default choice to the engine's role plan.
-  const selectSmartModel = useCallback(() => {
-    const sid = sessionIdRef.current;
-    if (!sid) {
-      newSessionLocalOnlyRef.current = false;
-      setLocalOnly((current) => ({ ...current, active: false, pending: false, error: undefined }));
-    } else if (localOnly.active) {
-      setLocalOnly((current) => ({ ...current, pending: true, error: undefined }));
-      void (async () => {
-        try {
-          const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}/local-routing`, {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ enabled: false }),
-          });
-          const body = await response.json() as { active?: unknown; error?: unknown };
-          if (!response.ok || body.active !== false) throw new Error(typeof body.error === "string" ? body.error : "Smart routing could not be restored.");
-          if (sessionIdRef.current === sid) setLocalOnly((current) => ({ ...current, active: false, pending: false }));
-        } catch (error) {
-          if (sessionIdRef.current === sid) setLocalOnly((current) => ({ ...current, pending: false, error: error instanceof Error ? error.message : String(error) }));
-        }
-      })();
-    }
+  // An unspawned session delegates the default choice to the engine's role
+  // plan. A spawned one answers false: the picker then resolves Smart to the
+  // configured default and applies it through handleModelChange(…, "smart"),
+  // which leaves Local-only first.
+  const selectSmartModel = useCallback((): boolean => {
+    if (sessionIdRef.current) return false;
+    newSessionLocalOnlyRef.current = false;
+    setLocalOnly((current) => ({ ...current, active: false, pending: false, error: undefined, models: undefined }));
     setNewSessionModel(null);
-    pendingSmartSpawnRef.current = sid;
-  }, [localOnly.active, setNewSessionModel]);
+    pendingSmartSpawnRef.current = null;
+    return true;
+  }, [setNewSessionModel]);
 
   const handleFastModeChange = useCallback(async (enabled: boolean) => {
       if (fastModePendingLatchRef.current) return;
@@ -4330,7 +4379,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
     const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
-    if (!sid) return;
+    if (!sid) {
+      // A new conversation has no engine yet. The pick is held here and
+      // ensureNewSession applies it at spawn, before the first prompt; dropping
+      // it left the selector stuck on Auto and the first turn on the default.
+      if (!isNew) return;
+      thinkingConfiguredAutoRef.current = level === "auto";
+      setThinkingLevel(level);
+      return;
+    }
     const scope = thinkingLevelScopeRef.current;
     const request = thinkingLevelPendingRequestRef.current + 1;
     thinkingLevelPendingRequestRef.current = request;
@@ -4360,7 +4417,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setThinkingLevelTarget(null);
       }
     }
-  }, [addNotice, beginAuthoritativeModelSync, refreshLiveModelState]);
+  }, [addNotice, beginAuthoritativeModelSync, isNew, refreshLiveModelState]);
 
   const handleModeChange = useCallback(async (modeId: string) => {
     const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
@@ -4732,10 +4789,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           return;
         }
         const sessionResponse = await fetch(`/api/sessions/${encodeURIComponent(sid)}/local-routing`);
-        const sessionState = sessionResponse.ok ? await sessionResponse.json() as { active?: unknown; error?: unknown } : null;
+        const sessionState = sessionResponse.ok ? await sessionResponse.json() as { active?: unknown; error?: unknown; models?: unknown } : null;
         if (cancelled || sessionIdRef.current !== sid) return;
         setLocalOnly({
           active: sessionState?.active === true,
+          ...(Array.isArray(sessionState?.models) ? { models: sessionState.models.filter((entry): entry is string => typeof entry === "string") } : {}),
           pending: false,
           supported,
           ...(typeof sessionState?.error === "string" ? { error: sessionState.error } : typeof config.error === "string" ? { error: config.error } : {}),
@@ -4829,7 +4887,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // for as long as the running model is still the one Smart chose in THIS
     // session (both facts are id-scoped, so a switch to another conversation
     // can never inherit them).
-    isAutoModelSelection: (isNew && newSessionModel === null)
+    isAutoModelSelection: (isNew && newSessionModel === null && !localOnly.active)
       || (smartPinnedModel !== null
         && smartPinnedModel.forSession === (session?.id ?? sessionIdRef.current)
         && displayModelProvider === smartPinnedModel.provider

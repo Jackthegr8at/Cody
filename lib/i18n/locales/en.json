@@ -13,6 +13,7 @@
   "agentSession.modelSwitchApplied": "Model switched to {name}. Applies from the next step.",
   "agentSession.routingSummary": "Routing: {count} model switches",
   "agentSession.thinkingLevelApplied": "Reasoning set to {level}. Applies from the next step.",
+  "agentSession.localOnlyLeaveFailed": "Local-only could not be turned off, so the model was not changed.",
   "agentSession.fallbackAppliedUnknownReason": "{job} requested {from}, which hit a usage limit or error. Using {to} instead.",
   "agentSession.job.default": "This conversation",
   "agentSession.job.task": "Subagent work (task role)",

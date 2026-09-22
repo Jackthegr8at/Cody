@@ -5,6 +5,7 @@ import { getRequestUser } from "@/lib/auth/guard";
 import { requireEngine } from "@/lib/engine-guard";
 import {
   isSessionLocalOnly,
+  localRoutingAllowedModels,
   readConfiguredLocalRoutingIntent,
   readLocalRoutingIntent,
   setSessionLocalOnly,
@@ -39,6 +40,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   return NextResponse.json({
     active: intent.enabled,
     supported: availability.enabled,
+    models: localRoutingAllowedModels(id),
     ...(intent.error ? { error: intent.error } : availability.error ? { error: availability.error } : {}),
   });
 }
@@ -61,7 +63,7 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
         throw new Error("Finish the active turn before changing Local-only routing.");
       }
       const availability = readConfiguredLocalRoutingIntent();
-      return NextResponse.json({ active: intent.enabled, supported: availability.enabled, restarted });
+      return NextResponse.json({ active: intent.enabled, supported: availability.enabled, models: localRoutingAllowedModels(id), restarted });
     } catch (error) {
       // A busy session must retain exactly its previous launch policy; deferring
       // an unnoticed mode change until some later reconnect would be deceptive.

@@ -77,7 +77,15 @@ export const ompHarness: HarnessAdapter = {
   // typed at a prompt) instead of asking for it over RPC — the command fails
   // with the engine's own message, which Cody already surfaces in the sign-in
   // panel, and such a provider is reachable through a Cody terminal.
-  verifiedVersion: "18.2.5",
+  //
+  // 18.2.9 added Claude saved resets beside Codex's and moved the redeem
+  // target's provider and grant INSIDE `target`; the reset-credit bridge
+  // (bin/cody-omp-reset-credits.mjs) sends both spellings so older engines
+  // still redeem. Its `claudeResets.*` settings reach the panel through the
+  // schema like any other, and the auto-redeem consent prompt arrives as an
+  // ordinary rpc-ui select. It also needs Bun >= 1.3.14, which the image's
+  // `oven/bun:1` satisfies.
+  verifiedVersion: "18.2.9",
   capabilities: {
     liveSessions: true,
     models: true,

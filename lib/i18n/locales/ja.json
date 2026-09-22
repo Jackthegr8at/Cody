@@ -13,6 +13,7 @@
   "agentSession.modelSwitchApplied": "モデルを {name} に切り替えました。次のステップから適用されます。",
   "agentSession.routingSummary": "ルーティング: モデル切り替え {count} 件",
   "agentSession.thinkingLevelApplied": "推論レベルを {level} に設定しました。次のステップから適用されます。",
+  "agentSession.localOnlyLeaveFailed": "ローカル専用をオフにできなかったため、モデルは変更されていません。",
   "agentSession.fallbackAppliedUnknownReason": "{job} が要求した {from} は使用量上限またはエラーに達しました。代わりに {to} を使用します。",
   "agentSession.job.default": "この会話",
   "agentSession.job.task": "サブエージェント作業（task ロール）",
