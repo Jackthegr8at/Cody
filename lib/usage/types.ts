@@ -37,6 +37,15 @@ export interface UsageWindow {
    * authoritative model scope: current OMP reports some tiered buckets as
    * shared too. */
   shared?: boolean;
+  /**
+   * Where an exhausted state came from, when it is not a measured reading.
+   * `"block"`: omp refused the credential after ONE rejected request and
+   * set a deadline (`resetsAt`). Nothing measured the quota, so the UI
+   * should say "blocked after a rejected request, not measured" rather
+   * than "exhausted". An account whose every window is a block was never
+   * measured at all (a provider with no usage reading). Absent = measured.
+   */
+  source?: "block";
 }
 /** A banked rate-limit reset balance actually reported by the engine. This is
  * separate from subscription quota and from any pay-as-you-go credit balance. */

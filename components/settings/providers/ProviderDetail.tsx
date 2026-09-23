@@ -26,12 +26,16 @@ import { toast } from "@/components/ui/toast";
 import { useNativeSettings } from "@/hooks/useConfigWriter";
 import { useModelCatalog } from "@/hooks/useModelCatalog";
 import { useSettingsRoute } from "@/hooks/useSettingsData";
+import { useUsage } from "@/hooks/useUsage";
 import type { ProviderLoginAccount } from "@/lib/harness/types";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { providerGlob } from "@/lib/model-allow-list";
 import { omitUntouchedModelDrafts } from "@/lib/models-config-drafts";
 import { formatModelDisplayName } from "@/lib/model-display";
 import { isSubscriptionLogin, type ProviderMethod, type ProviderMethodVariable, type ProviderRow, type ProvidersResponse } from "@/lib/provider-directory";
+import { selectBindingWindow } from "@/lib/usage/select";
+import type { UsageAccount } from "@/lib/usage/types";
+import { clampQuotaPercent, QuotaBar, usageToneColor } from "@/components/QuotaBar";
 import { DangerZone } from "../DangerZone";
 import { Drawer } from "../Drawer";
 import { ModelCurationDialog } from "../models/ModelCurationDialog";
@@ -98,14 +102,32 @@ function AccountStateChip({ state, resetsAt }: { state: ProviderLoginAccount["st
   return <span style={{ ...chipStyle, color: "var(--status-warning)" }}>{reset ? `Limited · resets ${reset}` : "Limited"}</span>;
 }
 
+/** The account's own most-binding usage window, as a compact bar — the same
+ * shared primitive and colour rule the composer and the Providers directory's
+ * Usage block both draw with. */
+function AccountUsageBar({ account }: { account: UsageAccount }) {
+  const binding = selectBindingWindow([account]);
+  if (!binding) return null;
+  const percent = clampQuotaPercent(binding.window.utilization);
+  const color = usageToneColor(percent, binding.window.state);
+  return (
+    <span style={{ width: 48, flexShrink: 0 }} aria-label={`${Math.round(percent)}% of ${binding.window.label} used`}>
+      <QuotaBar percent={percent} color={color} />
+    </span>
+  );
+}
+
 /** One account under a multi-account sign-in: identity, plan, the state omp
  * ranked it at, and — when it is not the credential's only remaining copy —
  * removal. */
-function AccountRow({ account, canEdit, busy, onRemove }: {
+function AccountRow({ account, canEdit, busy, onRemove, usageAccount }: {
   account: ProviderLoginAccount;
   canEdit: boolean;
   busy: boolean;
   onRemove: () => void;
+  /** The matching usage-snapshot account (by credential id), when the engine
+   * reports one; absent renders no bar at all rather than an empty one. */
+  usageAccount?: UsageAccount | null;
 }) {
   const title = account.position === 0 ? "Primary" : account.position === 1 ? "Secondary" : `Account ${account.position + 1}`;
   return (
@@ -117,6 +139,7 @@ function AccountRow({ account, canEdit, busy, onRemove }: {
         </span>
       </span>
       {account.planType && <span style={{ fontSize: 11, color: "var(--text-muted)", whiteSpace: "nowrap" }}>{account.planType}</span>}
+      {usageAccount && <AccountUsageBar account={usageAccount} />}
       <AccountStateChip state={account.state} resetsAt={account.resetsAt} />
       {account.canRemove && canEdit && (
         <button type="button" className="ui-focus-ring" onClick={onRemove} disabled={busy} aria-label={`Remove ${account.label}`} style={{ ...quietButtonStyle, padding: "6px 8px" }}>
@@ -127,13 +150,18 @@ function AccountRow({ account, canEdit, busy, onRemove }: {
   );
 }
 
-export function LoginMethodCard({ row, method, canEdit, shortName, autoStart, onChanged }: {
+export function LoginMethodCard({ row, method, canEdit, shortName, autoStart, onChanged, usageAccounts }: {
   row: ProviderRow;
   method: ProviderMethod;
   canEdit: boolean;
   shortName: string;
   autoStart: boolean;
   onChanged: () => void;
+  /** This provider's usage-snapshot accounts, matched to a credential row by
+   * `ProviderLoginAccount.id` (omp's stringified credential row id) below.
+   * Undefined (no usage read yet, or the engine reports none) renders every
+   * account row exactly as it did before per-account usage existed. */
+  usageAccounts?: readonly UsageAccount[];
 }) {
   const [expanded, setExpanded] = useState(autoStart);
   const [starting, setStarting] = useState(autoStart);
@@ -236,6 +264,7 @@ export function LoginMethodCard({ row, method, canEdit, shortName, autoStart, on
               canEdit={canEdit}
               busy={removingId === account.id}
               onRemove={() => { setRemoveError(null); setRemoveTarget(account); }}
+              usageAccount={usageAccounts?.find((entry) => String(entry.credentialId) === account.id) ?? null}
             />
           ))}
         </div>
@@ -750,6 +779,10 @@ export function ProviderDetail({ row, response, open, onClose, initialLoginId = 
   const [removing, setRemoving] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const onDirtyChange = useCallback((dirty: boolean) => setAdvancedDirty(dirty), []);
+  // Only polls while this drawer is actually open; the directory behind it
+  // already has its own usage read for the Usage summary block.
+  const usage = useUsage(open);
+  const usageAccounts = usage.snapshot?.accounts.filter((entry) => row.catalogIds.includes(entry.provider));
 
   const loginMethods = row.methods.filter((method) => method.loginId);
   const keyMethod = row.methods.find((method) => method.kind === "key" || method.kind === "env");
@@ -909,6 +942,7 @@ export function ProviderDetail({ row, response, open, onClose, initialLoginId = 
               shortName={shortName}
               autoStart={autoStart && currentLogin.loginId === initialLoginId}
               onChanged={changed}
+              usageAccounts={usageAccounts}
             />
           )}
         </Section>

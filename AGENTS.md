@@ -2533,9 +2533,22 @@ config").
   (lib/usage/credential-order.ts) folds blocks in as exhausted untiered
   windows, synthesizing an account for a blocked credential whose provider
   reports no usage (an API key) — otherwise it stays invisible and keeps
-  being chosen. `POST /api/usage/unblock` clears a stale block (admin-only,
-  via `bin/cody-omp-credentials.mjs unblock`); it is safe because a provider
-  that is still limiting re-writes the block on the next request.
+  being chosen. Block windows carry `source: "block"`: set from ONE rejected
+  request, never measured, and labelled that way in the UI. `POST
+  /api/usage/unblock` {provider, accountId} is the Providers panel's
+  "Retry now" (admin-only, `bin/cody-omp-unblock.mjs` via
+  lib/harness/omp-unblock.ts). It lifts only a block (a measured exhaustion
+  is refused), never loads a credential (`AuthStorage.create` without
+  `reload()`), clears the matching blackout, re-reconciles and restarts idle
+  sessions, because a running omp keeps its own in-memory copy of the block
+  (`#credentialBackoff`) until it restarts. Safe: a provider still limiting
+  re-writes the block on the next request.
+- **Usage is about accounts, not the active engine.** `/api/usage` answers
+  whenever the omp binary is installed, whichever engine is active, and the
+  composer ring and picker badges ("Limit reached · resets …") render for
+  every engine where the engine's provider maps unambiguously (Claude Code →
+  anthropic, Codex → openai-codex). Blackouts are observed for every engine;
+  config writes and restarts stay omp-only.
 - **Blackouts are remembered, with the provider's own reset as the expiry**
   (`lib/routing/route-memory.ts`, `cody-route-memory.json`, 0600, atomic).
   A quiet or failed telemetry read reports nothing, and "nothing" reads as
@@ -2552,6 +2565,20 @@ config").
   baseline. Nothing usable in the chain means the role is left exactly as
   configured; inventing a destination the user never listed is not Cody's
   call.
+- **Chains skip what cannot answer** (`lib/routing/chain-binding.ts`). omp's
+  REACTIVE fallback (`#tryRetryModelFallback`) only checks that a candidate
+  has a key, so a provider out of credits or blocked on every account was
+  still dialled. Cody writes each `retry.fallbackChains.<key>` without
+  entries whose EVERY account is exhausted (`allAccountsExhausted`, a
+  provider-wide credits blackout, or blocks), stores the user's chain as
+  baseline in route memory BEFORE rewriting, restores entries the moment
+  they are usable, and adopts a chain the user edited as the new baseline.
+  One spent account beside a healthy sibling drops nothing: omp rotates
+  accounts itself. All entries spent → the full chain is kept. Role binding
+  walks the baselines. Any chain or role change restarts idle sessions.
+  Also: a failed usage read never lifts a blackout (only a fresh read that
+  sees the account does), and a cached window past its own reset counts as
+  reset.
 - **Subagents must resolve through a ROLE, not a model name**
   (`lib/routing/agent-roles.ts`). In omp's `resolveEffectiveAgentModelSelection`,
   `role` is `undefined` for any source that is not a `@alias` — and the role
@@ -2561,13 +2588,21 @@ config").
   `activeModelPattern`: ask an Opus session for a cheap subagent and every
   spawn silently runs on Opus. Cody writes `task.agentModelOverrides`
   (which outranks agent frontmatter) as aliases — `luna → @smol`,
-  `scout → @smol`, `task → @task`, … — filling gaps and repairing pins it
+  `scout → @smol`, `task → @task`, `reviewer`/`security-reviewer → @slow`
+  (omp's own reviewer declares `@slow`; the older `@task` default meant the
+  `slow` role never ran), … — filling gaps and repairing pins it
   can PROVE are broken (unresolvable against the cached catalog, or blacked
   out). A working concrete pin, an alias the user wrote, and an `on`/`off`
   value are left untouched; with no cached catalog no pin is ever judged
   unresolvable.
-- **Trap — `retry.usageAwareFallback` behaves differently under Cody.**
-  omp's `turn-recovery.ts` computes
+- **`retry.usageAwareFallback` is the same-provider-first switch.** With it
+  on, omp checks usage health before each request (auth-storage
+  `getModelUsageHealth`): the provider is healthy while ANY account is, and
+  the session is moved onto that account before any chain is walked. Only
+  providers with a ranking strategy (anthropic, openai-codex,
+  alibaba-token-plan, …) are judged; the rest read "unknown", which is why
+  chain filtering above still matters (OpenRouter credits). Trap — "Confirm
+  interactively" behaves differently under Cody. omp's `turn-recovery.ts` computes
   `shouldFallback = depleted || policy === "auto" || !confirmer`, and
   `setUsageFallbackConfirmer` is wired only by the ACP agent and the
   interactive TUI controller — never by `--mode rpc-ui`, which is how Cody
@@ -2576,6 +2611,14 @@ config").
   Surfaced as a warning clause on the setting itself
   (`SETTING_NOTES` in lib/omp/settings-surface.ts → `OmpSetting.codyNote`,
   rendered by SchemaSettingsList), kept honest by settings-surface.test.mjs.
+- **Engine error text goes through one describer** (`lib/error-text.ts`
+  `describeEngineError`, used by `engineErrorNotice` in useAgentSession for
+  every engine, ACP notices included): it tells a refusal (safety policy,
+  e.g. Anthropic `Refusal (…)`, Codex "flagged for possible cybersecurity
+  risk") from usage, credits, auth, overload, transport and an outdated
+  engine (`claude_code_version_too_old`), strips JSON wrappers, request ids,
+  `raw-http-request=` paths, stack frames and trailing links, and caps the
+  text. Identical notices collapse into one with a ×N count.
 - **Routing notices are coalesced** (`ROUTING_BURST_MS`, useAgentSession):
   fallback-applied/succeeded events collect for 1.5 s and deliver ONE toast
   plus one notice. A lone event keeps its old wording; a subagent-attributed

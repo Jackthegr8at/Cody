@@ -48,6 +48,12 @@ export function deriveUsageWindowState(utilization: number, status?: unknown): U
   return "ok";
 }
 
+/** Whether the one usage reader Cody has is installed, whichever engine is
+ * active. A cached probe; spawns nothing on a warm answer. */
+export function usageReaderInstalled(): boolean {
+  return resolveOmpBin() !== null;
+}
+
 /**
  * Spawn the engine's usage command and normalize its output. Resolves to an
  * unavailable snapshot — never rejects — when omp is missing, exits non-zero,

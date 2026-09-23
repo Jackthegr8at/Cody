@@ -106,9 +106,11 @@ const SETTING_NOTES: Record<string, string> = {
   // and setUsageFallbackConfirmer is wired only by the ACP agent and the
   // interactive TUI controller — never by `--mode rpc-ui`, which is how
   // Cody drives the engine. So "Confirm interactively" cannot ask anyone
-  // here and always answers yes.
+  // here and always answers yes. auth-storage getModelUsageHealth rates
+  // each account and calls the provider healthy while ANY account is, then
+  // re-selects that account, so a second account is used before the chain.
   "retry.usageAwareFallback":
-    "In Cody the engine has no one to ask, so \"Confirm interactively\" behaves as \"Auto-fallback\": any model inside the reserve margin switches away without asking, even when another account for that provider still has quota.",
+    "Before each request the engine moves to another signed-in account of the same provider when the current one is spent, and only walks the fallback chain once every account is. \"Confirm interactively\" cannot ask anyone in Cody and behaves as \"Auto-fallback\".",
   "retry.usageReservePolicy":
     "\"Confirm interactively\" is unavailable over Cody's connection to the engine and behaves as \"Auto-fallback\".",
   // omp 18.1.15 turn-recovery.ts: with `retry.waitForUsageReset` a provider-

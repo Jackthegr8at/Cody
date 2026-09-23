@@ -2,7 +2,7 @@
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { CompactionProgress } from "@/components/CompactionProgress";
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronDown, TriangleAlert, X } from "lucide-react";
+import { ChevronDown, ShieldAlert, TriangleAlert, X } from "lucide-react";
 import type { ActivityDisplayMode, AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, ImageContent, SessionInfo, SessionTreeNode, TextContent, ToolCallContent, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
 import { countToolCallBlocks, getDisplayableAssistantBlocks, isVisibleTranscriptMessage, groupHasThinking, splitFinalAssistantBlocks } from "@/lib/message-display";
@@ -1760,17 +1760,20 @@ function NoticeShelf({ notices, floating = false, align = "left" }: { notices: N
             : notice.type === "success"
               ? "var(--status-success)"
               : "var(--accent)";
+        // A refusal is the model making a choice, not the app breaking, so it
+        // gets its own icon on top of the shared warning (amber) tone —
+        // easier to tell apart from an auth/transport failure at a glance.
+        const isRefusal = notice.errorKind === "refusal";
         return (
           <div
             key={notice.id}
             className="notice-shelf-item"
+            title={notice.message}
             style={{
               display: "flex",
-              alignItems: "center",
+              alignItems: "flex-start",
               gap: 8,
               minHeight: 36,
-              height: 36,
-              maxHeight: 48,
               marginBottom: index === notices.length - 1 ? 0 : 4,
               overflow: "hidden",
               borderRadius: "var(--radius-control)",
@@ -1786,20 +1789,38 @@ function NoticeShelf({ notices, floating = false, align = "left" }: { notices: N
               animation: notice.exiting
                 ? "notice-shelf-out var(--dur-med) ease-in forwards"
                 : "notice-shelf-in var(--dur-med) var(--ease-out-warm) both",
-              padding: "0 10px",
+              padding: "8px 10px",
             }}
           >
+            {isRefusal ? (
+              <ShieldAlert size={14} aria-hidden style={{ color, flexShrink: 0, marginTop: 2 }} />
+            ) : (
+              <span
+                style={{
+                  width: 7,
+                  height: 7,
+                  marginTop: 6,
+                  borderRadius: "50%",
+                  background: color,
+                  flexShrink: 0,
+                }}
+              />
+            )}
             <span
               style={{
-                width: 7,
-                height: 7,
-                borderRadius: "50%",
-                background: color,
-                flexShrink: 0,
+                minWidth: 0,
+                maxWidth: "100%",
+                overflow: "hidden",
+                display: "-webkit-box",
+                WebkitLineClamp: 2,
+                WebkitBoxOrient: "vertical",
+                wordBreak: "break-word",
               }}
-            />
-            <span style={{ padding: "8px 0", minWidth: 0, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            >
               {notice.message}
+              {notice.count && notice.count > 1 ? (
+                <span style={{ opacity: 0.6, marginLeft: 6, fontVariantNumeric: "tabular-nums" }}>×{notice.count}</span>
+              ) : null}
             </span>
           </div>
         );

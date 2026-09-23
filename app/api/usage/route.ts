@@ -1,15 +1,16 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth/http";
-import { getHarness } from "@/lib/harness";
+import { usageReaderInstalled } from "@/lib/usage/omp-usage";
 import { getUsageSnapshot } from "@/lib/usage/cache";
 import { reconcileRoutingForRequest } from "@/lib/routing/request";
 import type { UsageSnapshot } from "@/lib/usage/types";
 
 /**
- * GET /api/usage — the active engine's plan-quota windows (e.g. "5h: 42%
- * used, resets 14:00") for the usage meter in Settings / the status strip.
- * Same signed-in-only guard as GET /api/local-ai; all probing and caching
- * lives in lib/usage, so this route is just auth + fail-soft plumbing.
+ * GET /api/usage — plan-quota windows (e.g. "5h: 42% used, resets 14:00")
+ * for every signed-in provider account, for the usage meter in Settings and
+ * the status strip. Same signed-in-only guard as GET /api/local-ai; all
+ * probing and caching lives in lib/usage, so this route is just auth +
+ * fail-soft plumbing.
  */
 export const dynamic = "force-dynamic";
 
@@ -21,20 +22,15 @@ export async function GET(request: Request) {
   const resolved = requireUser(request);
   if ("response" in resolved) return resolved.response;
 
-  // `omp usage --json` is the ONLY reader lib/usage has, so this route can
-  // only answer for omp. It used to answer for every engine: on another
-  // engine the composer's quota ring reported an OMP account's exhaustion,
-  // polled every 90 seconds, for a subscription the running agent was not
-  // spending.
-  //
-  // The refusal is a VALUE, not an error — an unavailable snapshot is a
-  // well-formed answer this endpoint already returns for a missing binary,
-  // and the meter is built to hide on it. A 4xx here would paint an error
-  // over a widget whose honest state is simply "nothing to show".
-  const harness = getHarness();
-  if (harness.id !== "omp") {
+  // Quota belongs to the ACCOUNTS, not to whichever engine is driving chat:
+  // a Claude or Codex login spends the same plan whether omp, Claude Code or
+  // Codex sends the request. `omp usage --json` is the only reader lib/usage
+  // has, so the one real precondition is that omp is installed, not that it
+  // is the active engine. Without it the answer is an unavailable snapshot,
+  // a VALUE the meter hides on, and nothing is spawned to find that out.
+  if (!usageReaderInstalled()) {
     return NextResponse.json(
-      emptySnapshot(`${harness.displayName} does not report plan quota to Cody.`),
+      emptySnapshot("omp is not installed, so account quota cannot be read."),
       { headers: { "Cache-Control": "no-store" } },
     );
   }
@@ -49,9 +45,11 @@ export async function GET(request: Request) {
     // are always derived from the SAME snapshot — the single-source-of-truth
     // property the composer, the subagents and the fallback chains all
     // depend on. It never throws and writes nothing when nothing moved.
+    // Observation runs for every engine; writes to omp's config only when
+    // omp is the active engine (reconcile.ts owns that gate).
     const routing = await reconcileRoutingForRequest(snapshot);
     return NextResponse.json(
-      { ...routing.snapshot, routing: { autoBind: routing.autoBind, blackouts: routing.blackouts, roleChanges: routing.roleChanges, agentChanges: routing.agentChanges } },
+      { ...routing.snapshot, routing: { autoBind: routing.autoBind, blackouts: routing.blackouts, roleChanges: routing.roleChanges, chainChanges: routing.chainChanges, agentChanges: routing.agentChanges } },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {

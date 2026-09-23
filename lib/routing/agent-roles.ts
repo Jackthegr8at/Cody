@@ -17,8 +17,10 @@
  *   resolution falls through to `activeModelPattern` — the PARENT's model.
  *   Ask an Opus session for a cheap subagent and you get Opus, silently, on
  *   every spawn.
- * - An agent with no `model:` at all (scout, reviewer, security-reviewer)
- *   takes that same parent-model path by definition.
+ * - An agent with no `model:` at all (scout, security-reviewer) takes that
+ *   same parent-model path by definition. The bundled reviewer declares
+ *   `model: "@slow"` (omp 18.2), and an override must keep that role rather
+ *   than trade it for a cheaper one.
  *
  * `task.agentModelOverrides` outranks agent frontmatter, and a role alias
  * (`@task`, `@smol`, …) restores both properties at once: the role's
@@ -36,14 +38,15 @@ import { parseRoleSelector } from "./role-binding";
 
 /** Role alias each known agent should resolve through. The mapping follows
  * the agent's stated job, which is also how omp's own bundled definitions
- * are written (`task` → `@task`, `sonic` → `@smol`). */
+ * are written (`task` → `@task`, `sonic` → `@smol`, `reviewer` → `@slow`).
+ * A security review is the same careful reading, so it takes `@slow` too. */
 export const DEFAULT_AGENT_ROLES: Record<string, string> = {
 	task: "@task",
 	sonic: "@smol",
 	luna: "@smol",
 	scout: "@smol",
-	reviewer: "@task",
-	"security-reviewer": "@task",
+	reviewer: "@slow",
+	"security-reviewer": "@slow",
 };
 
 export interface AgentRoleChange {

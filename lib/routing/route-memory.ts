@@ -22,6 +22,10 @@
  *   fallback chain, and keeps the user's original assignment as `baseline`
  *   so it can be restored exactly. Without the baseline the rebinding would
  *   be a one-way edit of the user's config.
+ * - **Chain bindings.** While every account of a provider is spent, Cody
+ *   drops that provider's entries from each `retry.fallbackChains` list,
+ *   keeping the user's full list as `baseline` so the entries come back the
+ *   moment the provider does. Same shape and same rules as role bindings.
  *
  * Cody-owned state: it lives in the instance data dir, never in omp's
  * config.yml, so an engine update or switch cannot lose or rewrite it.
@@ -36,6 +40,8 @@ import { getAgentDir } from "../omp/paths";
 import { isRecord } from "../type-guards";
 
 export const ROUTE_MEMORY_FILE = "cody-route-memory.json";
+// Still 1: `chains` is an additive key. A file without it parses as "no
+// chain filtered", which is exactly what an older Cody left behind.
 const FILE_VERSION = 1;
 
 export type BlackoutKind = "quota" | "credits";
@@ -52,6 +58,9 @@ export interface ProviderBlackout {
 	until: string | null;
 	/** Human-facing reason, shown verbatim in the routing notice. */
 	reason: string;
+	/** `"block"` when the only evidence is omp refusing the credential after
+	 * one rejected request, not a measured quota. Absent = measured. */
+	source?: "block";
 }
 
 export interface RoleBinding {
@@ -64,9 +73,39 @@ export interface RoleBinding {
 	boundAt: string;
 }
 
+/** One chain entry Cody left out, and why, in words the UI can show. */
+export interface DroppedChainEntry {
+	entry: string;
+	provider: string;
+	/** "out of credits ($0.40 left)", "all accounts exhausted until …",
+	 * "blocked after a rejected request until …". */
+	reason: string;
+	/** When the provider is expected back; null for a prepaid balance, which
+	 * comes back only when money does. */
+	until: string | null;
+	/** `credits` = prepaid balance; `quota` = measured windows on every
+	 * account; `block` = omp refused every credential after a rejected
+	 * request, which is a deadline, not a measurement. */
+	source: "credits" | "quota" | "block";
+}
+
+export interface ChainBinding {
+	/** The `retry.fallbackChains` key: a role name or a model selector. */
+	key: string;
+	/** The user's own chain, in their order, restored verbatim. */
+	baseline: string[];
+	/** What Cody wrote under the key instead. */
+	active: string[];
+	/** The entries of `baseline` missing from `active`, with their reasons. */
+	dropped: DroppedChainEntry[];
+	reason: string;
+	boundAt: string;
+}
+
 export interface RouteMemory {
 	blackouts: ProviderBlackout[];
 	bindings: Record<string, RoleBinding>;
+	chains: Record<string, ChainBinding>;
 }
 
 interface RouteMemoryFile extends RouteMemory {
@@ -74,7 +113,7 @@ interface RouteMemoryFile extends RouteMemory {
 	[extra: string]: unknown;
 }
 
-const EMPTY: RouteMemory = { blackouts: [], bindings: {} };
+const EMPTY: RouteMemory = { blackouts: [], bindings: {}, chains: {} };
 
 
 /**
@@ -117,6 +156,8 @@ function normalizeBlackout(value: unknown): ProviderBlackout | null {
 		since: typeof value.since === "string" ? value.since : new Date().toISOString(),
 		until: typeof value.until === "string" ? value.until : null,
 		reason: typeof value.reason === "string" ? value.reason : "",
+		// Files written before `source` existed carry a block only as its label.
+		...(value.source === "block" || (value.source === undefined && value.reason === "rate-limit block") ? { source: "block" as const } : {}),
 	};
 }
 
@@ -129,6 +170,39 @@ function normalizeBinding(role: string, value: unknown): RoleBinding | null {
 		role,
 		baseline,
 		active,
+		reason: typeof value.reason === "string" ? value.reason : "",
+		boundAt: typeof value.boundAt === "string" ? value.boundAt : new Date().toISOString(),
+	};
+}
+
+function selectorList(value: unknown): string[] | null {
+	if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) return null;
+	return value;
+}
+
+function normalizeChainBinding(key: string, value: unknown): ChainBinding | null {
+	if (!isRecord(value)) return null;
+	const baseline = selectorList(value.baseline);
+	const active = selectorList(value.active);
+	if (!baseline || !active || baseline.length === 0) return null;
+	const dropped = Array.isArray(value.dropped)
+		? value.dropped.flatMap((item): DroppedChainEntry[] => {
+			if (!isRecord(item) || typeof item.entry !== "string" || typeof item.provider !== "string") return [];
+			const source = item.source === "credits" || item.source === "block" ? item.source : "quota";
+			return [{
+				entry: item.entry,
+				provider: item.provider,
+				reason: typeof item.reason === "string" ? item.reason : "",
+				until: typeof item.until === "string" ? item.until : null,
+				source,
+			}];
+		})
+		: [];
+	return {
+		key,
+		baseline,
+		active,
+		dropped,
 		reason: typeof value.reason === "string" ? value.reason : "",
 		boundAt: typeof value.boundAt === "string" ? value.boundAt : new Date().toISOString(),
 	};
@@ -154,10 +228,18 @@ function readFile(): RouteMemoryFile {
 			if (normalized) bindings[role] = normalized;
 		}
 	}
+	const chains: Record<string, ChainBinding> = {};
+	if (isRecord(parsed.chains)) {
+		for (const [key, entry] of Object.entries(parsed.chains)) {
+			const normalized = normalizeChainBinding(key, entry);
+			if (normalized) chains[key] = normalized;
+		}
+	}
 	const file = { ...parsed } as RouteMemoryFile;
 	file.version = FILE_VERSION;
 	file.blackouts = blackouts;
 	file.bindings = bindings;
+	file.chains = chains;
 	return file;
 }
 
@@ -185,6 +267,7 @@ export function readRouteMemory(now = Date.now()): RouteMemory {
 	return {
 		blackouts: file.blackouts.filter((blackout) => blackoutActive(blackout, now)),
 		bindings: { ...file.bindings },
+		chains: { ...file.chains },
 	};
 }
 
@@ -193,21 +276,32 @@ function sameTarget(a: ProviderBlackout, b: { provider: string; accountId: strin
 }
 
 /**
- * Replace the remembered blackout set with `observed`, keeping the original
- * `since` of anything still blacked out.
+ * Replace the remembered blackout set with what `observed` and the read's
+ * coverage justify, keeping the original `since` of anything still blacked
+ * out.
  *
- * Wholesale replacement is deliberate: the caller derives `observed` from
- * one complete read, so a provider absent from it is a provider that is no
- * longer exhausted. Merging instead would make a blackout immortal the first
- * time a reset time was missing.
+ * A remembered blackout the read COVERED (it could see that account or
+ * balance) and did not re-observe is cleared: the provider showed headroom,
+ * and that is the early-restore path. One the read did not cover (a failed
+ * read, a provider that dropped out of the report) is kept until its own
+ * `until`: silence is not headroom. `covered` defaults to "the read saw
+ * everything", the wholesale replacement a complete read deserves.
  */
-export function recordBlackouts(observed: readonly ProviderBlackout[], now = Date.now()): ProviderBlackout[] {
+export function recordBlackouts(
+	observed: readonly ProviderBlackout[],
+	now = Date.now(),
+	covered: (blackout: ProviderBlackout) => boolean = () => true,
+): ProviderBlackout[] {
 	const file = readFile();
 	const previous = file.blackouts.filter((blackout) => blackoutActive(blackout, now));
 	const next = observed.map((blackout) => {
 		const existing = previous.find((entry) => sameTarget(entry, blackout));
 		return existing ? { ...blackout, since: existing.since } : blackout;
 	});
+	for (const blackout of previous) {
+		if (next.some((entry) => sameTarget(entry, blackout))) continue;
+		if (!covered(blackout)) next.push(blackout);
+	}
 	const changed = next.length !== previous.length
 		|| next.some((blackout) => {
 			const existing = previous.find((entry) => sameTarget(entry, blackout));
@@ -228,4 +322,28 @@ export function clearRoleBinding(role: string): void {
 	const bindings = { ...file.bindings };
 	delete bindings[role];
 	writeFile({ ...file, bindings });
+}
+
+export function writeChainBinding(binding: ChainBinding): void {
+	const file = readFile();
+	writeFile({ ...file, chains: { ...file.chains, [binding.key]: binding } });
+}
+
+export function clearChainBinding(key: string): void {
+	const file = readFile();
+	if (!(key in file.chains)) return;
+	const chains = { ...file.chains };
+	delete chains[key];
+	writeFile({ ...file, chains });
+}
+
+/** Forget one remembered blackout, after its cause was removed by hand (a
+ * block lifted from Settings). A read that no longer sees the account would
+ * otherwise keep it until its own deadline. Returns whether one was removed. */
+export function clearBlackout(provider: string, accountId: string | null): boolean {
+	const file = readFile();
+	const blackouts = file.blackouts.filter((blackout) => !sameTarget(blackout, { provider, accountId }));
+	if (blackouts.length === file.blackouts.length) return false;
+	writeFile({ ...file, blackouts });
+	return true;
 }

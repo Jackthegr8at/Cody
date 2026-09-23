@@ -22,6 +22,7 @@ import type { ThinkingModelMeta } from "@/lib/thinking-levels";
 import { AgentCommandError, sendAgentCommand } from "@/lib/agent-client";
 import { engineSupports } from "@/lib/engine-capabilities";
 import { translate } from "@/lib/i18n";
+import { describeEngineError, errorDedupeKey, type ErrorKind } from "@/lib/error-text";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { createMessageUpdateCoalescer, type MessageUpdateCoalescer } from "@/lib/message-update-coalescer";
@@ -424,14 +425,23 @@ export type NoticeItem = {
   message: string;
   type: NoticeType;
   exiting?: boolean;
+  /** Set when this notice was produced by {@link engineErrorNotice}/
+   * {@link noticeFromCaughtError}: a normalized key so a repeat of the same
+   * underlying error bumps this notice's `count` instead of piling up a new
+   * one, and its errorKind so a refusal can render its own icon/tone. */
+  dedupeKey?: string;
+  errorKind?: ErrorKind;
+  /** How many times this same (deduped) notice has fired since it last
+   * appeared. Starts undefined/1; NoticeShelf shows "×2" once it climbs. */
+  count?: number;
 };
 
-type NoticeState = {
+export type NoticeState = {
   visible: NoticeItem[];
   pending: NoticeItem[];
 };
 
-type NoticeAction =
+export type NoticeAction =
   | { type: "add"; notice: NoticeItem }
   | { type: "mark_oldest_exiting" }
   | { type: "remove"; id: string };
@@ -506,6 +516,80 @@ function fallbackAppliedMessage(attribution: ModelFallbackAttribution, from: str
 
 function fallbackSucceededMessage(attribution: ModelFallbackAttribution, model: string): string {
   return translate("agentSession.fallbackSucceeded", { job: fallbackJobLabel(attribution), model });
+}
+
+/** Notices get a warning (amber) tone when the situation isn't really an
+ * error to fix so much as something to understand: the model made a choice
+ * (refusal), or an account condition that resolves on its own (usage/credits)
+ * or without user action once the provider recovers (overloaded). Everything
+ * else — auth, outdated engines, transport failures, unrecognized text — is a
+ * real error tone. */
+function noticeToneForErrorKind(kind: ErrorKind): NoticeType {
+  switch (kind) {
+    case "refusal":
+    case "usage":
+    case "credits":
+    case "overloaded":
+      return "warning";
+    default:
+      return "error";
+  }
+}
+
+/** The single place raw engine/provider error text turns into what a person
+ * reads: `hooks/useAgentSession.ts`'s message_end/auto_retry/notice/prompt_error
+ * handling and its generic catch blocks all funnel through this (directly or
+ * via {@link noticeFromCaughtError}), so an ACP engine's raw `notice` text
+ * (`lib/harness/acp-session.ts`, e.g. "Claude Code: Error: 429 {...}") gets the
+ * exact same cleanup and refusal/usage/etc. distinction as omp's own events —
+ * one choke point, not one per engine. Returns null for a user-initiated
+ * abort: that is not a failure to report, just the turn stopping. */
+function engineErrorNotice(
+  rawMessage: string,
+  fallbackProvider?: string,
+): { type: NoticeType; message: string; dedupeKey: string; kind: ErrorKind } | null {
+  const described = describeEngineError(rawMessage);
+  if (described.kind === "aborted") return null;
+  const provider = described.provider ?? fallbackProvider ?? translate("agentSession.genericProvider");
+  let message: string;
+  switch (described.kind) {
+    case "refusal":
+      message = translate("agentSession.errorRefusal", { provider, detail: described.detail });
+      break;
+    case "outdated":
+      message = translate("agentSession.errorOutdated", { provider });
+      break;
+    case "credits":
+      message = translate("agentSession.errorCredits", { provider, detail: described.detail });
+      break;
+    case "auth":
+      // Same hint the credentials branch below used to give inline: point at
+      // the one panel that actually fixes it.
+      message = `${described.detail.replace(/[.\s]+$/, "")}. ${translate("agentSession.providerKeysHint")}`;
+      break;
+    case "overloaded":
+      message = translate("agentSession.errorOverloaded", { provider, detail: described.detail });
+      break;
+    case "usage":
+      message = translate("agentSession.errorUsage", { detail: described.detail });
+      break;
+    case "transport":
+      message = translate("agentSession.errorTransport", { detail: described.detail });
+      break;
+    default:
+      message = described.detail;
+  }
+  return { type: noticeToneForErrorKind(described.kind), message, dedupeKey: errorDedupeKey(rawMessage), kind: described.kind };
+}
+
+/** Same as {@link engineErrorNotice}, starting from a caught JS `unknown`
+ * rather than a raw string — the shape every `catch (e)` block already has. */
+function noticeFromCaughtError(
+  error: unknown,
+  fallbackProvider?: string,
+): { type: NoticeType; message: string; dedupeKey: string; kind: ErrorKind } | null {
+  const raw = error instanceof Error ? error.message : String(error);
+  return engineErrorNotice(raw, fallbackProvider);
 }
 
 export type AgentPhase =
@@ -661,6 +745,11 @@ const PROMPT_SEND_TIMEOUT_MS = 30_000;
 // reads two refs and sets a boolean React bails out of when unchanged.
 const STREAM_HEALTH_POLL_MS = 2_000;
 const MAX_NOTICES = 5;
+// However many other notices are queued, a burst of failures (a retry storm,
+// several subagents erroring together) must not fill the whole shelf with
+// red: at most two error-toned notices are ever visible at once, so an
+// unrelated info/success notice always has room.
+const MAX_VISIBLE_ERROR_NOTICES = 2;
 const NOTICE_VISIBLE_MS = 5000;
 const NOTICE_EXIT_ANIMATION_MS = 180;
 const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " ", "Space", "Spacebar"]);
@@ -710,36 +799,67 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function markOldestNoticeExiting(notices: NoticeItem[]): NoticeItem[] {
-  const index = notices.findIndex((notice) => !notice.exiting);
+function markOldestNoticeExiting(notices: NoticeItem[], matches: (notice: NoticeItem) => boolean = () => true): NoticeItem[] {
+  const index = notices.findIndex((notice) => !notice.exiting && matches(notice));
   if (index === -1) return notices;
   return notices.map((notice, i) => (
     i === index ? { ...notice, exiting: true } : notice
   ));
 }
 
-function fillPendingNotices(visible: NoticeItem[], pending: NoticeItem[]): NoticeState {
-  let nextVisible = visible;
-  let nextPending = pending;
-  while (nextPending.length > 0 && nextVisible.length < MAX_NOTICES) {
-    const [next, ...rest] = nextPending;
-    nextVisible = [...nextVisible, next];
-    nextPending = rest;
-  }
-  if (nextPending.length > 0 && !nextVisible.some((notice) => notice.exiting)) {
-    nextVisible = markOldestNoticeExiting(nextVisible);
-  }
-  return { visible: nextVisible, pending: nextPending };
+function visibleErrorCount(notices: NoticeItem[]): number {
+  return notices.filter((notice) => notice.type === "error" && !notice.exiting).length;
 }
 
-function noticeReducer(state: NoticeState, action: NoticeAction): NoticeState {
+/** True once a notice with the same `dedupeKey` already occupies `list`: the
+ * caller bumps that one's `count` instead of adding a second copy. */
+function bumpDuplicate(list: NoticeItem[], incoming: NoticeItem): NoticeItem[] | null {
+  if (!incoming.dedupeKey) return null;
+  const index = list.findIndex((notice) => notice.dedupeKey === incoming.dedupeKey);
+  if (index === -1) return null;
+  const next = [...list];
+  // Un-exiting a bumped notice restarts its on-screen clock: the effect that
+  // schedules eviction keys off `noticeState.visible`'s identity, which this
+  // new array reference already invalidates.
+  next[index] = { ...next[index], count: (next[index].count ?? 1) + 1, exiting: false };
+  return next;
+}
+
+function fillPendingNotices(visible: NoticeItem[], pending: NoticeItem[]): NoticeState {
+  let nextVisible = visible;
+  const stillPending: NoticeItem[] = [];
+  for (const item of pending) {
+    const blockedByErrorCap = item.type === "error" && visibleErrorCount(nextVisible) >= MAX_VISIBLE_ERROR_NOTICES;
+    if (nextVisible.length >= MAX_NOTICES || blockedByErrorCap) {
+      stillPending.push(item);
+      continue;
+    }
+    nextVisible = [...nextVisible, item];
+  }
+  if (stillPending.length > 0 && !nextVisible.some((notice) => notice.exiting)) {
+    // An error notice waiting on the error cap needs an ERROR slot freed, not
+    // just any slot — evicting the oldest info/success notice would not lift
+    // the cap that is actually blocking it.
+    const headIsError = stillPending[0]?.type === "error";
+    nextVisible = markOldestNoticeExiting(nextVisible, headIsError ? (notice) => notice.type === "error" : undefined);
+  }
+  return { visible: nextVisible, pending: stillPending };
+}
+
+export function noticeReducer(state: NoticeState, action: NoticeAction): NoticeState {
   switch (action.type) {
     case "add": {
-      if (state.visible.some((notice) => notice.exiting) || state.visible.length >= MAX_NOTICES) {
+      const visibleBump = bumpDuplicate(state.visible, action.notice);
+      if (visibleBump) return { ...state, visible: visibleBump };
+      const pendingBump = bumpDuplicate(state.pending, action.notice);
+      if (pendingBump) return { ...state, pending: pendingBump };
+
+      const errorCapHit = action.notice.type === "error" && visibleErrorCount(state.visible) >= MAX_VISIBLE_ERROR_NOTICES;
+      if (state.visible.some((notice) => notice.exiting) || state.visible.length >= MAX_NOTICES || errorCapHit) {
         return {
           visible: state.visible.some((notice) => notice.exiting)
             ? state.visible
-            : markOldestNoticeExiting(state.visible),
+            : markOldestNoticeExiting(state.visible, errorCapHit ? (notice) => notice.type === "error" : undefined),
           pending: [...state.pending, action.notice],
         };
       }
@@ -2315,7 +2435,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, []);
 
-  const addNotice = useCallback((notice: { id?: string; message: string; type?: NoticeType }) => {
+  const addNotice = useCallback((notice: { id?: string; message: string; type?: NoticeType; dedupeKey?: string; errorKind?: ErrorKind }) => {
     const message = notice.message.trim();
     if (!message) return;
     dispatchNotice({
@@ -2324,10 +2444,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         id: notice.id ?? createNoticeId(),
         message,
         type: notice.type ?? "info",
+        dedupeKey: notice.dedupeKey,
+        errorKind: notice.errorKind,
       },
     });
   }, []);
   addNoticeRef.current = addNotice;
+
+  /** Route a raw engine/provider error string through {@link engineErrorNotice}
+   * and post the result as a notice — or say nothing at all for a
+   * user-initiated abort, which is not a failure to report. */
+  const addEngineErrorNotice = useCallback((rawMessage: string, fallbackProvider?: string) => {
+    const described = engineErrorNotice(rawMessage, fallbackProvider);
+    if (!described) return;
+    addNotice({ type: described.type, message: described.message, dedupeKey: described.dedupeKey, errorKind: described.kind });
+  }, [addNotice]);
 
   const dispatchPendingModelSwitch = useCallback(async (): Promise<boolean> => {
     const pending = modelSwitchPendingRef.current;
@@ -2376,7 +2507,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       if (current === applying && sameSessionControlScope(modelSwitchScopeRef.current, applying.scope)) {
         writeModelSwitchPending(null);
-        addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+        const described = noticeFromCaughtError(error);
+        if (described) addNotice({ type: described.type, message: described.message, dedupeKey: described.dedupeKey, errorKind: described.kind });
       } else if (
         current?.phase === "waiting"
         && sameSessionControlScope(current.scope, sessionControlScope(sid, { provider: applying.provider, modelId: applying.modelId }))
@@ -2989,23 +3121,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // overwritten by this finished run's snapshot.
         void finishPromptWithoutStream(sessionIdRef.current, promptRunIdRef.current);
         break;
-      case "prompt_error":
-        addNotice({ type: "error", message: (event.errorMessage as string | undefined) ?? translate("agentSession.commandFailed") });
+      case "prompt_error": {
+        const raw = (event.errorMessage as string | undefined) ?? translate("agentSession.commandFailed");
+        addEngineErrorNotice(raw, engineNameRef.current);
         // A failed prompt is terminal: no agent_end follows it. Without this the
         // spinner and the locked input wait for the 15s reconcile poll. Fenced
         // with the run id for the same reason as prompt_result above.
         if (agentRunningRef.current) void finishPromptWithoutStream(sessionIdRef.current, promptRunIdRef.current);
         break;
+      }
       case "notice": {
         const level = event.level as string | undefined;
         const message = (event.message as string | undefined)?.trim() ?? "";
         if (/^xd:\/\/:\s*mounted\s+mcp__/i.test(message)) {
           toast.info("MCP tools updated", message, { clamp: true });
+        } else if (level === "error" || level === "warning") {
+          // This is the one choke point every ACP engine's raw notice text
+          // (`lib/harness/acp-session.ts`, e.g. "Claude Code: Error: 429
+          // {...}") passes through, same as omp's own events — so a refusal,
+          // an outdated engine build or a rate limit reads identically no
+          // matter which engine said it.
+          addEngineErrorNotice(message, engineNameRef.current);
         } else {
-          addNotice({
-            type: level === "error" ? "error" : level === "warning" ? "warning" : "info",
-            message,
-          });
+          addNotice({ type: "info", message });
         }
         break;
       }
@@ -3176,14 +3314,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const detail = typeof completed.errorMessage === "string" && completed.errorMessage.trim()
             ? completed.errorMessage.trim()
             : translate("agentSession.commandFailed");
-          // A credentials failure gets the one hint that actually fixes it:
-          // the keys panel. Anything else (context overflow, a provider
-          // outage) is left in the provider's own words.
-          const looksLikeCredentials = /\b(401|403)\b|\b(unauthori[sz]ed|forbidden|api[ _-]?key|credential|authenticat|invalid[ _-]?(x-)?api|no (provider|api) key)/i.test(detail);
-          addNotice({
-            type: "error",
-            message: looksLikeCredentials ? `${detail.replace(/[.\s]+$/, "")}. ${translate("agentSession.providerKeysHint")}` : detail,
-          });
+          // describeEngineError tells a refusal from an auth failure from an
+          // outdated-engine error from a plain outage, and cleans out the
+          // JSON/request-id/URL junk a provider body carries; the auth branch
+          // still gets the one hint that actually fixes it, the keys panel.
+          addEngineErrorNotice(detail, engineNameRef.current);
           const hasContent = Array.isArray(completed.content) ? completed.content.length > 0 : Boolean(completed.content);
           if (hasContent) setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
         } else if (completed) {
@@ -3262,13 +3397,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       case "auto_retry_start": {
         const attribution = fallbackAttributionForRole(event.role, subagentsRef.current);
-        const errorMessage = typeof event.errorMessage === "string" && event.errorMessage.trim()
+        const rawErrorMessage = typeof event.errorMessage === "string" && event.errorMessage.trim()
           ? event.errorMessage.trim()
           : undefined;
+        // The retry banner is a compact one-liner, not a full notice — clean
+        // the provider's text the same way (no JSON, no request id, no
+        // trailing URL) but keep it as the bare detail rather than wrapping
+        // it in a refusal/usage sentence, which would not fit next to
+        // "Retrying 2/5".
+        const errorMessage = rawErrorMessage ? describeEngineError(rawErrorMessage).detail : undefined;
         if (attribution.job.kind === "main") {
           setRetryInfo({ attempt: event.attempt as number, maxAttempts: event.maxAttempts as number, errorMessage });
         }
-        if (errorMessage) retryErrorByJobRef.current.set(fallbackJobKey(attribution.job), errorMessage);
+        if (rawErrorMessage) retryErrorByJobRef.current.set(fallbackJobKey(attribution.job), rawErrorMessage);
         break;
       }
       case "auto_retry_end": {
@@ -3521,7 +3662,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, beginAuthoritativeModelSync, consumeQueuedMessage, dispatchPendingModelSwitch, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, holdTailForReader, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, refreshTodoState, resetSubagentActivityState]);
+  }, [addNotice, addEngineErrorNotice, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, beginAuthoritativeModelSync, consumeQueuedMessage, dispatchPendingModelSwitch, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, holdTailForReader, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, refreshTodoState, resetSubagentActivityState]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {
@@ -3637,7 +3778,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             : prev;
         });
       }
-      const detail = e instanceof Error ? e.message : String(e);
+      const detail = describeEngineError(e instanceof Error ? e.message : String(e)).detail;
       addNotice({
         type: "error",
         message: e instanceof EventStreamConnectionError
@@ -3709,7 +3850,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
       }
       optimisticUserMessageKeyRef.current = null;
-      const detail = e instanceof Error ? e.message : String(e);
+      const detail = describeEngineError(e instanceof Error ? e.message : String(e)).detail;
       addNotice({ type: "error", message: detail });
       // The interrupted turn keeps running; what failed is THIS message, and it
       // was never delivered. Same banner as a failed first send.
@@ -3958,7 +4099,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (fastModePendingRequestRef.current !== request || !sameSessionControlScope(fastModeScopeRef.current, scope)) return;
         console.error("Failed to change Fast mode:", error);
         if (enabled && isFastModeUnavailableError(error)) setFastModeUnavailable(true);
-        addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+        const described = noticeFromCaughtError(error);
+        if (described) addNotice({ type: described.type, message: described.message, dedupeKey: described.dedupeKey, errorKind: described.kind });
       } finally {
         if (fastModePendingRequestRef.current === request && sameSessionControlScope(fastModeScopeRef.current, scope)) {
           fastModePendingLatchRef.current = false;
@@ -3976,7 +4118,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await sendAgentCommand(sid, { type: "set_auto_retry", enabled });
     } catch (error) {
       setAutoRetryEnabled((current) => (current === enabled ? !enabled : current));
-      addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+      const described = noticeFromCaughtError(error);
+      if (described) addNotice({ type: described.type, message: described.message, dedupeKey: described.dedupeKey, errorKind: described.kind });
     }
   }, [addNotice]);
 
@@ -3989,7 +4132,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await sendAgentCommand(sid, { type: "set_interrupt_mode", mode });
     } catch (error) {
       console.error("Failed to change interrupt mode:", error);
-      addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+      const described = noticeFromCaughtError(error);
+      if (described) addNotice({ type: described.type, message: described.message, dedupeKey: described.dedupeKey, errorKind: described.kind });
     }
   }, [addNotice]);
 
@@ -4002,7 +4146,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await sendAgentCommand(sid, { type: "set_auto_compaction", enabled });
     } catch (error) {
       console.error("Failed to change auto-compaction:", error);
-      addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+      const described = noticeFromCaughtError(error);
+      if (described) addNotice({ type: described.type, message: described.message, dedupeKey: described.dedupeKey, errorKind: described.kind });
     }
   }, [addNotice]);
 
@@ -4015,7 +4160,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await sendAgentCommand(sid, { type: "set_steering_mode", mode });
     } catch (error) {
       console.error("Failed to change steering mode:", error);
-      addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+      const described = noticeFromCaughtError(error);
+      if (described) addNotice({ type: described.type, message: described.message, dedupeKey: described.dedupeKey, errorKind: described.kind });
     }
   }, [addNotice]);
 
@@ -4028,7 +4174,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await sendAgentCommand(sid, { type: "set_follow_up_mode", mode });
     } catch (error) {
       console.error("Failed to change follow-up mode:", error);
-      addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+      const described = noticeFromCaughtError(error);
+      if (described) addNotice({ type: described.type, message: described.message, dedupeKey: described.dedupeKey, errorKind: described.kind });
     }
   }, [addNotice]);
 
@@ -4041,7 +4188,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       void refreshLiveModelState(sid);
     } catch (error) {
       console.error("Failed to cycle model:", error);
-      addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+      const described = noticeFromCaughtError(error);
+      if (described) addNotice({ type: described.type, message: described.message, dedupeKey: described.dedupeKey, errorKind: described.kind });
     }
   }, [addNotice, refreshLiveModelState]);
 
@@ -4054,7 +4202,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       void refreshLiveModelState(sid);
     } catch (error) {
       console.error("Failed to cycle thinking level:", error);
-      addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+      const described = noticeFromCaughtError(error);
+      if (described) addNotice({ type: described.type, message: described.message, dedupeKey: described.dedupeKey, errorKind: described.kind });
     }
   }, [addNotice, refreshLiveModelState]);
 
@@ -4067,7 +4216,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await sendAgentCommand(sid, { type: "abort_retry" });
     } catch (error) {
       console.error("Failed to abort retry:", error);
-      addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+      const described = noticeFromCaughtError(error);
+      if (described) addNotice({ type: described.type, message: described.message, dedupeKey: described.dedupeKey, errorKind: described.kind });
     }
   }, [addNotice]);
 
@@ -4079,7 +4229,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await loadSession(sid, true);
       void refreshLiveModelState(sid);
     } catch (error) {
-      addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+      const described = noticeFromCaughtError(error);
+      if (described) addNotice({ type: described.type, message: described.message, dedupeKey: described.dedupeKey, errorKind: described.kind });
     }
   }, [addNotice, loadSession, refreshLiveModelState]);
 
@@ -4305,7 +4456,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setQueuedMessages((prev) => ({ ...prev, steering: [...prev.steering, message] }));
       } catch (error) {
         console.error("Failed to steer:", error);
-        addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+        const described = noticeFromCaughtError(error);
+        if (described) addNotice({ type: described.type, message: described.message, dedupeKey: described.dedupeKey, errorKind: described.kind });
         throw error;
       }
     }, [addNotice]);
@@ -4335,7 +4487,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           : { ...prev, followUp: [...prev.followUp, message] });
       } catch (error) {
         console.error("Failed to queue prompt:", error);
-        addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+        const described = noticeFromCaughtError(error);
+        if (described) addNotice({ type: described.type, message: described.message, dedupeKey: described.dedupeKey, errorKind: described.kind });
         throw error;
       }
     }, [addNotice]);
@@ -4358,7 +4511,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setQueuedMessages((prev) => ({ ...prev, followUp: [...prev.followUp, message] }));
       } catch (error) {
         console.error("Failed to follow up:", error);
-        addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+        const described = noticeFromCaughtError(error);
+        if (described) addNotice({ type: described.type, message: described.message, dedupeKey: described.dedupeKey, errorKind: described.kind });
         throw error;
       }
     }, [addNotice]);
@@ -4410,7 +4564,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (thinkingLevelPendingRequestRef.current !== request || !sameSessionControlScope(thinkingLevelScopeRef.current, scope)) return;
       thinkingConfiguredAutoRef.current = previousConfiguredAuto;
       console.error("Failed to set thinking level:", error);
-      addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+      const described = noticeFromCaughtError(error);
+      if (described) addNotice({ type: described.type, message: described.message, dedupeKey: described.dedupeKey, errorKind: described.kind });
     } finally {
       if (thinkingLevelPendingRequestRef.current === request && sameSessionControlScope(thinkingLevelScopeRef.current, scope)) {
         setThinkingLevelPending(false);

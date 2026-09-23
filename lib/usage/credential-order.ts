@@ -144,6 +144,7 @@ export function applyCredentialBlocks(
     windowMs: null,
     tier: null,
     shared: true,
+    source: "block" as const,
   });
 
   const claimed = new Set<number>();
