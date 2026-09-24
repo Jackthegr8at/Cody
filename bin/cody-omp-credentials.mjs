@@ -1,7 +1,11 @@
 #!/usr/bin/env bun
-/** Isolated Bun bridge to OMP's installed AuthStorage credential list/removal API. */
+/** Isolated Bun bridge to OMP's installed AuthStorage credential API. Listing
+ * and block clearing use AuthStorage; individual permanent removal is a
+ * guarded local-SQLite operation because OMP's public remove API is a
+ * soft-delete that creates the disabled tombstone Cody is trying to avoid. */
+import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 console.log = (...args) => console.error(...args);
 console.info = console.log;
@@ -22,7 +26,112 @@ async function loadStorage(packageRoot, agentDir) {
   try { aiPath = require.resolve("@oh-my-pi/pi-ai/auth-storage.js"); utilsPath = require.resolve("@oh-my-pi/pi-utils/dirs.js"); } catch { throw new Error("OMP's installed credential modules are unavailable."); }
   const ai = await import(pathToFileURL(aiPath).href); const utils = await import(pathToFileURL(utilsPath).href);
   if (typeof ai.AuthStorage?.create !== "function" || typeof utils.getAgentDbPath !== "function") throw new Error("Installed OMP does not expose AuthStorage credential support.");
-  const storage = await ai.AuthStorage.create(utils.getAgentDbPath()); await storage.reload(); return storage;
+  const dbPath = utils.getAgentDbPath();
+  const storage = await ai.AuthStorage.create(dbPath); await storage.reload(); return { storage, dbPath };
+}
+
+/** Open only an existing local SQLite file. A missing/non-absolute path is the
+ * broker-backed/unknown-store case and must fail closed rather than falling
+ * back to AuthStorage.removeCredential(), which is not permanent. */
+async function openLocalDatabase(dbPath) {
+  if (typeof dbPath !== "string" || !isAbsolute(dbPath) || !existsSync(dbPath)) {
+    throw new Error("OMP's local credential database is unavailable; permanent removal is unsupported for broker-backed stores.");
+  }
+  try {
+    const sqlite = await import("bun:sqlite");
+    return new sqlite.Database(dbPath);
+  } catch {
+    // The Node test harness has no Bun runtime. Keeping this fallback here
+    // also makes the guard independently testable without touching OMP's
+    // credential implementation.
+    try {
+      const sqlite = await import("node:sqlite");
+      return new sqlite.DatabaseSync(dbPath);
+    } catch {
+      throw new Error("The installed runtime cannot open OMP's local SQLite credential database.");
+    }
+  }
+}
+
+function closeStatement(statement) { statement?.finalize?.(); }
+function allRows(db, sql, params = []) {
+  const statement = db.prepare(sql);
+  try { return statement.all(...params); } finally { closeStatement(statement); }
+}
+function oneRow(db, sql, params = []) {
+  const statement = db.prepare(sql);
+  try { return statement.get(...params); } finally { closeStatement(statement); }
+}
+function runStatement(db, sql, params = []) {
+  const statement = db.prepare(sql);
+  try { return statement.run(...params); } finally { closeStatement(statement); }
+}
+function execSql(db, sql) { db.exec(sql); }
+
+function tableExists(db, tableName) {
+  return Boolean(oneRow(db, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", [tableName]));
+}
+
+function assertCredentialSchema(db) {
+  const columns = new Set(allRows(db, "PRAGMA table_info(auth_credentials)").map((row) => row?.name));
+  const required = ["id", "provider", "credential_type", "data", "disabled_cause"];
+  if (!required.every((column) => columns.has(column))) {
+    throw new Error("OMP's auth_credentials schema is not recognized; permanent removal was not attempted.");
+  }
+  for (const table of ["auth_credential_blocks", "auth_credential_refresh_leases"]) {
+    if (!tableExists(db, table)) continue;
+    const dependentColumns = new Set(allRows(db, `PRAGMA table_info(${table})`).map((row) => row?.name));
+    if (!dependentColumns.has("credential_id")) {
+      throw new Error(`OMP's ${table} schema is not recognized; permanent removal was not attempted.`);
+    }
+  }
+}
+
+function deleteDependentRows(db, credentialId) {
+  for (const table of ["auth_credential_blocks", "auth_credential_refresh_leases"]) {
+    if (tableExists(db, table)) runStatement(db, `DELETE FROM ${table} WHERE credential_id = ?`, [credentialId]);
+  }
+}
+
+async function reloadStorage(storage) {
+  try { await storage.reload?.(); } catch {
+    // The committed SQLite deletion is authoritative. A later Cody request
+    // creates a fresh AuthStorage; a stale in-memory view must not turn a
+    // successful deletion into an error after the transaction committed.
+  }
+}
+
+async function permanentlyRemoveCredential(storage, dbPath, provider, credentialId) {
+  const db = await openLocalDatabase(dbPath);
+  try {
+    assertCredentialSchema(db);
+    const row = oneRow(db, "SELECT identity_key FROM auth_credentials WHERE id = ? AND provider = ?", [credentialId, provider]);
+    if (!row) return { removed: false, providerRemoved: false };
+    const identity = safeString(row.identity_key);
+    execSql(db, "BEGIN IMMEDIATE");
+    try {
+      deleteDependentRows(db, credentialId);
+      // SQLite triggers (including OMP's auth-change revision trigger) can
+      // make Bun report more than one changed row for one credential delete.
+      // Verify the row identity returned by the DELETE instead of treating
+      // trigger side effects as a concurrent credential change.
+      const deleted = oneRow(db, "DELETE FROM auth_credentials WHERE id = ? AND provider = ? RETURNING id", [credentialId, provider]);
+      if (Number(deleted?.id) !== credentialId) throw new Error("The credential changed before it could be permanently removed.");
+      execSql(db, "COMMIT");
+    } catch (error) {
+      try { execSql(db, "ROLLBACK"); } catch { /* preserve the original failure */ }
+      throw error;
+    }
+    await reloadStorage(storage);
+    const remaining = oneRow(db, "SELECT COUNT(*) AS count FROM auth_credentials WHERE provider = ?", [provider]);
+    return {
+      removed: true,
+      providerRemoved: Number(remaining?.count ?? 0) === 0,
+      ...(identity ? { identity } : {}),
+    };
+  } finally {
+    try { db.close?.(); } catch { /* the transaction already decided the result */ }
+  }
 }
 
 /** email ?? orgName ?? accountId — the display identity for one credential.
@@ -106,8 +215,9 @@ async function main() {
   if (!validOp || typeof request.packageRoot !== "string" || typeof request.agentDir !== "string") return fail("error", "invalid_request", "Malformed credential request.");
   if (request.operation !== "list" && request.operation !== "unblock" && typeof request.provider !== "string") return fail(request.operation, "invalid_request", "A provider id is required.");
   if ((request.operation === "remove" || request.operation === "unblock") && !(typeof request.credentialId === "number" && Number.isSafeInteger(request.credentialId))) return fail(request.operation, "invalid_request", "A credential id is required.");
-  let storage;
-  try { storage = await loadStorage(request.packageRoot, request.agentDir); } catch (error) { return fail(request.operation, "unsupported", error instanceof Error ? error.message : String(error)); }
+  let loaded;
+  try { loaded = await loadStorage(request.packageRoot, request.agentDir); } catch (error) { return fail(request.operation, "unsupported", error instanceof Error ? error.message : String(error)); }
+  const { storage, dbPath } = loaded;
   try {
     if (request.operation === "list") {
       let credentials; try { credentials = await listCredentials(storage); } catch (error) { return fail("list", "credential_list_failed", error instanceof Error ? error.message : String(error)); }
@@ -118,12 +228,8 @@ async function main() {
       return emit({ type: "unblock", ok: true, cleared });
     }
     if (request.operation === "remove") {
-      let removed; try { removed = await storage.removeCredential(request.provider, request.credentialId); } catch (error) { return fail("remove", "credential_remove_failed", error instanceof Error ? error.message : String(error)); }
-      // Recount rather than trust an in-memory tally: the authoritative
-      // "anything left" answer is another read of the same store the removal
-      // just went through.
-      const providerRemoved = removed ? storage.listStoredCredentials(request.provider).length === 0 : false;
-      return emit({ type: "remove", ok: true, removed, providerRemoved });
+      let outcome; try { outcome = await permanentlyRemoveCredential(storage, dbPath, request.provider, request.credentialId); } catch (error) { return fail("remove", "credential_permanent_remove_failed", error instanceof Error ? error.message : String(error)); }
+      return emit({ type: "remove", ok: true, ...outcome });
     }
     // remove_provider: storage.remove() itself returns void, so "removed"
     // is answered from a before-check against the same active-row read

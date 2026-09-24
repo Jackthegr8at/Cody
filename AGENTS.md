@@ -279,6 +279,11 @@ lib/
                        for the first asker; cancel rejects every waiter
   file-paths.ts        client/server path encoding helpers
   markdown.ts          shared markdown helpers
+  message-rate.ts      the ONE place output-token throughput is computed: the
+                       engine-measured rate (the provider's output count over
+                       the request's own duration, plus ttft and a decode-only
+                       rate) and, separately and always labelled as such, the
+                       chars/4 streaming estimate
   model-display.ts    shared display-only model-label formatter; route identifiers remain untouched
   npx.ts               npx runner used by skill install
   permission-request.ts pure client-side readers for an ACP engine's approval
@@ -325,10 +330,16 @@ lib/
                        mcp.json and symlinked credentials (sidebarAgentDir), the
                        --no-* flags, an overlay, and SIDEBAR_CONTEXT_TOOLS
                        registered through set_host_tools
-  sidebar-context-tools.ts  the sidebar's five read-only, bounded, pageable
-                       tools: list_workspace_files, read_workspace_file,
-                       read_project_context, list_sessions, read_session
-                       (ownership-gated, condensed, tool NAMES only)
+  session-tools.ts     the three CROSS-SESSION tools every chat gets
+                       (list_sessions, session_status, read_session): name-or-id
+                       resolution that lists candidates instead of guessing,
+                       the ownership gate, the condensed transcript (messages
+                       and tool NAMES only), snapshot-only — nothing here
+                       blocks on another session's run
+  sidebar-context-tools.ts  the sidebar's three WORKSPACE tools
+                       (list_workspace_files, read_workspace_file,
+                       read_project_context) plus the session three above,
+                       appended verbatim rather than re-declared
   sidebar-context-budget.ts  how much of a small model's window one tool result
                        may take; an unknown window is assumed to be the
                        SMALLEST supported (8,192), never unlimited
@@ -1130,6 +1141,27 @@ setting added upstream appears without a Cody change.
   permissive Proxy stub and jiti transpiles what is left. The stub must return
   `undefined` for `then`, or the module becomes thenable and the load hangs
   forever on an unsettled top-level await.
+- **Upstream keeps moving modules into sibling packages, and the stub destroys
+  data.** 18.2.5 moved the whole terminal UI into `@oh-my-pi/pi-tui`, leaving
+  `export { MODEL_ROLE_IDS } from "@oh-my-pi/pi-tui/…"` behind and enum values
+  like `treeFilterMode`'s in that package. pi-tui is Bun-only (a real import
+  dies on `Bun is not defined`), so two mechanisms read the data anyway, both
+  in `package-source.ts`:
+  - `loadOmpPackageSymbol(root, segments, symbol, isValid)` follows a
+    re-export — load the file, and when the symbol is not what the caller
+    expects, resolve the specifier it is re-exported from and read the
+    declaring file. Without it `getOmpModelRoleIds` silently fell back to its
+    frozen copy, which is the exact failure reading the source prevents.
+  - A BARE import is bridged rather than stubbed: the dependency's own source
+    is loaded (with all of ITS imports stubbed, one hop only) and handed to
+    the parent through a generated CJS module. This is what keeps
+    `treeFilterMode` in the panel at all — under the plain stub its enum had
+    no values and the row dropped out. Relative imports stay stubbed on
+    purpose: their behaviour is unchanged from before the split, and
+    stub-loading dozens of in-package modules is a far larger blast radius.
+  - Both resolve a specifier through the dependency's own `exports` map
+    (`resolveSourceSpecifier`), because these packages publish `src/*.ts`
+    under it. Every failure returns null; every caller has a fallback.
 - `lib/omp/settings-schema.ts` — reads `<omp package>/src/config/settings-schema.ts`
   through it. There is **no settings-schema RPC command**, so it goes through the
   installed package's source. Credentials, `ui.secret` settings, and settings
@@ -1161,7 +1193,25 @@ setting added upstream appears without a Cody change.
   no notion of a second front end), so those rows get a "Terminal only" chip
   rather than being hidden — the same file still drives the CLI.
   `settings-surface.test.mjs` fails if a rule stops matching the installed
-  schema, so an upstream rename surfaces as a test failure, not a vanished chip.
+  schema, so an upstream rename surfaces as a test failure, not a vanished
+  chip — with one necessary refinement: a rule that names a setting the
+  installed engine does not declare is ambiguous (renamed away, or targeting a
+  NEWER engine), so the unmatched-rule check only judges an engine at least as
+  new as `HarnessAdapter.verifiedVersion`.
+- **This whole pipeline is tested against a REAL omp package, and for a long
+  time it was not.** Six test files (`settings-schema`, `settings-values`,
+  `settings-surface`, `model-roles`, `recommended-roundtrip`,
+  `recommended-cards`) looked for `/tmp/ompkg/package/bin/omp`, which nothing
+  in this repo creates, so every one of them SKIPPED — locally and in CI — and
+  18.2.5's package split went undetected until it was read by hand.
+  `lib/omp/omp-test-package.mjs` now resolves whatever omp is actually
+  available (`CODY_OMP_BIN`, that extraction, the tools prefix, PATH), so they
+  run; point `CODY_OMP_BIN` at an unpacked newer engine to audit it before
+  updating. Two consequences for what these tests may assert: the curated-card
+  split (schema-declared vs curated-only) and the settings-tab ORDER are
+  DERIVED from whichever engine is installed — 18.2.5 moved two keys and
+  reordered every tab — so they are asserted as invariants ("every card can
+  render", "these tabs exist"), never as counts or positions.
 - `components/settings/engine/SchemaSettingsList.tsx` — the Behavior hub's
   "All settings" list: the complete schema, chip-grouped, secrets masked.
   Indexed for search by `hooks/useSchemaIndex.ts`, the one component-facing
@@ -1470,6 +1520,7 @@ must name the panel that fixes it.
   that and report an empty list. `scripts/engine-bringup.mjs` drives adapters with no
   server behind them, and a throw there aborts `session/new`: no bridge is a missing
   Preview button, a throw is a chat that will not open.
+
 - **Project To-do list is durable user intent, not an engine plan.** `.cody/todo.json`
   sits at the resolved project root so it is visible in the project and survives session
   or engine changes. Cody writes it atomically and preserves unknown top-level keys.
@@ -1617,6 +1668,54 @@ must name the panel that fixes it.
   multi-process deployment (multiple Next.js workers or replicas) would need a
   shared store for both before display requests survive crossing processes.
 
+### Cross-session awareness (`lib/session-tools.ts`)
+
+One conversation regularly needs to know what another is doing, and Cody is
+the only party that can answer: an engine's own agent hub sees nothing but its
+own subagents, while Cody holds the live child registry AND every transcript
+on disk. Three read-only tools, in every session's tool list:
+`list_sessions` (what exists, what is running, when it last moved),
+`session_status` (one session's live phase plus its newest message; with no
+argument, every running session) and `read_session` (a condensed transcript,
+paged).
+
+- **Addressed by the NAME the user set.** An exact session id wins, then a
+  case-insensitive substring of the name; more than one match returns the
+  candidate list rather than picking one. Guessing which conversation was
+  meant and then reporting on it is a far worse failure than asking, because
+  nothing downstream can tell it happened.
+- **Snapshot-only, never a wait.** A tool that blocked until another session
+  finished would tie up the caller's own turn on a run it cannot influence.
+  "Poll it" is a call the model repeats; the module promises nothing more.
+- **Phase comes off the registry, not a round trip.**
+  `getLiveSessionPhases()` reads each wrapper's own flags
+  (`EngineSession.livePhase?.()`, optional because an ACP session cannot break
+  "running" down and reports just that). Asking the other child over RPC is
+  exactly what must not happen: the session being asked about may be wedged,
+  and awaiting it would hang the asker.
+- **Ownership is the boundary, and an UNOWNED caller is the trap.** Listings
+  go through `filterSessionsForUser` so an inaccessible session's id or title
+  is never enumerated, and every single-target read re-checks
+  `canAccessSession`; blocked and missing answer identical text. A main
+  session has no request behind its tool calls, so the acting account is the
+  session's OWNER (`getSessionOwner` → `findUserById`). When a session has no
+  recorded owner (pre-accounts, terminal-created) `user: null` would mean
+  "sees everything", so it is paired with `restrictToUnowned`, which limits it
+  to other unowned sessions. Both the host-tool path and the internal route
+  compute it the same way: `user === null && hasAnyUser()`.
+- **One declaration, two callers.** The sidebar appends
+  `SESSION_AWARENESS_TOOLS` verbatim instead of re-declaring the schemas — a
+  second copy is how the sidebar and the main chat start describing the same
+  tool differently. The main chat gets a larger page
+  (`MAIN_SESSION_RESULT_CHARS`, 24k) than the sidebar's
+  smallest-window-assumption budget; both still report a continuation offset.
+- **ACP engines reach them over MCP** like the display tools:
+  `POST /api/internal/sessions` (capability-token authenticated, on
+  `proxy.ts`'s `PUBLIC_EXACT` list for the same reason display/todo are) with
+  the three tools declared in `bin/cody-display-mcp.js`. The route trusts
+  `capability.sid` alone — a body may name any session id, but it must match
+  the token, and the caller's identity is derived server-side from it.
+
 ### Disk exhaustion is a first-class failure (`lib/disk-space.ts`)
 - The instance data dir is finite and often quota-capped (a ZFS dataset on
   Unraid appdata). When it fills, npm dies with `errno -122` — EDQUOT, which
@@ -1761,6 +1860,28 @@ handled or safely ignored.
   and an accent sparkle beside the model name read as "auto-picked".
 - **Display names and picker controls stay presentation-only.** `formatModelDisplayName()` in `lib/model-display.ts` is the shared display boundary for the composer, transcript, and usage surfaces; it may improve a catalog label but never changes the routing identifier. Fast remains beside the existing Composer model picker, and its adjacent Manage models gear opens Settings › Models. Only Smart is pinned; the ordinary named-model list has no sticky selection.
 - **Composer quota is model-scoped, but the popup covers the whole session.** The RING gauges the selected/live model: select usage windows for that model; a reported tier explicitly scopes its bucket even when it is also marked shared; only untiered buckets apply to the account as a whole. Render the raw engine-reported plan without inferring a `$tier` convention. Saved resets are a separate single summary that keeps explicit zero visible; only meaningful positive account rows expand it. Under Smart routing, subagents and fallback chains other providers consume quota in the same session, so `lib/session-active-models.ts` derives every model in use this run (live model, Smart resolution, each subagent's `resolvedModel`, fallback `to`, this run's assistant turns) and the popup renders their windows EXPANDED under "Also in use", each attributed to what uses it ("Subagent scout (research)", "Fallback for this conversation"); OpenRouter credits appear the same way when only a subagent rides that gateway. Limits nothing in the session touches stay in the collapsed "Other limits" section that says they cannot stop the selected model.
+- **The ring says whose quota it is, and how old the reading is.** With more
+  than one account on a provider, every window label carries the account's
+  POSITION (`brandedAccountLabel` → "Claude · Primary · 5-hour window"), and
+  that label is what the ring's tooltip and the popover headline quote — so a
+  percentage can never be read as the wrong subscription's. The per-account
+  rows say `Serving next`, not `Serving`: the ranking is Cody's read of what
+  the engine WOULD pick from this reading, and the engine re-ranks per
+  request (it rotates onto a sibling credential mid-run without telling
+  anyone), so claiming the present tense would be a claim the snapshot cannot
+  support.
+- **Freshness is refreshed where it changes, and stated where it is read.** A
+  usage read happens on mount, on a session switch, when the popover OPENS,
+  on an explicit Refresh in the popover footer, and — the one that matters —
+  on the falling edge of a run (`isStreaming` true→false in `ChatInput`),
+  because a turn ending is the only moment the numbers provably moved. The
+  hook's 90 s/5 min cadence alone left the ring quoting a pre-turn reading
+  for up to a minute and a half after the reply landed. The footer tells the
+  three states apart: `Reading…` while a read is out, `Updated <ago>` (plus
+  `May be out of date` for a server-flagged stale snapshot), and
+  `Could not refresh · last read <ago>` in warning colour when the last
+  attempt FAILED — where the numbers on screen are the previous good ones and
+  claiming an age for them would be claiming an answer that never arrived.
 - **Engine-initiated model switches wear a persistent marker and name the
   job** (`autoModelSwitch`): `retry_fallback_applied` (error and usage-aware
   routing both emit it) and any bare `model_changed` whose model differs
@@ -1880,6 +2001,39 @@ handled or safely ignored.
   mounted instead of removing the control.
 - Per-model token totals include input, output, cache-read, and cache-write
   tokens.
+
+### Token rate: measured from the engine's own numbers, never guessed
+- The transcript's `t/s` badge is the provider's **output-token count over
+  the request's measured duration** — the same arithmetic the engine reports
+  for its own status line (omp's `utils/token-rate.ts`: `output * 1000 /
+  duration`, 100 ms floor). omp records `duration`, `ttft` and `completedAt`
+  on every assistant message it writes AND sends them on `message_end`, so
+  `lib/message-rate.ts` computes the identical number client-side, per
+  message, with no poll lag. omp also reports `tokensPerSecond` on
+  `get_state`; Cody deliberately does NOT read it — same formula, but only as
+  fresh as the 15 s reconcile poll and scoped to the session's last message.
+- **The estimate is labelled as one.** Before any output count exists (a
+  provider that reports usage only at the end, or an ACP engine, which
+  accounts for itself in `usage_event` frames and puts nothing on its
+  messages) the badge falls back to `chars / 4` and wears a `~` plus a
+  tooltip saying so. That heuristic is not a tokenizer: it understates CJK by
+  ~3x and dense code somewhat, and its rate is a cumulative average that
+  every pause (a tool call mid-message, a stall) drags down. The two live in
+  one module so no call site can confuse them.
+- **A rate needs enough output to mean throughput** (`MIN_RATE_OUTPUT_TOKENS`,
+  48). Measured: a four-token "ok" whose 1.7 s was almost entirely the wait
+  for the provider computes to 2.3 t/s and wore the SLOWEST colour on a model
+  that was in fact answering at ~90 t/s. Below the floor there is no badge at
+  all rather than a misleading one; the tooltip on a real one names the ttft
+  and the decode-only rate, so a long provider wait reads as a wait instead
+  of as a slow model.
+- **`message.timestamp` is when the request STARTED, not when it ended.**
+  `completedAt` is the end. Tool durations therefore measure from
+  `completedAt` (the moment the tools were dispatched); measuring from
+  `timestamp`, as the code used to, charged the model's whole generation time
+  to the first tool call. A thinking box's generation time is `duration`
+  itself, not the wall-clock gap to the previous message, which also contains
+  whatever ran in between.
 
 ### Distill: summaries that never break with the engine
 - **What it is.** A user-chosen model (Settings › Models › Assignments ›
@@ -2205,9 +2359,22 @@ config").
   (lib/usage/credential-order.ts) folds blocks in as exhausted untiered
   windows, synthesizing an account for a blocked credential whose provider
   reports no usage (an API key) — otherwise it stays invisible and keeps
-  being chosen. `POST /api/usage/unblock` clears a stale block (admin-only,
-  via `bin/cody-omp-credentials.mjs unblock`); it is safe because a provider
-  that is still limiting re-writes the block on the next request.
+  being chosen. Block windows carry `source: "block"`: set from ONE rejected
+  request, never measured, and labelled that way in the UI. `POST
+  /api/usage/unblock` {provider, accountId} is the Providers panel's
+  "Retry now" (admin-only, `bin/cody-omp-unblock.mjs` via
+  lib/harness/omp-unblock.ts). It lifts only a block (a measured exhaustion
+  is refused), never loads a credential (`AuthStorage.create` without
+  `reload()`), clears the matching blackout, re-reconciles and restarts idle
+  sessions, because a running omp keeps its own in-memory copy of the block
+  (`#credentialBackoff`) until it restarts. Safe: a provider still limiting
+  re-writes the block on the next request.
+- **Usage is about accounts, not the active engine.** `/api/usage` answers
+  whenever the omp binary is installed, whichever engine is active, and the
+  composer ring and picker badges ("Limit reached · resets …") render for
+  every engine where the engine's provider maps unambiguously (Claude Code →
+  anthropic, Codex → openai-codex). Blackouts are observed for every engine;
+  config writes and restarts stay omp-only.
 - **Blackouts are remembered, with the provider's own reset as the expiry**
   (`lib/routing/route-memory.ts`, `cody-route-memory.json`, 0600, atomic).
   A quiet or failed telemetry read reports nothing, and "nothing" reads as
@@ -2224,6 +2391,20 @@ config").
   baseline. Nothing usable in the chain means the role is left exactly as
   configured; inventing a destination the user never listed is not Cody's
   call.
+- **Chains skip what cannot answer** (`lib/routing/chain-binding.ts`). omp's
+  REACTIVE fallback (`#tryRetryModelFallback`) only checks that a candidate
+  has a key, so a provider out of credits or blocked on every account was
+  still dialled. Cody writes each `retry.fallbackChains.<key>` without
+  entries whose EVERY account is exhausted (`allAccountsExhausted`, a
+  provider-wide credits blackout, or blocks), stores the user's chain as
+  baseline in route memory BEFORE rewriting, restores entries the moment
+  they are usable, and adopts a chain the user edited as the new baseline.
+  One spent account beside a healthy sibling drops nothing: omp rotates
+  accounts itself. All entries spent → the full chain is kept. Role binding
+  walks the baselines. Any chain or role change restarts idle sessions.
+  Also: a failed usage read never lifts a blackout (only a fresh read that
+  sees the account does), and a cached window past its own reset counts as
+  reset.
 - **Subagents must resolve through a ROLE, not a model name**
   (`lib/routing/agent-roles.ts`). In omp's `resolveEffectiveAgentModelSelection`,
   `role` is `undefined` for any source that is not a `@alias` — and the role
@@ -2233,13 +2414,21 @@ config").
   `activeModelPattern`: ask an Opus session for a cheap subagent and every
   spawn silently runs on Opus. Cody writes `task.agentModelOverrides`
   (which outranks agent frontmatter) as aliases — `luna → @smol`,
-  `scout → @smol`, `task → @task`, … — filling gaps and repairing pins it
+  `scout → @smol`, `task → @task`, `reviewer`/`security-reviewer → @slow`
+  (omp's own reviewer declares `@slow`; the older `@task` default meant the
+  `slow` role never ran), … — filling gaps and repairing pins it
   can PROVE are broken (unresolvable against the cached catalog, or blacked
   out). A working concrete pin, an alias the user wrote, and an `on`/`off`
   value are left untouched; with no cached catalog no pin is ever judged
   unresolvable.
-- **Trap — `retry.usageAwareFallback` behaves differently under Cody.**
-  omp's `turn-recovery.ts` computes
+- **`retry.usageAwareFallback` is the same-provider-first switch.** With it
+  on, omp checks usage health before each request (auth-storage
+  `getModelUsageHealth`): the provider is healthy while ANY account is, and
+  the session is moved onto that account before any chain is walked. Only
+  providers with a ranking strategy (anthropic, openai-codex,
+  alibaba-token-plan, …) are judged; the rest read "unknown", which is why
+  chain filtering above still matters (OpenRouter credits). Trap — "Confirm
+  interactively" behaves differently under Cody. omp's `turn-recovery.ts` computes
   `shouldFallback = depleted || policy === "auto" || !confirmer`, and
   `setUsageFallbackConfirmer` is wired only by the ACP agent and the
   interactive TUI controller — never by `--mode rpc-ui`, which is how Cody
@@ -2248,6 +2437,14 @@ config").
   Surfaced as a warning clause on the setting itself
   (`SETTING_NOTES` in lib/omp/settings-surface.ts → `OmpSetting.codyNote`,
   rendered by SchemaSettingsList), kept honest by settings-surface.test.mjs.
+- **Engine error text goes through one describer** (`lib/error-text.ts`
+  `describeEngineError`, used by `engineErrorNotice` in useAgentSession for
+  every engine, ACP notices included): it tells a refusal (safety policy,
+  e.g. Anthropic `Refusal (…)`, Codex "flagged for possible cybersecurity
+  risk") from usage, credits, auth, overload, transport and an outdated
+  engine (`claude_code_version_too_old`), strips JSON wrappers, request ids,
+  `raw-http-request=` paths, stack frames and trailing links, and caps the
+  text. Identical notices collapse into one with a ×N count.
 - **Routing notices are coalesced** (`ROUTING_BURST_MS`, useAgentSession):
   fallback-applied/succeeded events collect for 1.5 s and deliver ONE toast
   plus one notice. A lone event keeps its old wording; a subagent-attributed

@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, Footprints, ListChecks, Loader2, Paperclip, Pin, ShieldCheck, SlidersHorizontal, Sparkles, Split, Target, TriangleAlert, Zap, ZapOff } from "lucide-react";
+import { ChevronDown, Footprints, ListChecks, Loader2, Paperclip, Pin, RefreshCw, ShieldCheck, SlidersHorizontal, Sparkles, Split, Target, TriangleAlert, Zap, ZapOff } from "lucide-react";
 import type { SessionModeOption } from "@/hooks/useAgentSession";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import { ALL_CAPABILITIES, OMP_ENGINE_ID, type ActiveEngineInfo, type EngineCapabilities } from "./SettingsTabs";
@@ -11,6 +11,7 @@ import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
 import { formatGoalElapsed } from "@/lib/web-mode-state";
 import { toast } from "@/components/ui/toast";
 import { ConfirmDialog } from "@/components/ui/field";
+import { QuotaBar } from "@/components/QuotaBar";
 import { formatCompactNumber, formatRelativeTime, usageToneColor } from "@/lib/format";
 import { clearDraft, getDraft, setDraft, type ChatDraftFile, type ChatDraftImage } from "@/lib/draft-store";
 import { WEB_SLASH_COMMANDS, expandWebSlashCommand } from "@/lib/web-slash-commands";
@@ -47,6 +48,7 @@ import { useResetCredits, useUsage } from "@/hooks/useUsage";
 import { useOpenRouterAccount, type UseOpenRouterAccountResult } from "@/hooks/useOpenRouterAccount";
 import { OpenRouterCredits } from "./OpenRouterCredits";
 import { rankProviderAccounts, selectBindingWindow, selectWindowsForModel, type ModelRef } from "@/lib/usage/select";
+import { resolveModelAvailability } from "@/lib/usage/availability";
 import type { UsageAccount, UsageAccountService, UsageSnapshot, UsageWindow, UsageWindowState } from "@/lib/usage/types";
 import { brandAccountLabel } from "@/lib/provider-brand";
 import { ModelIcon, ProviderIcon } from "./ProviderIcon";
@@ -122,10 +124,11 @@ interface Props {
    * the new-models line and its visibility mirror. */
   modelsRefreshKey?: number;
   onModelChange?: (provider: string, modelId: string, selection?: "manual" | "smart") => void | boolean | Promise<boolean>;
-  /** Return a NEW session to auto ("Smart") model resolution. Present only
-   * for a new, not-yet-spawned session — on a live session the Smart row
-   * resolves the OMP roles default itself and calls onModelChange instead. */
-  onSelectSmartModel?: () => void;
+  /** Return a NEW session to auto ("Smart") model resolution. Answers false
+   * once the session has spawned (a Local-only pick spawns it early); the
+   * Smart row then resolves the OMP roles default itself and calls
+   * onModelChange, exactly as on a live session. */
+  onSelectSmartModel?: () => boolean | void;
   /** Backend-confirmed local-only routing for this session. Absent when the
    * active engine cannot support this routing mode. */
   localOnly?: { active: boolean; pending: boolean; supported: boolean; error?: string };
@@ -488,6 +491,57 @@ const QUOTA_MODEL_PREPAID: QuotaAbsentView = {
  *  fetched, or the popover says "prepaid" and then shows nothing. */
 export function isPrepaidProvider(provider: string | null | undefined): boolean {
   return typeof provider === "string" && provider.trim().toLowerCase() === "openrouter";
+}
+
+/** omp's own models already carry the provider id `/api/usage` reports
+ *  accounts under ("anthropic", "openai-codex", ...). An ACP engine (Claude
+ *  Code, Codex) instead reports every one of ITS models under its own
+ *  engine id as `provider` (`lib/harness/acp-session.ts`'s `resolvedModel()`
+ *  sets `provider: this.spec.id`), so a bare "claude-opus-4-5" or "gpt-5.1"
+ *  needs translating before it means anything to the usage snapshot. */
+const ACP_ENGINE_USAGE_PROVIDER: Record<string, string> = {
+  claude: "anthropic",
+  codex: "openai-codex",
+};
+
+/**
+ * The omp usage-provider id that actually meters a model, or null when Cody
+ * cannot say so with confidence.
+ *
+ * Deliberately conservative: only omp itself (whose models already carry the
+ * right id) and the two ACP engines above translate, and only when the
+ * option's own provider IS that engine's id — never a guess for Pi, Hermes,
+ * or any other engine. A wrong guess would mark a healthy model exhausted,
+ * or hide a real exhaustion; showing nothing is the safe wrong answer,
+ * mismarking is not.
+ */
+export function usageProviderFor(engineId: string | null | undefined, modelProvider: string): string | null {
+  if (engineId === OMP_ENGINE_ID) return modelProvider;
+  if (!engineId || modelProvider !== engineId) return null;
+  return ACP_ENGINE_USAGE_PROVIDER[engineId] ?? null;
+}
+
+/**
+ * Whether the model picker should mark one option as spent, for ANY engine.
+ *
+ * `resolveModelAvailability` is already account-aware — a model reads
+ * "exhausted" only when every account able to serve it is, so a healthy
+ * sibling account never earns a mark here. This only adds the engine→provider
+ * translation on top, and only marks on a positive "exhausted" verdict:
+ * "unknown" (no mapping, or the snapshot has nothing to say) and "warning"
+ * both render nothing extra, same as a model with quota on another account.
+ */
+export function modelLimitReached(
+  snapshot: UsageSnapshot | null | undefined,
+  engineId: string | null | undefined,
+  optProvider: string,
+  optModelId: string,
+): { resetsAt: string | null } | null {
+  if (!snapshot?.available) return null;
+  const usageProvider = usageProviderFor(engineId, optProvider);
+  if (!usageProvider) return null;
+  const availability = resolveModelAvailability(snapshot, usageProvider, optModelId);
+  return availability.state === "exhausted" ? { resetsAt: availability.resetsAt ?? null } : null;
 }
 
 /** The provider DOES report quota and none of it constrains this model (every
@@ -899,24 +953,6 @@ function formatQuotaLabel(label: string, locale: string): string {
   return label.replace(/(^|·\s*)(\p{Ll})/gu, (_match, prefix: string, letter: string) => prefix + letter.toLocaleUpperCase(locale));
 }
 
-/** The one bar geometry every quota row shares: 4px track, pill radius. The
- *  de-emphasised rows dim the fill rather than changing shape, so the whole
- *  popover reads as one system. */
-function QuotaBar({ percent, color, dimmed = false }: { percent: number; color: string; dimmed?: boolean }) {
-  return (
-    <div style={{ height: 4, overflow: "hidden", borderRadius: 999, background: "var(--border)" }}>
-      <div style={{
-        width: `${percent}%`,
-        height: "100%",
-        borderRadius: 999,
-        background: color,
-        opacity: dimmed ? 0.55 : 1,
-        transition: "width var(--dur-med) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm)",
-      }} />
-    </div>
-  );
-}
-
 /** One window row: label / % / bar / reset. The primary list and the "not
  *  counted" list share this exact layout — the de-emphasised rows are the same
  *  design at a quieter volume, never a bar-less footnote. */
@@ -1012,6 +1048,9 @@ export function QuotaPopover({
   provider,
   modelName,
   now,
+  failed = false,
+  refreshing = false,
+  onRefresh,
   anchorTop = null,
   anchorRight = null,
 }: {
@@ -1027,6 +1066,15 @@ export function QuotaPopover({
   provider: string | null;
   modelName: string | null;
   now: number;
+  /** The last usage read did not land. The numbers on screen are the previous
+   * good ones, and saying "updated 2 min ago" about them would be a claim the
+   * read never supported. */
+  failed?: boolean;
+  /** A read is in flight right now, so the age is about to change. */
+  refreshing?: boolean;
+  /** Re-read usage on demand. The ring is a snapshot of a moving number: the
+   * only honest answer to "is this current?" is a way to ask again. */
+  onRefresh?: () => void;
   anchorTop?: number | null;
   anchorRight?: number | null;
 }) {
@@ -1078,12 +1126,18 @@ export function QuotaPopover({
   const percentText = quota.known ? t("usage.percentUsed", { percent: Math.round(quota.percent) }) : t("usage.unavailable");
   const headlineReset = quota.known ? formatResetTime(quota.resetsAt, locale, now) : null;
   const age = quota.known && quota.fetchedAt ? formatRelativeTime(quota.fetchedAt, locale, now) : null;
-  // Age is only claimed when the snapshot carries a usable timestamp, and a
-  // snapshot the server flagged stale says so rather than passing for fresh.
-  const freshness = age
-    ? [t("usage.updatedAgo", { ago: age }), quota.known && quota.stale ? t("usage.stale") : null]
-      .filter(Boolean).join(" · ")
-    : null;
+  // Three different things, and the footer must not conflate them: a read
+  // that just landed, a snapshot the server itself flagged as possibly out of
+  // date, and a read that FAILED — where the numbers on screen are the last
+  // good ones and their age is the age of that read, not of an answer.
+  const freshness = refreshing
+    ? t("usage.refreshing")
+    : failed
+      ? (age ? t("usage.refreshFailedAge", { ago: age }) : t("usage.refreshFailed"))
+      : age
+        ? [t("usage.updatedAgo", { ago: age }), quota.known && quota.stale ? t("usage.stale") : null]
+          .filter(Boolean).join(" · ")
+        : null;
   const anchor = anchorTop != null && anchorRight != null ? { top: anchorTop, right: anchorRight } : null;
 
   return (
@@ -1227,7 +1281,9 @@ export function QuotaPopover({
                     <span style={{ flexShrink: 0, fontSize: 12, fontVariantNumeric: "tabular-nums", color: "var(--text-muted)" }}>{t("usage.resetCount", { count: account.availableCount })}</span>
                   </div>
                   {expiry && <div style={{ marginTop: 2, fontSize: 11, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>{t("usage.expiresAt", { time: expiry })}</div>}
+                  {credit?.title && <div style={{ marginTop: 2, fontSize: 11, color: "var(--text-muted)" }}>{credit.title}</div>}
                   {account.error && <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)" }}>{account.error}</div>}
+                  {!account.error && !account.canRedeem && account.reason && <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)" }}>{account.reason}</div>}
                   {credit && account.canRedeem && !confirming && (
                     <button type="button" onClick={() => setResetSelection({ accountId: account.id, creditId: credit.id, account: account.label })} style={{ marginTop: 6, padding: "3px 7px", border: "1px solid var(--border)", borderRadius: 5, background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 10 }}>
                       {t("usage.useReset")}
@@ -1337,13 +1393,35 @@ export function QuotaPopover({
         )}
 
         {/* Footer — the primary window is all-session; the added section is
-            explicitly scoped to this run. */}
-        <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)", fontSize: 11, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
-          {[
-            !quota.known ? t(quota.scopeKey) : provider ? t("usage.modelScope") : t("usage.accountWide"),
-            hasSessionUsage ? t("usage.sessionInUseScope") : null,
-            freshness,
-          ].filter(Boolean).join(" · ")}
+            explicitly scoped to this run, and the age says how old the
+            reading is with a way to take a new one. */}
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)", display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8, fontSize: 11, color: failed ? "var(--status-warning)" : "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
+          <div style={{ minWidth: 0 }}>
+            {[
+              !quota.known ? t(quota.scopeKey) : provider ? t("usage.modelScope") : t("usage.accountWide"),
+              hasSessionUsage ? t("usage.sessionInUseScope") : null,
+              freshness,
+            ].filter(Boolean).join(" · ")}
+          </div>
+          {onRefresh && (
+            <button
+              type="button"
+              data-testid="usage-refresh"
+              onClick={onRefresh}
+              disabled={refreshing}
+              title={t("usage.refresh")}
+              aria-label={t("usage.refresh")}
+              style={{
+                flexShrink: 0, display: "flex", alignItems: "center", gap: 4,
+                background: "none", border: "none", padding: "2px 4px", borderRadius: 5,
+                color: "var(--text-dim)", cursor: refreshing ? "default" : "pointer",
+                fontSize: 11, fontWeight: 400,
+              }}
+            >
+              <RefreshCw size={11} strokeWidth={1.8} className={refreshing ? "icon-spin" : undefined} aria-hidden="true" />
+              {t("usage.refresh")}
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -1648,6 +1726,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 }: Props, ref) {
   const isMobile = useIsMobile();
   const { t, tn, locale } = useI18n();
+  // A plain-English fallback for a key `lib/i18n` does not have yet: `t()`
+  // itself returns the raw key when every dictionary misses it (see
+  // `translate()`), so a caller that notices that and swaps in its own
+  // template still renders something a person can read instead of a literal
+  // "chatInput.modelLimitReached" — and picks the translation back up the
+  // moment the key is added, with no further code change.
+  const tOrFallback = useCallback((key: string, fallback: string, vars?: Record<string, string | number>) => {
+    const value = t(key, vars);
+    if (value !== key) return value;
+    if (!vars) return fallback;
+    return fallback.replace(/\{(\w+)\}/g, (match, name: string) => (name in vars ? String(vars[name]) : match));
+  }, [t]);
   // Unpacked once from the flag set rather than plumbed in one flag at a
   // time: the composer needs several, and the ones it was never given are
   // what let omp-only controls render on other engines.
@@ -1656,18 +1746,26 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   // to the product name while /api/info is still in flight, so no string ever
   // renders with an empty hole in it.
   const engineName = engine?.shortName ?? "Cody";
-  // Plan quota is read with `omp usage --json` and exists nowhere else:
-  // /api/usage answers `{available:false, reason}` for any other engine — a
-  // value, not an error. A ring that can only ever be an empty dashed circle
-  // is dead chrome, so it hides and the poll behind it never starts.
-  const quotaReported = engine?.id === OMP_ENGINE_ID;
+  // /api/usage is engine-neutral: it answers whenever omp is installed on
+  // this box, reading omp's own tracked provider accounts regardless of
+  // which engine is actually driving this session. So the read itself is no
+  // longer gated on the active engine — only whether a ring or a picker
+  // badge can say anything about THIS model is, once its provider is
+  // translated to the omp provider id that actually meters it (see
+  // `usageProviderFor` below) and the snapshot confirms a matching account.
   const {
     snapshot: usageSnapshot,
     loading: usageLoading,
     failed: usageFailed,
     refresh: refreshUsage,
-  } = useUsage(quotaReported);
-  const resetCredits = useResetCredits(quotaReported);
+  } = useUsage(true);
+  // Banked reset credits stay keyed to the active engine: the server route
+  // itself still answers `available:false` for anything but omp (they are
+  // redeemed through omp's own credential store specifically, not a generic
+  // provider-account read), so polling under any other engine would just be
+  // a wasted request for a value it already returns without one.
+  const resetCreditsSupported = engine?.id === OMP_ENGINE_ID;
+  const resetCredits = useResetCredits(resetCreditsSupported);
   const refreshResetCredits = resetCredits.refresh;
   const modelCollator = React.useMemo(
     () => new Intl.Collator(locale, { numeric: true, sensitivity: "base" }),
@@ -3071,15 +3169,31 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   // answers for whichever model is now selected. Switching must NOT fetch.
   const quotaProvider = model?.provider;
   const quotaModelId = model?.modelId;
+  // The selected model's own provider ("claude", "codex", an omp provider id)
+  // translated to the omp usage-provider id that actually meters it. Null
+  // when the engine cannot be mapped with confidence (Pi, Hermes, anything
+  // `usageProviderFor` does not cover) — the ring then has nothing honest to
+  // gauge, rather than borrowing whichever account happens to sort first.
+  const quotaUsageProvider = quotaProvider ? usageProviderFor(engineId, quotaProvider) : null;
   const quota = React.useMemo(
     () => buildQuotaView(
       usageSnapshot,
       usageLoading,
       usageFailed,
-      quotaProvider && quotaModelId ? { provider: quotaProvider, modelId: quotaModelId } : null,
+      quotaUsageProvider && quotaModelId ? { provider: quotaUsageProvider, modelId: quotaModelId } : null,
       activeModels,
     ),
-    [usageSnapshot, usageLoading, usageFailed, quotaProvider, quotaModelId, activeModels],
+    [usageSnapshot, usageLoading, usageFailed, quotaUsageProvider, quotaModelId, activeModels],
+  );
+  // The ring's render gate (below, alongside OpenRouter and reset credits):
+  // true only once the snapshot actually answered AND it names an account for
+  // the model's translated provider. An unmapped engine (no `quotaUsageProvider`
+  // at all) or a provider the snapshot never mentions both read as "nothing to
+  // show" rather than an empty ring.
+  const hasMappedQuotaAccount = Boolean(
+    usageSnapshot?.available
+    && quotaUsageProvider
+    && (usageSnapshot.accounts ?? []).some((account) => account.provider === quotaUsageProvider),
   );
   // A gateway balance matters whenever THIS session routes work through it,
   // including an OpenRouter subagent under a non-OpenRouter selected model.
@@ -3128,6 +3242,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   useEffect(() => {
     refreshUsage();
   }, [draftKey, refreshUsage]);
+  // A turn ending is the ONE moment the numbers provably changed: the run
+  // just spent quota. Waiting out the hook's 90s cadence leaves the ring
+  // reporting a pre-turn reading for up to a minute and a half after the
+  // reply lands — long enough to pick the next model from a stale number.
+  // Only the falling edge fires, so a run's start costs nothing, and the
+  // hook's own in-flight guard drops a refresh that races the poll.
+  const wasStreamingRef = useRef(false);
+  useEffect(() => {
+    const wasStreaming = wasStreamingRef.current;
+    wasStreamingRef.current = Boolean(isStreaming);
+    if (wasStreaming && !isStreaming) refreshUsage();
+  }, [isStreaming, refreshUsage]);
 
   const thinkingLevelOptions = React.useMemo(
     () => selectableThinkingLevels(availableThinkingLevels),
@@ -4040,8 +4166,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       key="smart-model-role"
                       onClick={() => {
                         setModelDropdownOpen(false);
-                        if (onSelectSmartModel) onSelectSmartModel();
-                        else void handleSmartModelForLiveSession();
+                        if (!onSelectSmartModel || onSelectSmartModel() === false) void handleSmartModelForLiveSession();
                       }}
                       style={{
                         display: "flex", alignItems: "flex-start", gap: 8,
@@ -4141,6 +4266,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         {group.options.map((opt) => {
                           const isActive = opt.modelId === model?.modelId && opt.provider === model?.provider;
                           const showProvider = duplicateModelNames.has(opt.name) && modelsByProvider.length === 1;
+                          // Every engine, not only omp: `usageProviderFor` inside
+                          // `modelLimitReached` translates an ACP engine's bare
+                          // provider ("claude", "codex") to the omp usage-provider
+                          // id conservatively, and `resolveModelAvailability` is
+                          // account-aware — a model with a healthy sibling account
+                          // never marks. Still selectable when it does: the owner
+                          // may want to queue it anyway.
+                          const limitReached = modelLimitReached(usageSnapshot, engineId, opt.provider, opt.modelId);
+                          const resetLabel = limitReached?.resetsAt ? formatResetTime(limitReached.resetsAt, locale, Date.now()) : null;
+                          const limitText = resetLabel
+                            ? tOrFallback("chatInput.modelLimitReachedReset", "Limit reached · resets {time}", { time: resetLabel })
+                            : tOrFallback("chatInput.modelLimitReached", "Limit reached");
                           return (
                             <button
                               className="dropdown-item"
@@ -4161,6 +4298,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                                 cursor: "pointer", fontSize: 12, textAlign: "left",
                                 fontWeight: isActive ? 600 : 400,
                                 whiteSpace: "nowrap",
+                                // Dimmed, never disabled: a spent model stays one
+                                // click away for whoever wants to queue onto it
+                                // anyway (see the comment above).
+                                opacity: limitReached && !isActive ? 0.6 : 1,
                               }}
                               onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = "var(--bg-hover)"; }}
                               onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "none"; }}
@@ -4172,6 +4313,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                               <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{opt.name}</span>
                               {showProvider && <span style={{ fontSize: 10.5, color: "var(--text-dim)" }}>· {opt.provider}</span>}
                               {isActive && activeModelHiddenByAdmin && <span style={{ fontSize: 10.5, color: "var(--status-warning)" }}>· {t("chatInput.hiddenByAdmin")}</span>}
+                              {limitReached && <span style={{ fontSize: 10.5, color: "var(--text-dim)", whiteSpace: "nowrap" }}>· {limitText}</span>}
                             </button>
                           );
                         })}
@@ -4436,13 +4578,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
             {/* Icon-only plan-quota gauge. The arc tracks the binding quota
                 window; context usage lives in the top bar and, in detail,
-                below the divider inside this popover. Hidden entirely on an
-                engine that reports no plan quota AND has no prepaid balance to
-                report — there the ring could only ever be an empty dashed
-                circle. An OpenRouter model is a reason to show it even when
-                the engine reports no windows: the popover then carries the
-                credit balance, which is the only spend signal that exists. */}
-              {(quotaReported || openRouterActive || Boolean(resetCredits.snapshot?.available)) && (
+                below the divider inside this popover. Hidden entirely when
+                nothing has anything to say: no mapped account answers for
+                the selected model's provider, no prepaid balance applies,
+                and no banked reset credit exists either — there the ring
+                could only ever be an empty dashed circle. An OpenRouter
+                model is a reason to show it even when the engine reports no
+                windows: the popover then carries the credit balance, which
+                is the only spend signal that exists. omp keeps the ring from
+                first paint ("Checking usage…"): it always meters its models. */}
+              {(engine?.id === OMP_ENGINE_ID || hasMappedQuotaAccount || openRouterActive || Boolean(resetCredits.snapshot?.available)) && (
               <div
                 ref={contextPopoverRef}
                 // marginRight doubles the visual space between the gauge and
@@ -4509,6 +4654,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     provider={quotaProvider ?? null}
                     modelName={displayModelName}
                     now={usageNow}
+                    failed={usageFailed}
+                    refreshing={usageLoading}
+                    onRefresh={refreshUsage}
                     anchorTop={contextPopoverAnchor?.top ?? null}
                     anchorRight={contextPopoverAnchor?.right ?? null}
                   />

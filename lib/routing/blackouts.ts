@@ -83,6 +83,7 @@ export function deriveBlackouts(
 			since: now,
 			until: soonestReset(exhausted),
 			reason: exhausted[0].label,
+			...(exhausted.every((window) => window.source === "block") ? { source: "block" as const } : {}),
 		});
 	}
 
@@ -117,6 +118,57 @@ export function deriveBlackouts(
 	return blackouts;
 }
 
+/**
+ * Which remembered blackouts this read had standing to lift.
+ *
+ * Clearing a blackout needs positive evidence too: the read must actually
+ * have looked at the target and found headroom. A prepaid balance is covered
+ * only by a successful balance read. A quota blackout is covered only by a
+ * fresh, successful usage read that reports that exact account; a stale
+ * cached read is last hour's news, and a missing account is silence. The
+ * one exception is an account the provider no longer reports while its
+ * siblings still do, on a blackout with no reset: nothing else could ever
+ * lift it, and the read says the account is gone.
+ */
+export function blackoutCoverage(
+	snapshot: UsageSnapshot | null | undefined,
+	openRouter?: OpenRouterAccountSnapshot | null,
+): (blackout: ProviderBlackout) => boolean {
+	const fresh = Boolean(snapshot?.available) && !snapshot?.stale;
+	const accounts = fresh ? (snapshot?.accounts ?? []) : [];
+	return (blackout) => {
+		if (blackout.kind === "credits") return openRouter?.available === true;
+		const siblings = accounts.filter((account) => account?.provider === blackout.provider);
+		if (siblings.length === 0) return false;
+		if (blackout.accountId === null) return true;
+		if (siblings.some((account) => account.id === blackout.accountId)) return true;
+		return blackout.until === null;
+	};
+}
+
+/**
+ * A usage read is a photograph. Served from cache past a window's own reset,
+ * it still says "exhausted" about quota that has already refilled, and
+ * routing would refuse a model whose quota is back. A window whose stated
+ * reset has passed is read as reset: not exhausted, utilization unknown.
+ */
+export function lapseResetWindows(snapshot: UsageSnapshot, now = Date.now()): UsageSnapshot {
+	if (!snapshot.available) return snapshot;
+	const lapsed = (window: UsageWindow | null | undefined): boolean => {
+		if (!window || window.state !== "exhausted" || !window.resetsAt) return false;
+		const at = Date.parse(window.resetsAt);
+		return Number.isFinite(at) && at <= now;
+	};
+	let changed = false;
+	const accounts = (snapshot.accounts ?? []).map((account) => {
+		if (!(account.windows ?? []).some(lapsed)) return account;
+		changed = true;
+		const windows = account.windows.map((window) => (lapsed(window) ? { ...window, state: "ok" as const, utilization: 0 } : window));
+		return { ...account, windows };
+	});
+	return changed ? { ...snapshot, accounts } : snapshot;
+}
+
 function blackoutWindow(blackout: ProviderBlackout): UsageWindow {
 	return {
 		id: `${blackout.provider}:blackout`,
@@ -127,6 +179,7 @@ function blackoutWindow(blackout: ProviderBlackout): UsageWindow {
 		windowMs: null,
 		tier: null,
 		shared: true,
+		...(blackout.source ? { source: blackout.source } : {}),
 	};
 }
 
@@ -141,7 +194,7 @@ function blackoutWindow(blackout: ProviderBlackout): UsageWindow {
  */
 export function applyBlackouts(
 	snapshot: UsageSnapshot,
-	memory: RouteMemory,
+	memory: Pick<RouteMemory, "blackouts">,
 	now = Date.now(),
 ): UsageSnapshot {
 	const active = memory.blackouts.filter((blackout) => blackoutActive(blackout, now));

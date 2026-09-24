@@ -10,6 +10,7 @@ import { anchorIsInsideOpenBlock } from "@/lib/transcript-anchor";
 import { translate, useI18n, type Locale } from "@/lib/i18n";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { isEmptyThinkingBlock, isVisibleTranscriptMessage } from "@/lib/message-display";
+import { estimateTokensFromChars, estimateTokensPerSecond, messageTokenRate, tokenRateTier, MIN_RATE_OUTPUT_TOKENS } from "@/lib/message-rate";
 import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
 import { Tooltip, Collapsible, CollapsibleTrigger, CollapsiblePanel } from "./ui/primitives";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
@@ -469,28 +470,44 @@ function AssistantMessageView({
   const blockStartTimesRef = useRef<Map<number, number>>(new Map());
   const [streamingDurations, setStreamingDurations] = useState<Map<number, number>>(new Map());
 
-  // Thinking duration derived from file timestamps: time from prev message end to this message end
-  // This is the total generation time (thinking + any text before first tool call)
+  // Generation time for a settled message. The engine measures it
+  // (`duration`: queue + prefill + decode) and that is what a thinking box
+  // should report. The wall-clock gap from the previous message is the
+  // fallback for an engine that reports no duration — it overstates, because
+  // it also contains whatever ran between the two messages.
+  const measuredRate = useMemo(
+    () => messageTokenRate(message, isStreaming),
+    [message, isStreaming],
+  );
+  // A rate is only worth showing once there is enough output for it to mean
+  // throughput rather than latency (see MIN_RATE_OUTPUT_TOKENS).
+  const shownRate = measuredRate && measuredRate.outputTokens >= MIN_RATE_OUTPUT_TOKENS ? measuredRate : null;
   const thinkingDurationFromFile = useMemo<number | undefined>(() => {
+    if (typeof message.duration === "number" && message.duration > 0) {
+      return Math.max(1, Math.round(message.duration / 1000));
+    }
     if (!message.timestamp || !prevTimestamp) return undefined;
     const secs = Math.round((message.timestamp - prevTimestamp) / 1000);
     return secs > 0 ? secs : undefined;
-  }, [message.timestamp, prevTimestamp]);
+  }, [message.duration, message.timestamp, prevTimestamp]);
 
-  // Tool call durations derived from session file timestamps (accurate for completed messages)
-  // assistant message timestamp = when generation ended = when tools started running
-  // toolResult timestamp = when tool execution finished
+  // Tool durations from the session file. `message.timestamp` is when the
+  // request STARTED, so measuring from it charges the model's own generation
+  // time to the first tool; `completedAt` is when the tools were actually
+  // dispatched. Falling back to the start keeps older files rendering, even
+  // though that number is an overstatement.
+  const toolsStartedAt = message.completedAt ?? message.timestamp;
   const toolCallDurations = useMemo<Map<string, number>>(() => {
     const map = new Map<string, number>();
-    if (!toolResults || !message.timestamp) return map;
+    if (!toolResults || !toolsStartedAt) return map;
     for (const [callId, result] of toolResults) {
-      if (result.timestamp && message.timestamp) {
-        const secs = Math.round((result.timestamp - message.timestamp) / 1000);
+      if (result.timestamp) {
+        const secs = Math.round((result.timestamp - toolsStartedAt) / 1000);
         if (secs > 0) map.set(callId, secs);
       }
     }
     return map;
-  }, [toolResults, message.timestamp]);
+  }, [toolResults, toolsStartedAt]);
 
   // The copy control (the only consumer) is hidden while streaming — don't
   // re-join the growing text blocks on every token frame.
@@ -584,12 +601,12 @@ function AssistantMessageView({
       }
       if (chars === 0) return;
       if (streamStartRef.current === null) streamStartRef.current = now;
-      const elapsed = (now - streamStartRef.current) / 1000;
       // Rounded to the displayed precision before it hits state: the raw float
       // changes on essentially every tick, forcing a re-render of the live
       // message (and its markdown block) 3.3×/s independently of token arrival.
-      if (elapsed > 0.5) {
-        const next = Math.round((chars / 4 / elapsed) * 10) / 10;
+      const rate = estimateTokensPerSecond(chars, now - streamStartRef.current);
+      if (rate !== null) {
+        const next = Math.round(rate * 10) / 10;
         setTps((prev) => (prev === next ? prev : next));
       }
     };
@@ -637,33 +654,38 @@ function AssistantMessageView({
             if (b.type === "text") chars += (b as TextContent).text?.length ?? 0;
             else if (b.type === "thinking") chars += (b as ThinkingContent).thinking?.length ?? 0;
           }
-          const est = Math.round(chars / 4);
+          // The provider's own output count the moment it reports one; the
+          // char heuristic only until then. Both are labelled for what they
+          // are — the estimate is understated for CJK and dense code, and its
+          // rate is a cumulative average that every pause drags down.
+          const measured = shownRate;
+          const tokens = measured?.outputTokens ?? estimateTokensFromChars(chars);
+          const rate = measured?.tokensPerSecond ?? tps;
+          const exact = measured !== null;
+          if (tokens <= 0) return null;
           return (
-            <>
-
-              {est > 0 && (
-                <span style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--text)" }} title={t("messageView.estimatedTokens")}>
-                  <span style={{ display: "flex", alignItems: "center", gap: 2, fontSize: 11, fontWeight: 400 }}>
-                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="5" y1="1.5" x2="5" y2="8.5" /><polyline points="2 6 5 8.5 8 6" />
-                    </svg>
-                    {est}
+            <span
+              style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--text)" }}
+              title={exact ? t("messageView.measuredTokens") : t("messageView.estimatedTokens")}
+            >
+              <span style={{ display: "flex", alignItems: "center", gap: 2, fontSize: 11, fontWeight: 400 }}>
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="5" y1="1.5" x2="5" y2="8.5" /><polyline points="2 6 5 8.5 8 6" />
+                </svg>
+                {exact ? tokens : `~${tokens}`}
+              </span>
+              {rate !== null && (() => {
+                // Speed tiers use the semantic status tokens as TEXT color
+                // (theme-adaptive, AA-verified) over a subtle tint — the
+                // old hardcoded palette failed AA for white-on-fill.
+                const tone = `var(--status-${tokenRateTier(rate)})`;
+                return (
+                  <span style={{ marginLeft: 6, padding: "1px 6px", borderRadius: 4, background: `color-mix(in srgb, ${tone} 14%, var(--bg-panel))`, color: tone, fontSize: 11, fontWeight: 400 }}>
+                    {t(exact ? "messageView.tokensPerSecond" : "messageView.tokensPerSecondEstimate", { tps: rate.toFixed(1) })}
                   </span>
-                  {tps !== null && (() => {
-                    // Speed tiers use the semantic status tokens as TEXT color
-                    // (theme-adaptive, AA-verified) over a subtle tint — the
-                    // old hardcoded palette failed AA for white-on-fill.
-                    const tier = tps >= 50 ? "success" : tps >= 30 ? "renamed" : tps >= 15 ? "warning" : "error";
-                    const tone = `var(--status-${tier})`;
-                    return (
-                      <span style={{ marginLeft: 6, padding: "1px 6px", borderRadius: 4, background: `color-mix(in srgb, ${tone} 14%, var(--bg-panel))`, color: tone, fontSize: 11, fontWeight: 400 }}>
-                        {t("messageView.tokensPerSecond", { tps: tps.toFixed(1) })}
-                      </span>
-                    );
-                  })()}
-                </span>
-              )}
-            </>
+                );
+              })()}
+            </span>
           );
         })()}
       </div>
@@ -751,6 +773,15 @@ function AssistantMessageView({
           <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
             {formatUsage(message.usage, t, locale)}
           </div>
+        )}
+        {shownRate !== null && !isStreaming && (
+          // Measured, not estimated: the provider's own output count over the
+          // request's own duration — the same arithmetic the engine reports.
+          <Tooltip content={formatRateDetail(shownRate, t, locale)}>
+            <span style={{ fontSize: 11, color: `var(--status-${tokenRateTier(shownRate.tokensPerSecond)})`, whiteSpace: "nowrap" }}>
+              {t("messageView.tokensPerSecond", { tps: shownRate.tokensPerSecond.toFixed(1) })}
+            </span>
+          </Tooltip>
         )}
         {textContent && !isStreaming && (
           <Tooltip content={t("messageView.copyMessage")}>
@@ -2329,6 +2360,27 @@ function formatUsage(
   if (usage.cacheRead) parts.push(t("messageView.usageCacheRead", { tokens: usage.cacheRead.toLocaleString(locale) }));
   if (usage.cacheWrite) parts.push(t("messageView.usageCacheWrite", { tokens: usage.cacheWrite.toLocaleString(locale) }));
   if (usage.cost?.total) parts.push(`$${usage.cost.total.toFixed(4)}`);
+  return parts.join(" · ");
+}
+
+/** Tooltip for the measured rate: what was counted, over how long, the wait
+ * before the first token, and the rate after it — so a long provider wait
+ * reads as a wait instead of as a slow model. */
+function formatRateDetail(
+  rate: { outputTokens: number; durationMs: number; ttftMs?: number; decodeTokensPerSecond?: number },
+  t: (key: string, vars?: Record<string, string | number>) => string,
+  locale: Locale,
+): string {
+  const parts = [t("messageView.rateMeasured", {
+    tokens: rate.outputTokens.toLocaleString(locale),
+    seconds: (rate.durationMs / 1000).toFixed(1),
+  })];
+  if (rate.ttftMs !== undefined) {
+    parts.push(t("messageView.rateTtft", { seconds: (rate.ttftMs / 1000).toFixed(1) }));
+  }
+  if (rate.decodeTokensPerSecond !== undefined) {
+    parts.push(t("messageView.rateDecode", { tps: rate.decodeTokensPerSecond.toFixed(1) }));
+  }
   return parts.join(" · ");
 }
 

@@ -1,9 +1,19 @@
 # Release Checklist
 
-Cody ships **one way: the container image**. `ghcr.io/nphil/cody:latest` is
-what installs pull, a versioned GitHub Release is the changelog Unraid's
-ShipLog plugin shows, and the in-app update check compares against the latest
-release of this repo. **npm is not a release channel** — Cody is not
+Cody ships **one way: the container image** — but to **two hosts, both real.**
+Its home is the self-hosted Gitea forge at
+`https://git.nateshome.net/nphilip89/Cody` (remote `forge`), whose
+`git.nateshome.net/nphilip89/cody:latest` is **what the owner's Unraid server
+pulls**; it also releases on GitHub at `github.com/nphil/Cody` (remote
+`origin`), whose `ghcr.io/nphil/cody:latest` is what other installs pull. Each
+host builds and publishes its own image from its own workflow
+(`.gitea/workflows/docker.yml`, `.github/workflows/docker.yml`); keep the two
+in step, and never re-point one host's image name at the other's registry.
+A versioned Release on each is the changelog Unraid's ShipLog plugin shows,
+and the in-app update check compares against the latest release.
+**Pushing only one host is the mistake this paragraph exists to prevent: a
+GitHub-only release leaves production on the old image while every check
+above it reports success.** **npm is not a release channel** — Cody is not
 published there, nothing may reintroduce an npm publish step, and outside
 Docker the app runs from a checkout (the Settings update check degrades to
 "Update check unavailable" by design.)
@@ -58,6 +68,7 @@ npm version minor --no-git-tag-version       # or major/patch; updates package.j
 git add package.json package-lock.json
 git commit                                   # subject: "Release X.Y.Z", body: the changelog narrative
 git tag vX.Y.Z                               # annotated (-m) or lightweight — both work
+git push forge main vX.Y.Z                   # the forge FIRST: its image is what production pulls
 git push origin main vX.Y.Z
 ```
 
@@ -77,17 +88,39 @@ Dispatch with an empty version is a plain `:latest` rebuild, no release.
 
 ## Verify
 
+**Both hosts, not one.** The forge half is the one production pulls, so
+verify it first — Cody's own `forge` tool reaches it without a CLI:
+
+```
+forge op=run_watch host=nateforge repo=nphilip89/Cody branch=main
+forge op=releases  host=nateforge repo=nphilip89/Cody limit=1   # vX.Y.Z, not a draft
+forge op=packages  host=nateforge owner=nphilip89              # :latest AND :X.Y.Z, same timestamp
+```
+
+Pushing `main` and the tag together starts TWO runs per host (one for the
+branch, one for the tag); the branch run skips its `release` job and the tag
+run does not. Both must be green.
+
+Then the GitHub half:
+
 ```bash
 gh run list --workflow docker.yml --limit 2          # publish + release green
 gh release view vX.Y.Z                               # public, correct notes
 T=$(curl -s "https://ghcr.io/token?scope=repository:nphil/cody:pull" | jq -r .token)
-curl -s -o /dev/null -w '%{http_code} %header{docker-content-digest}\n' \
-  -H "Authorization: Bearer $T" \
+curl -s -H "Authorization: Bearer $T" \
   -H "Accept: application/vnd.oci.image.index.v1+json" \
-  https://ghcr.io/v2/nphil/cody/manifests/X.Y.Z      # 200; same digest as :latest
+  https://ghcr.io/v2/nphil/cody/manifests/X.Y.Z |
+  jq -r '.manifests[] | select(.platform.architecture=="amd64") | .digest'
 ```
 
+**Compare the per-platform amd64 digest, never the index digest.** Those two
+concurrent builds each attach their own provenance attestation to the index,
+so `X.Y.Z` and `latest` legitimately carry DIFFERENT index digests while the
+runnable image is byte-identical. An earlier version of this check compared
+index digests and reported a false mismatch on its own happy path.
+
 Then update the running server (Unraid's update button, or
-`docker pull ghcr.io/nphil/cody:latest` + recreate). Note for agents: if you
-are running inside that container, recreating it ends your session — finish
-everything else first.
+`docker pull git.nateshome.net/nphilip89/cody:latest` + recreate). Note for
+agents: if you are running inside that container, recreating it ends your
+session — finish everything else first, and never recreate it without the
+owner's say-so.

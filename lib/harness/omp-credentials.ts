@@ -20,9 +20,19 @@ export interface OmpCredentialRow {
   blockedUntil: string | null;
 }
 export interface OmpCredentialsSnapshot { available: boolean; credentials: OmpCredentialRow[]; reason?: string; }
-export interface OmpCredentialRemoval { removed: boolean; providerRemoved: boolean; code?: string; message?: string; }
+export interface OmpCredentialRemoval {
+  removed: boolean;
+  providerRemoved: boolean;
+  /** Redacted identity returned only to Cody so its local label can be
+   * removed even when the account list has gone stale. Never credential data. */
+  identity?: string;
+  code?: string;
+  message?: string;
+}
 
 interface ListRequest { operation: "list"; packageRoot: string; agentDir: string }
+/** `remove` is the explicit per-account permanent path. It is intentionally
+ * separate from OMP's provider-wide soft logout exposed by `remove_provider`. */
 interface RemoveRequest { operation: "remove"; packageRoot: string; agentDir: string; provider: string; credentialId: number }
 interface RemoveProviderRequest { operation: "remove_provider"; packageRoot: string; agentDir: string; provider: string }
 interface UnblockRequest { operation: "unblock"; packageRoot: string; agentDir: string; credentialId: number }
@@ -105,7 +115,8 @@ function normalizeRemoval(frame: Record<string, unknown> | null, expectedType: "
   if (frame.ok !== true) return { removed: false, providerRemoved: false, code: safeString(frame.code) ?? "unsupported", message: safeString(frame.message) ?? "Account removal is unavailable." };
   const removed = frame.removed === true;
   const providerRemoved = expectedType === "remove_provider" ? removed : frame.providerRemoved === true;
-  return { removed, providerRemoved };
+  const identity = safeString(frame.identity);
+  return { removed, providerRemoved, ...(identity ? { identity } : {}) };
 }
 
 export async function listOmpCredentials(deps: OmpCredentialBridgeDeps = {}): Promise<OmpCredentialsSnapshot> {

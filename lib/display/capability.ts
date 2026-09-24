@@ -55,3 +55,11 @@ export function displayInternalEndpoint(): string {
 export function todoInternalEndpoint(): string {
   return internalEndpoint("/api/internal/todo");
 }
+
+export function sessionsInternalEndpoint(): string {
+  return internalEndpoint("/api/internal/sessions");
+}
+
+export function devicesInternalEndpoint(): string {
+  return internalEndpoint("/api/internal/devices");
+}

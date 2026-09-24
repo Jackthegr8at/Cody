@@ -16,7 +16,23 @@ export interface DisplayProvider {
   readonly requestId: string;
   attach(socket: WebSocket): void;
   dispose(): Promise<void>;
+  /**
+   * Bring the surface up with no client attached. Normally a provider starts
+   * when the first socket arrives, which is right for a preview nobody is
+   * watching yet — but a SHARED browser has to exist before the agent can
+   * attach automation to it, and the human's panel may still be closed.
+   */
+  ensureStarted?(): Promise<void>;
+  /** The DevTools HTTP endpoint of this provider's own Chromium, for agent
+   * automation to attach to the very surface the human is watching. Null
+   * until the browser is up, or for a surface that is not a Chromium. */
+  cdpEndpoint?(): string | null;
 }
+
+/** Idle window for a browser an agent is driving. Long enough to outlast a
+ * look away or a panel close mid-run, short enough that a forgotten shared
+ * browser is not a permanent Chromium. */
+export const SHARED_IDLE_DISPOSE_MS = 10 * 60_000;
 
 interface ProviderState {
   providers: Map<string, DisplayProvider>;
@@ -191,6 +207,8 @@ export class RasterWebProvider implements DisplayProvider {
   private startTimer: NodeJS.Timeout | null = null;
   /** Screencast frame awaiting an ack that backpressure is holding back. */
   private pendingAck: number | null = null;
+  /** True once an agent has been handed this browser's DevTools endpoint. */
+  private shared = false;
   private ackTimer: NodeJS.Timeout | null = null;
   /** Teardown for the console/network capture feeding lib/logs/ring. */
   private detachLogs: AppLogDetach | null = null;
@@ -218,6 +236,37 @@ export class RasterWebProvider implements DisplayProvider {
     socket.once("close", () => this.detach(socket));
     if (this.starting === null && this.startTimer === null) {
       this.startTimer = setTimeout(() => { this.startTimer = null; this.starting ??= this.start(); }, START_GRACE_MS);
+    }
+  }
+
+  /** See DisplayProvider.ensureStarted. Shares the one `starting` promise, so
+   * a socket arriving mid-launch joins it instead of racing a second one. */
+  async ensureStarted(): Promise<void> {
+    if (this.disposed) throw new Error("This preview surface has been closed");
+    if (this.startTimer) { clearTimeout(this.startTimer); this.startTimer = null; }
+    this.starting ??= this.start();
+    await this.starting;
+    if (!this.page) throw new Error("The preview renderer did not start");
+  }
+
+  /**
+   * Puppeteer always launches with a DevTools endpoint; `wsEndpoint()` is
+   * `ws://127.0.0.1:<port>/devtools/browser/<id>`, and the same port serves
+   * the HTTP discovery surface automation attaches through. Derived rather
+   * than pinned to a fixed port: two sessions each own a Chromium, and a
+   * fixed port would make the second one fail to launch.
+   */
+  cdpEndpoint(): string | null {
+    const endpoint = this.browser?.wsEndpoint();
+    if (!endpoint) return null;
+    try {
+      const url = new URL(endpoint);
+      // Handing the endpoint out IS the share: from here on something may be
+      // driving this browser, and the idle window lengthens accordingly.
+      this.shared = true;
+      return `http://${url.host}`;
+    } catch {
+      return null;
     }
   }
 
@@ -497,7 +546,12 @@ export class RasterWebProvider implements DisplayProvider {
   private detach(socket: WebSocket): void {
     this.clients.delete(socket);
     if (this.clients.size > 0 || this.idleTimer) return;
-    this.idleTimer = setTimeout(() => { void this.dispose(); }, IDLE_DISPOSE_MS);
+    // A plain preview nobody is watching is free to go. A SHARED one is being
+    // driven by an agent that may be mid-run, and the human closing the panel
+    // (or switching tabs) is not a reason to kill the browser under it — that
+    // would fail the automation with a dead endpoint and no explanation. It
+    // still expires, just on a timescale that outlasts a look away.
+    this.idleTimer = setTimeout(() => { void this.dispose(); }, this.shared ? SHARED_IDLE_DISPOSE_MS : IDLE_DISPOSE_MS);
   }
 
   async dispose(): Promise<void> {

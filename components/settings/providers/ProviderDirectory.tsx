@@ -17,7 +17,10 @@ import { useCallback, useEffect, useMemo, useState, type KeyboardEvent, type Mou
 import { useConfigWriter } from "@/hooks/useConfigWriter";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { runtimeEndpointUrl, runtimeLabel, runtimeProviderName, useLocalAiScan, type LocalAiScanResult } from "@/hooks/useLocalAiScan";
+import { useOpenRouterAccount } from "@/hooks/useOpenRouterAccount";
 import { useSettingsRoute } from "@/hooks/useSettingsData";
+import { useUsage } from "@/hooks/useUsage";
+import { formatRelativeTime } from "@/lib/format";
 import { sortConnectedRows, type ProviderRow, type ProvidersResponse } from "@/lib/provider-directory";
 import { Directory, type DirectoryRow, type DirectorySection } from "../Directory";
 import { Drawer } from "../Drawer";
@@ -28,6 +31,7 @@ import { AddProviderPicker, type PickChoice } from "./AddProviderPicker";
 import { buttonStyle, describeModels, describeWinning, invalidateProviderReads, missingOptionalHint, primaryButtonStyle, ProviderTile, quietButtonStyle } from "./controls";
 import { LocalEndpointForm } from "./LocalEndpointForm";
 import { PROVIDERS_PANEL_ID, ProviderDetail } from "./ProviderDetail";
+import { UsageSummary } from "./UsageSummary";
 
 export const PROVIDERS_ROUTE = "/api/providers";
 
@@ -59,6 +63,11 @@ export function ProviderDirectory() {
   const { capabilities, engine, isMobile, platform, harnessLabel } = useSettingsShell();
   const providers = useSettingsRoute<ProvidersResponse>(PROVIDERS_ROUTE);
   const scan = useLocalAiScan(true);
+  // Only fetches while this panel is mounted (the panel unmounts with the
+  // rest of Settings when it closes), so nobody pays for a usage poll they
+  // cannot see.
+  const usage = useUsage(true);
+  const openRouterAccount = useOpenRouterAccount(true);
   const writer = useConfigWriter();
   const { track } = useSaveStatus(PROVIDERS_PANEL_ID);
   const [detail, setDetail] = useState<DetailTarget | null>(null);
@@ -84,6 +93,46 @@ export function ProviderDirectory() {
   const reload = useCallback(() => {
     invalidateProviderReads();
   }, []);
+
+  const openAccountProvider = useCallback((provider: string) => {
+    const match = rows.find((row) => row.id === provider || row.catalogIds.includes(provider));
+    if (match) setDetail({ id: match.id });
+  }, [rows]);
+  const [retryingAccountId, setRetryingAccountId] = useState<string | null>(null);
+  const [retryMessage, setRetryMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
+  // "Retry now" for an account nothing measures (a block set from one
+  // rejected request): lift the block, then re-read so the row and the
+  // fallback chains reflect it. The next real request is the real test.
+  const retryBlock = useCallback(async (provider: string, accountId: string) => {
+    setRetryingAccountId(accountId);
+    setRetryMessage(null);
+    try {
+      const response = await fetch("/api/usage/unblock", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, accountId }),
+      });
+      const body = await response.json().catch(() => ({})) as { outcome?: string; message?: string; error?: string };
+      if (!response.ok || body.outcome === "error") {
+        setRetryMessage({ tone: "error", text: body.message ?? body.error ?? "The block could not be lifted." });
+      } else if (body.outcome === "measured") {
+        setRetryMessage({ tone: "error", text: body.message ?? "This account is measured as exhausted, so there is no block to lift." });
+      } else {
+        setRetryMessage({ tone: "ok", text: body.message ?? "Block lifted. The next request will try this account again." });
+      }
+    } catch {
+      setRetryMessage({ tone: "error", text: "The block could not be lifted." });
+    } finally {
+      setRetryingAccountId(null);
+      usage.refresh();
+    }
+  }, [usage]);
+  const refreshUsage = useCallback(() => {
+    usage.refresh();
+    openRouterAccount.refresh();
+  }, [usage, openRouterAccount]);
+  const usageAge = usage.snapshot?.fetchedAt ? formatRelativeTime(usage.snapshot.fetchedAt, "en-US", Date.now()) : null;
+  const usageUpdatedText = usageAge ? `Updated ${usageAge}` : null;
   // Stable closers: on a phone a Drawer registers a level with the shell in
   // an effect keyed on its `onClose`, and a fresh arrow per render would
   // re-register on every render — which re-renders the shell, forever.
@@ -180,6 +229,21 @@ export function ProviderDirectory() {
         </div>
       )}
       {enableError && <div role="alert" style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12, color: "var(--status-error)" }}><AlertCircle size={13} aria-hidden="true" />{enableError}</div>}
+
+      <UsageSummary
+        accounts={usage.snapshot?.accounts ?? []}
+        openRouter={openRouterAccount.snapshot}
+        unavailableProviders={usage.snapshot?.unavailableProviders ?? []}
+        updatedText={usageUpdatedText}
+        refreshing={usage.loading || openRouterAccount.loading}
+        onRefresh={refreshUsage}
+        onOpenAccount={openAccountProvider}
+        onRetryBlock={canEdit ? (provider, accountId) => void retryBlock(provider, accountId) : undefined}
+        retryingAccountId={retryingAccountId}
+      />
+      {retryMessage && (
+        <div role="status" style={{ fontSize: 12, marginTop: -10, color: retryMessage.tone === "ok" ? "var(--text-muted)" : "var(--status-error)" }}>{retryMessage.text}</div>
+      )}
 
       <Directory sections={sections} ariaLabel="Connected providers" />
 

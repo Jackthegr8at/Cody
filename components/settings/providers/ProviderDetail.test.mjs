@@ -161,7 +161,7 @@ test("a limited account with a reset time shows Limited . resets <time>", () => 
 
 test("the remove control appears only when the account allows it and the row is editable", () => {
   const removable = renderCard({ method: { accounts: [account({ label: "a@example.com", canRemove: true })] } });
-  assert.match(removable, /aria-label="Remove a@example\.com"/);
+  assert.match(removable, /aria-label="Remove a@example\.com permanently"/);
 
   const notRemovable = renderCard({ method: { accounts: [account({ label: "a@example.com", canRemove: false })] } });
   assert.doesNotMatch(notRemovable, /aria-label="Remove/);
@@ -171,4 +171,21 @@ test("the remove control appears only when the account allows it and the row is 
     { canEdit: false },
   );
   assert.doesNotMatch(readOnly, /aria-label="Remove/);
+});
+
+test("active accounts can be named while disabled history is separate and remove-only", () => {
+  const html = renderCard({
+    method: {
+      canRenameAccount: true,
+      accounts: [
+        account({ id: "1", label: "active@example.com", state: "serving" }),
+        account({ id: "2", label: "disabled@example.com", position: 1, state: "disabled" }),
+      ],
+    },
+  });
+  assert.match(html, /Disabled history/);
+  assert.match(html, /disabled by Claude Code/);
+  assert.match(html, /aria-label="Rename active@example\.com"/);
+  assert.doesNotMatch(html, /aria-label="Rename disabled@example\.com"/);
+  assert.match(html, /Remove disabled@example\.com permanently/);
 });

@@ -335,6 +335,17 @@ export function readLocalRoutingIntent(sessionId?: string): LocalRoutingIntent {
   return resolveLocalRoutingIntent(snapshot, candidates, roleIds);
 }
 
+/** The exact models a Local-only session may select ("provider/modelId"),
+ * so the picker can tell a local pick (stays Local-only) from one that must
+ * leave the mode first. Empty when the session is not Local-only. */
+export function localRoutingAllowedModels(sessionId: string | undefined): string[] {
+  if (!isSessionLocalOnly(sessionId)) return [];
+  const intent = readLocalRoutingIntent(sessionId);
+  if (!intent.enabled || !intent.primary) return [];
+  const models = [intent.primary, ...(intent.fallbackChain ?? []), ...Object.values(intent.roleModels ?? {})];
+  return [...new Set(models.map((model) => `${model.provider}/${model.modelId}`))];
+}
+
 export function validateLocalRoutingModelSelection(
   sessionId: string | undefined,
   provider: string,

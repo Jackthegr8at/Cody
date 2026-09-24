@@ -8,8 +8,10 @@ import { getAgentDir } from "../omp/paths";
 import { findOmpPackageRoot } from "../omp/package-source";
 import { resolveOmpBin } from "../omp/omp-cli";
 
-export interface ResetCredit { id: string; expiresAt: string | null; }
-export interface ResetCreditAccount { id: string; label: string; availableCount: number; canRedeem: boolean; credits: ResetCredit[]; error?: string; }
+export interface ResetCredit { id: string; expiresAt: string | null; title?: string; }
+/** `provider` is the engine's id ("openai-codex", "anthropic"); `reason` says
+ * why a positive balance cannot be spent right now. */
+export interface ResetCreditAccount { id: string; label: string; provider?: string; availableCount: number; canRedeem: boolean; credits: ResetCredit[]; error?: string; reason?: string; }
 export interface ResetCreditsSnapshot { available: boolean; accounts: ResetCreditAccount[]; fetchedAt: string; reason?: string; observerId?: string; }
 export type ResetCreditOutcomeKind = "reset" | "already_redeemed" | "no_credit" | "nothing_to_reset" | "error";
 export type ResetCreditErrorCode = "credit_list_failed" | "no_account" | "account_unavailable" | "unsupported" | "invalid_request" | "in_flight" | "no_credit" | string;
@@ -72,8 +74,9 @@ function safeAccount(value: unknown): ResetCreditAccount | null {
   const raw = value as Record<string, unknown>; const id = safeString(raw.id); const label = safeString(raw.label);
   const availableCount = typeof raw.availableCount === "number" && Number.isSafeInteger(raw.availableCount) && raw.availableCount >= 0 ? raw.availableCount : null;
   if (!id || !label || availableCount === null || typeof raw.canRedeem !== "boolean") return null;
-  const credits = Array.isArray(raw.credits) ? raw.credits.flatMap((credit): ResetCredit[] => { if (!credit || typeof credit !== "object" || Array.isArray(credit)) return []; const c = credit as Record<string, unknown>; const creditId = safeString(c.id); return creditId ? [{ id: creditId, expiresAt: typeof c.expiresAt === "string" ? c.expiresAt : null }] : []; }) : [];
-  const error = safeString(raw.error); return { id, label, availableCount, canRedeem: raw.canRedeem, credits, ...(error ? { error } : {}) };
+  const credits = Array.isArray(raw.credits) ? raw.credits.flatMap((credit): ResetCredit[] => { if (!credit || typeof credit !== "object" || Array.isArray(credit)) return []; const c = credit as Record<string, unknown>; const creditId = safeString(c.id); const title = safeString(c.title); return creditId ? [{ id: creditId, expiresAt: typeof c.expiresAt === "string" ? c.expiresAt : null, ...(title ? { title } : {}) }] : []; }) : [];
+  const error = safeString(raw.error); const reason = safeString(raw.reason); const provider = safeString(raw.provider);
+  return { id, label, ...(provider ? { provider } : {}), availableCount, canRedeem: raw.canRedeem, credits, ...(error ? { error } : {}), ...(reason ? { reason } : {}) };
 }
 function normalizeList(frame: Record<string, unknown> | null): ResetCreditsSnapshot {
   if (!frame || frame.type !== "list") return unavailableResetCredits("Reset-credit helper did not return a valid response.");

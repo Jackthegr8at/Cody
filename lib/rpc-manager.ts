@@ -3,6 +3,7 @@ import { homedir } from "os";
 import path from "path";
 import { getSessionOwner, renameSessionOwner, setSessionOwner } from "./auth/session-owners";
 import { aliasDisplaySession, publishDisplayRequest } from "./display/bus";
+import { startSharedBrowser } from "./display/shared-browser";
 import { isLoopbackHost } from "./display/ladder";
 import { ForgeError } from "./forge/client";
 import { FORGE_HOST_TOOL, runForgeTool } from "./forge/tool";
@@ -34,7 +35,11 @@ import { selectPromptProfileId, type PromptProfileId } from "./local-model-profi
 import { PRESET_FULL } from "./tool-presets";
 import { isRecord } from "./type-guards";
 import { SIDEBAR_CONTEXT_TOOLS } from "./sidebar-context-tools";
-import type { UserRecord } from "./auth/users";
+import { SESSION_AWARENESS_TOOLS, type SessionLivePhase, type SessionToolContext } from "./session-tools";
+import { findUserById, hasAnyUser, type UserRecord } from "./auth/users";
+import { DEVICE_OPERATION_TOOLS } from "./devices/operation-tools";
+import { DEVICE_TOOLS } from "./devices/tools";
+import { aliasDeviceBridge, getDeviceBridge, peekDeviceBridge } from "./devices/bus";
 import type {
   BashResultInfo,
   HostToolDefinition,
@@ -205,6 +210,18 @@ const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
     required: ["url"],
   },
 }, {
+  name: "shared_browser",
+  description:
+    "Open a URL in a browser the user WATCHES LIVE in Cody's Preview panel, and get back a DevTools endpoint to drive it with. Use this instead of launching your own headless browser whenever you verify a web UI: the user sees every click and navigation as it happens, and can take the mouse themselves mid-run. Attach your browser automation to the returned endpoint as a CDP url and operate the existing tab. Loopback URLs only.",
+  parameters: {
+    type: "object",
+    properties: {
+      url: { type: "string", description: "Container-local http(s) URL to open, for example http://127.0.0.1:3000" },
+      title: { type: "string", description: "Optional short preview title." },
+    },
+    required: ["url"],
+  },
+}, {
   name: "read_app_logs",
   description: `Read the previewed app's browser console and failed network requests: uncaught exceptions, console.error/warn output, 4xx/5xx responses and refused connections. Returns a deduped digest, oldest first — identical repeated lines collapse into ONE entry with a count, so a render loop reads as one line rather than thousands. Call it after changing code and reloading the preview, and whenever another tool result reports new app errors. ${APP_LOG_SHADOW_NOTE}`,
   parameters: {
@@ -230,7 +247,13 @@ const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
     },
     required: ["action"],
   },
-}, FORGE_HOST_TOOL];
+},
+// Cross-session awareness. A main chat is regularly asked what ANOTHER
+// session is doing, and Cody is the only party that can answer: an engine's
+// own agent hub sees nothing but its own subagents. Shared verbatim with the
+// sidebar (lib/session-tools.ts) so both describe them identically.
+...SESSION_AWARENESS_TOOLS.map(({ handler: _handler, ...tool }) => tool),
+FORGE_HOST_TOOL];
 /** Every tool the SERVER settles itself, so `handleFrame` routes its calls
  * here instead of to a browser. The sidebar's context tools are server-side
  * for the same reason the rest are: they read the filesystem and the session
@@ -238,7 +261,15 @@ const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
 const SERVER_HOST_TOOL_NAMES = new Set([
   ...SERVER_HOST_TOOLS.map((tool) => tool.name),
   ...SIDEBAR_CONTEXT_TOOLS.map((tool) => tool.name),
+  ...DEVICE_TOOLS.map((tool) => tool.name),
+  ...DEVICE_OPERATION_TOOLS.map((tool) => tool.name),
 ]);
+/** One session-tool result's char budget for a MAIN chat. The sidebar's own
+ * budget assumes the smallest supported window (6 KB); a main session runs on
+ * whatever model the user picked, where paging a transcript four times to
+ * answer one question is its own kind of waste. Still bounded: a transcript
+ * is unbounded and a tool result has to fit one RPC frame. */
+const MAIN_SESSION_RESULT_CHARS = 24_000;
 const MCP_LIST_TIMEOUT_MS = 15_000;
 /** Cap on the *acknowledgement* of a prompt frame — not on model execution.
  * omp acks a prompt as soon as it accepts it and the run then reports through
@@ -661,6 +692,10 @@ export class AgentSessionWrapper {
   private restarting = false;
   private _alive = true;
   private mcpListWaiter: { resolve: (text: string) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+  /** Unsubscribe for durable browser operation transcript updates. */
+  private operationWatch: (() => void) | null = null;
+  /** Unsubscribe for the device-bridge watch, set once the session id is known. */
+  private deviceWatch: (() => void) | null = null;
   /** Host tools the web UI registered via set_host_tools (agent-callable). */
   private hostToolNames: Set<string> = new Set();
   private hostTools: Array<Record<string, unknown>> = [];
@@ -709,7 +744,117 @@ export class AgentSessionWrapper {
    * schemas cost 416 tokens, which even an 8k local model can afford. */
   private hostToolsForCurrentProfile() {
     if (this.engine.kind === "sidebar") return SIDEBAR_CONTEXT_TOOLS.map(({ handler: _handler, ...tool }) => tool);
-    return this.localProfileLaunch?.profileId === "minimal" ? [] : [...this.hostTools, ...SERVER_HOST_TOOLS];
+    if (this.localProfileLaunch?.profileId === "minimal") return [];
+    return [...this.hostTools, ...SERVER_HOST_TOOLS, ...this.deviceToolsForSession()];
+  }
+
+  /**
+   * The working tools exist only while a page is actually holding hardware
+   * for this session. Registering all seven unconditionally would spend
+   * schema tokens in every conversation for a capability most of them cannot
+   * use — and offering a model `device_write` with nothing attached invites
+   * it to try.
+   *
+   * `device_list` is the exception, and is published whenever a browser is
+   * attached at all. A capability the model cannot SEE is one it never
+   * suggests: with nothing granted yet, an agent asked to talk to a plugged-in
+   * board had no way to learn that the browser it is being read in can reach
+   * USB, serial and BLE directly. One small schema buys that, and the tool's
+   * own output names the next step (grant a device in the Devices panel) and
+   * reports what this particular browser can do — which differs per machine,
+   * since the human may be on a laptop, a phone or a tablet.
+   */
+  private deviceToolsForSession(): HostToolDefinition[] {
+    if (!this._sessionId) return [];
+    const bridge = peekDeviceBridge(this._sessionId);
+    if (!bridge?.attached) return [];
+    const published = bridge.list().length > 0
+      ? [...DEVICE_TOOLS, ...DEVICE_OPERATION_TOOLS]
+      : DEVICE_TOOLS.filter((tool) => tool.name === "device_list");
+    return published.map(({ handler: _handler, ...tool }) => tool);
+  }
+
+  /** Re-publish the tool list when a browser or its hardware comes or goes,
+   * and say so once in the transcript: a tool that silently materializes
+   * mid-conversation is a capability the model has no reason to go looking
+   * for. Attachment is tracked alongside the device count because a browser
+   * arriving with nothing granted still changes the published set — that is
+   * when `device_list` appears. */
+  private watchDeviceBridge(): void {
+    if (!this._sessionId || this.deviceWatch) return;
+    const bridge = peekDeviceBridge(this._sessionId);
+    if (!bridge) return;
+    if (!this.operationWatch) {
+      this.operationWatch = bridge.onOperation((snapshot, event) => {
+        if (!this.isAlive()) return;
+        let message = `Hardware operation ${snapshot.id} is ${snapshot.state}.`;
+        let level: "info" | "warning" = "info";
+        if (event?.type === "progress" && event.progress) {
+          message = `Hardware operation ${snapshot.id}: ${event.progress.phase}${event.progress.message ? ` — ${event.progress.message}` : ""}.`;
+        } else if (event?.type === "output" && event.output) {
+          const output = event.output.line.length > 1024
+            ? event.output.line.slice(0, 1024) + " …[line truncated]"
+            : event.output.line;
+          message = `Hardware operation ${snapshot.id} device output (untrusted): ${output}`;
+        } else if (event?.type === "confirmation" && event.confirmation) {
+          level = "warning";
+          message = `Hardware operation ${snapshot.id} is awaiting direct UI confirmation for ${event.confirmation.binding.action} on ${event.confirmation.binding.target}.`;
+        } else if (snapshot.error) {
+          level = "warning";
+          message = `Hardware operation ${snapshot.id} failed: ${snapshot.error}`;
+        } else if (snapshot.result) {
+          message = `Hardware operation ${snapshot.id} completed: ${snapshot.result.summary}`;
+        }
+        this.emit({ type: "notice", level, message });
+      });
+    }
+    let lastAttached = bridge.attached;
+    let lastCount = bridge.attached ? bridge.list().length : 0;
+    this.deviceWatch = bridge.onChange(() => {
+      const attached = bridge.attached;
+      const count = attached ? bridge.list().length : 0;
+      if (count === lastCount && attached === lastAttached) return;
+      const previous = lastCount;
+      lastAttached = attached;
+      lastCount = count;
+      if (!this.engine.rpcUi.hostTools || !this.isAlive()) return;
+      void this.proc.sendCommand({ type: "set_host_tools", tools: this.hostToolsForCurrentProfile() }).catch(() => {});
+      if (count > 0 && previous === 0) {
+        const labels = bridge.list().map((device) => device.label).join(", ");
+        this.emit({
+          type: "notice",
+          level: "info",
+          message: `Hardware attached in the browser: ${labels}. device_open now claims it and reports its endpoints; device_read, device_write, device_close, usb_transfer and ble_gatt work against it.`,
+        });
+      }
+      // The loss matters more than the arrival, and used to be silent: the
+      // tools simply vanished mid-conversation and the next call failed with
+      // nothing to connect it to. Measured on a long ADB push where the
+      // socket dropped — the agent kept retrying a device that was gone.
+      if (count === 0 && previous > 0) {
+        this.emit({
+          type: "notice",
+          level: "warning",
+          message: attached
+            ? "The browser released its hardware (unplugged, or the grant was revoked). Any transfer in progress did not finish; reconnect it in Cody's Devices panel."
+            : "The browser holding this session's hardware disconnected (tab closed, reloaded, or offline). Any transfer in progress did not finish; reopen Cody's Devices panel to reconnect.",
+        });
+      }
+    });
+  }
+
+  /** The phase flags a status call reports, read straight off this wrapper.
+   * Deliberately not a `get_state` round trip: the whole point of asking
+   * about ANOTHER session is that it may be wedged, and awaiting its child
+   * would hang the asking session's own turn. */
+  livePhase(): SessionLivePhase {
+    return {
+      running: this.isRunning(),
+      streaming: this.streaming,
+      promptRunning: this.promptRunning,
+      bashRunning: this.bashRunning,
+      compacting: this.compacting,
+    };
   }
 
   get sessionId(): string {
@@ -795,7 +940,43 @@ export class AgentSessionWrapper {
   /** Apply a persisted routing-overlay change only when this wrapper is idle. */
   async restartForRouting(): Promise<boolean> {
     if (this.isRunning()) return false;
-    await this.restart();
+    // The cached launch profile of a Local-only session IS the Local-only
+    // launch: its frozen envelope profile plus the overlay that limits the
+    // engine to local models. Relaunching from it after the mode was turned
+    // off kept that overlay, so the engine went on refusing every cloud
+    // model ("Model not found") while Cody reported Local-only as off. The
+    // base profile is rebuilt from the active model instead; relaunch then
+    // layers the routing overlay back on only while the mode is on.
+    let base: LocalModelProfileLaunch | undefined;
+    let resolution: ResolvedLocalModelProfile | undefined;
+    try {
+      const model = (await this.proc.sendCommand<RpcSessionState>({ type: "get_state" })).model;
+      if (model) {
+        resolution = resolveLocalModelPromptProfile({
+          provider: model.provider,
+          modelId: model.id,
+          contextWindow: model.contextWindow,
+          maxTokens: model.maxTokens,
+        });
+        base = materializeLocalModelProfile(resolution);
+      }
+    } catch {
+      // No readable model: the engine's full default profile is the safe base.
+    }
+    const effective = launchWithLocalRouting(base, this._sessionId);
+    this.localProfileLaunch = effective;
+    this.localProfileResolution = resolution;
+    await this.restart(base);
+    // A resumed session keeps its last model even when the overlay no longer
+    // lists it, so turning Local-only on over a cloud model would have sent
+    // the next turn to the cloud. Move it onto the local primary.
+    const intent = readLocalRoutingIntent(this._sessionId);
+    if (intent.enabled && intent.primary) {
+      const current = (await this.proc.sendCommand<RpcSessionState>({ type: "get_state" })).model;
+      if (!current || !validateLocalRoutingModelSelection(this._sessionId, current.provider, current.id).allowed) {
+        await this.send({ type: "set_model", provider: intent.primary.provider, modelId: intent.primary.modelId });
+      }
+    }
     return true;
   }
 
@@ -847,8 +1028,16 @@ export class AgentSessionWrapper {
     if (this._sessionId && this._sessionId !== id) {
       this.planKeeper?.dispose();
       this.planKeeper = null;
+      // A re-keyed session takes its device grants with it: the page is still
+      // holding the same hardware, it is just filed under a new id now.
+      aliasDeviceBridge(this._sessionId, id);
+      this.deviceWatch?.();
+      this.deviceWatch = null;
+      this.operationWatch?.();
+      this.operationWatch = null;
     }
     this._sessionId = id;
+    this.watchDeviceBridge();
   }
 
   private applyIdentity(state: RpcSessionState): void {
@@ -1184,16 +1373,31 @@ export class AgentSessionWrapper {
    * reject paths, never routed to a browser.
    */
   private async handleServerHostTool(id: string, toolName: string, event: AgentEvent): Promise<void> {
-    const sidebarTool = SIDEBAR_CONTEXT_TOOLS.find((tool) => tool.name === toolName);
+    // A sidebar session may call its workspace tools too; a main chat is only
+    // ever offered the session three, and serving it a tool its engine was
+    // never told about would be answering a call nothing can have made.
+    const available = this.engine.kind === "sidebar" ? SIDEBAR_CONTEXT_TOOLS : SESSION_AWARENESS_TOOLS;
+    const sidebarTool = available.find((tool) => tool.name === toolName);
     if (sidebarTool) {
       // Handlers always resolve to plain text, success or failure, so there is
       // nothing to catch here: a bounded, human-readable answer is the
-      // contract (lib/sidebar-context-tools.ts). `user` is what gates every
-      // session read, so it must be the account that owns this session.
+      // contract (lib/sidebar-context-tools.ts, lib/session-tools.ts).
       const text = await sidebarTool.handler(isRecord(event.arguments) ? event.arguments : {}, {
         cwd: this.engine.contextCwd ?? this.cwd,
-        user: this.engine.user ?? null,
-        defaultSessionId: this.engine.contextSessionId ?? null,
+        ...this.sessionToolContext(),
+      });
+      this.sendHostToolResult({ type: "host_tool_result", id, result: { content: [{ type: "text", text }] } });
+      return;
+    }
+    const deviceTool = this.engine.kind === "sidebar"
+      ? undefined
+      : [...DEVICE_TOOLS, ...DEVICE_OPERATION_TOOLS].find((tool) => tool.name === toolName);
+    if (deviceTool) {
+      // Same contract as the session tools: plain text either way, and the
+      // bridge is addressed by THIS session's id — a tool call can never
+      // reach hardware granted to another conversation.
+      const text = await deviceTool.handler(isRecord(event.arguments) ? event.arguments : {}, {
+        bridge: getDeviceBridge(this._sessionId),
       });
       this.sendHostToolResult({ type: "host_tool_result", id, result: { content: [{ type: "text", text }] } });
       return;
@@ -1289,6 +1493,28 @@ export class AgentSessionWrapper {
       }
       return;
     }
+    if (toolName === "shared_browser") {
+      try {
+        const handle = await startSharedBrowser(this._sessionId, isRecord(event.arguments) ? event.arguments : {});
+        // The endpoint is only half the answer: automation that opens its own
+        // tab would be driving a surface nobody streams, so say plainly that
+        // the existing tab is the one on screen.
+        const text = [
+          `Shared browser is open at ${handle.request.source.url} and streaming to the user's Preview panel — they can see it and take the mouse at any time.`,
+          `Attach your browser automation to this CDP endpoint and drive the tab that is already open: ${handle.endpoint}`,
+          "Opening a second tab is fine — the user sees whatever that browser shows.",
+        ].join(" ");
+        this.sendHostToolResult({ type: "host_tool_result", id, result: { content: [{ type: "text", text }] } });
+      } catch (error) {
+        this.sendHostToolResult({
+          type: "host_tool_result",
+          id,
+          isError: true,
+          result: { content: [{ type: "text", text: error instanceof Error ? error.message : "Could not start a shared browser" }] },
+        });
+      }
+      return;
+    }
     if (toolName === "read_app_logs") {
       const input = (typeof event.arguments === "object" && event.arguments !== null ? event.arguments : {}) as { level?: unknown; since?: unknown; grep?: unknown; limit?: unknown };
       const requested = typeof input.level === "string" ? input.level : "";
@@ -1348,6 +1574,42 @@ export class AgentSessionWrapper {
         result: { content: [{ type: "text", text: message }] },
       });
     }
+  }
+
+  /**
+   * The identity and live state a session-awareness tool call runs with.
+   *
+   * `user` is the security boundary, so it is resolved here and never taken
+   * from the engine's arguments. A sidebar session carries the account that
+   * opened it; a main session's engine has no request behind it, so the
+   * account is the one that OWNS this session. When a session has no recorded
+   * owner on an instance that has accounts (a pre-accounts or
+   * terminal-created session), `user: null` would mean "sees everything" —
+   * so it is paired with `restrictToUnowned`, which limits it to other
+   * unowned sessions instead of every account's conversations.
+   *
+   * The main chat gets a larger page than the sidebar's
+   * smallest-window-assumption budget: it runs on the model the user picked,
+   * and paging a transcript four times to answer one question is its own kind
+   * of waste.
+   */
+  private sessionToolContext(): SessionToolContext {
+    const explicit = this.engine.user ?? null;
+    const ownerId = explicit === null && this._sessionId ? getSessionOwner(this._sessionId) : null;
+    const owner = ownerId === null ? null : findUserById(ownerId);
+    const user = explicit ?? owner;
+    const livePhases = getLiveSessionPhases();
+    const runningSessionIds = new Set(
+      [...livePhases].filter(([, phase]) => phase.running).map(([sessionId]) => sessionId),
+    );
+    return {
+      user,
+      defaultSessionId: this.engine.contextSessionId ?? (this._sessionId || null),
+      runningSessionIds,
+      livePhases,
+      restrictToUnowned: user === null && hasAnyUser(),
+      ...(this.engine.kind === "sidebar" ? {} : { charBudget: MAIN_SESSION_RESULT_CHARS }),
+    };
   }
 
   /**
@@ -2005,6 +2267,10 @@ export class AgentSessionWrapper {
       this.sessionFileSignalTimer = null;
     }
     this.planKeeper?.dispose();
+    this.deviceWatch?.();
+    this.deviceWatch = null;
+    this.operationWatch?.();
+    this.operationWatch = null;
     this.unsubscribeFrames?.();
     this.clearPendingUiRequests();
     if (this.mcpListWaiter) {
@@ -2077,6 +2343,29 @@ export async function restartSessionForRouting(sessionId: string): Promise<{ res
   if (session.isRunning()) return { restarted: false, active: true };
   await session.restartForRouting();
   return { restarted: true, active: false };
+}
+
+/**
+ * Every live session's phase, keyed by session id — the source both the
+ * omp host-tool path and the internal route the ACP bridge posts to read, so
+ * a status report says the same thing whichever engine asked for it.
+ *
+ * An engine that cannot break "running" down (every ACP session) contributes
+ * the one fact it has rather than a fabricated breakdown.
+ */
+export function getLiveSessionPhases(): Map<string, SessionLivePhase> {
+  const phases = new Map<string, SessionLivePhase>();
+  for (const [registeredId, session] of getRegistry()) {
+    const running = session.isRunning();
+    phases.set(session.sessionId || registeredId, session.livePhase?.() ?? {
+      running,
+      streaming: false,
+      promptRunning: running,
+      bashRunning: false,
+      compacting: false,
+    });
+  }
+  return phases;
 }
 
 export function getRunningRpcSessionIds(): string[] {

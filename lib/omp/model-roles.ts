@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { isMap, parseDocument, stringify } from "yaml";
-import { findOmpPackageRoot, loadOmpPackageSource, ompPackageVersion } from "./package-source";
+import { findOmpPackageRoot, loadOmpPackageSymbol, ompPackageVersion } from "./package-source";
 import { getAgentDir } from "./paths";
 import { isRecord } from "../type-guards";
 
@@ -40,11 +40,17 @@ export function getOmpModelRoleIds(): readonly string[] {
   const cacheKey = `${packageRoot}@${ompPackageVersion(packageRoot) ?? "unknown"}`;
   if (cachedRoleIds?.key === cacheKey) return cachedRoleIds.ids;
 
-  const loaded = loadOmpPackageSource(packageRoot, "src", "config", "model-roles.ts");
-  const declared = loaded?.MODEL_ROLE_IDS;
-  const ids = Array.isArray(declared)
-    ? declared.filter((role): role is string => typeof role === "string" && role.length > 0)
-    : [];
+  // 18.2.5 moved the declaration into @oh-my-pi/pi-tui and left a re-export
+  // behind, so the symbol has to be followed rather than read off this file.
+  const declared = loadOmpPackageSymbol(
+    packageRoot,
+    ["src", "config", "model-roles.ts"],
+    "MODEL_ROLE_IDS",
+    (value): value is unknown[] => Array.isArray(value) && value.some((entry) => typeof entry === "string" && entry.length > 0),
+  );
+  const ids = declared === null
+    ? []
+    : declared.filter((role): role is string => typeof role === "string" && role.length > 0);
   cachedRoleIds = { key: cacheKey, ids: ids.length > 0 ? ids : FALLBACK_MODEL_ROLE_IDS };
   return cachedRoleIds.ids;
 }

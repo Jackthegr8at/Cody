@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
+import { createJiti } from "jiti";
+
+// jiti (not a plain import) because session-control-scope.ts now delegates
+// classifyFallbackReason to lib/error-text.ts, a relative import a plain
+// node --experimental-strip-types run can't resolve without an extension;
+// hooks/fallback-reason.test.mjs already loads this same module through
+// jiti for the same reason.
+const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
+const {
   fallbackAttributionForSubagentEvent,
   isFastModeUnavailableError,
   pendingModelSwitchApplied,
@@ -9,7 +17,7 @@ import {
   resolveThinkingSelector,
   sameSessionControlScope,
   sessionControlScope,
-} from "./session-control-scope.ts";
+} = await jiti.import("./session-control-scope.ts");
 
 test("session controls reject replies from another session or model", () => {
   const origin = sessionControlScope("session-a", { provider: "anthropic", modelId: "claude" });

@@ -14,6 +14,7 @@ const jiti = createJiti(__filename);
 const { isAuthRequired, resolveCredentials } = jiti("../lib/auth/guard.ts");
 const { canAccessDisplaySession } = jiti("../lib/display/access.ts");
 const { attachDisplaySocket, disposeDisplayProviders } = jiti("../lib/display/provider.ts");
+const { attachDeviceSocket } = jiti("../lib/devices/socket.ts");
 const { closeNativeGateway, proxyNativeHttp, proxyNativeUpgrade } = jiti("../lib/display/native-gateway.ts");
 const { getTerminalManager } = jiti("../lib/terminal-manager.ts");
 
@@ -65,6 +66,7 @@ function originAllowed(request, credential) {
 
 function terminalPath(url) { return /^\/api\/terminals\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/socket$/i.test(new URL(url, "http://localhost").pathname); }
 function displayPath(url) { return new URL(url, "http://localhost").pathname === "/api/display/socket"; }
+function devicePath(url) { return new URL(url, "http://localhost").pathname === "/api/devices/socket"; }
 
 async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
@@ -77,6 +79,9 @@ async function main(argv = process.argv.slice(2)) {
   const upgrade = app.getUpgradeHandler();
   const terminalWs = new WebSocketServer({ noServer: true, maxPayload: 1_100_000 });
   const displayWs = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+  // Frames are JSON with base64 payloads; a serial write of a firmware chunk
+  // is the largest thing that crosses, and the client chunks anything bigger.
+  const deviceWs = new WebSocketServer({ noServer: true, maxPayload: 1_100_000 });
   const server = http.createServer((request, response) => {
     if (!proxyNativeHttp(request, response)) handle(request, response);
   });
@@ -97,6 +102,24 @@ async function main(argv = process.argv.slice(2)) {
         .then((allowed) => {
           if (!allowed) { reject(socket, 404, "Not Found"); return; }
           displayWs.handleUpgrade(request, socket, head, (ws) => attachDisplaySocket(sessionId, ws));
+        })
+        .catch(() => reject(socket, 404, "Not Found"));
+      return;
+    }
+    if (devicePath(request.url || "")) {
+      // Same gate as the display socket: the page is about to be handed the
+      // right to drive hardware on the human's own machine on this session's
+      // behalf, so it must be a credential that may see the session at all.
+      const credential = resolveCredentials(request.headers.cookie || null, request.headers.authorization || null);
+      const user = credential?.user ?? null;
+      if (isAuthRequired() && !user) { reject(socket, 401, "Unauthorized"); return; }
+      if (!originAllowed(request, credential)) { reject(socket, 403, "Forbidden"); return; }
+      const parsed = new URL(request.url, "http://localhost");
+      const sessionId = parsed.searchParams.get("sessionId") || "";
+      void canAccessDisplaySession(sessionId, user)
+        .then((allowed) => {
+          if (!allowed) { reject(socket, 404, "Not Found"); return; }
+          deviceWs.handleUpgrade(request, socket, head, (ws) => attachDeviceSocket(sessionId, ws));
         })
         .catch(() => reject(socket, 404, "Not Found"));
       return;

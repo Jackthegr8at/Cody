@@ -2,7 +2,7 @@
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { CompactionProgress } from "@/components/CompactionProgress";
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronDown, TriangleAlert, X } from "lucide-react";
+import { ChevronDown, ShieldAlert, TriangleAlert, X } from "lucide-react";
 import type { ActivityDisplayMode, AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, ImageContent, SessionInfo, SessionTreeNode, TextContent, ToolCallContent, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
 import { countToolCallBlocks, getDisplayableAssistantBlocks, isVisibleTranscriptMessage, groupHasThinking, splitFinalAssistantBlocks } from "@/lib/message-display";
@@ -787,11 +787,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
   // Refs only, so the value is stable for the life of the component and no
   // block re-renders because the reader scrolled.
   const transcriptViewport = useMemo<TranscriptViewport>(() => ({ followingRef, anchorRef: readerAnchorRef }), [followingRef, readerAnchorRef]);
-
-  useEffect(() => {
-    onActiveSubagentCountChange?.(activeSubagentCount);
-    return () => onActiveSubagentCountChange?.(0);
-  }, [activeSubagentCount, onActiveSubagentCountChange]);
 
   useEffect(() => {
     onActiveSubagentCountChange?.(activeSubagentCount);
@@ -1787,6 +1782,10 @@ function NoticeShelf({ notices, onDismiss, floating = false, align = "left" }: {
                 ? "var(--status-success)"
                 : "var(--accent)";
         const isError = notice.type === "error";
+        // Refusals are a model decision, distinct from a broken connection or
+        // provider error; keep the specific icon while retaining Cody's
+        // multi-line error treatment and dismiss affordance.
+        const isRefusal = notice.errorKind === "refusal";
         return (
           <div
             key={notice.id}
@@ -1816,16 +1815,20 @@ function NoticeShelf({ notices, onDismiss, floating = false, align = "left" }: {
               padding: isError ? "8px 8px 8px 10px" : "0 10px",
             }}
           >
-            <span
-              style={{
-                width: 7,
-                height: 7,
-                borderRadius: "50%",
-                background: color,
-                flexShrink: 0,
-                marginTop: isError ? 6 : 0,
-              }}
-            />
+            {isRefusal ? (
+              <ShieldAlert size={14} aria-hidden style={{ color, flexShrink: 0, marginTop: 2 }} />
+            ) : (
+              <span
+                style={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: "50%",
+                  background: color,
+                  flexShrink: 0,
+                  marginTop: isError ? 6 : 0,
+                }}
+              />
+            )}
             <span
               style={{
                 padding: isError ? 0 : "8px 0",
@@ -1843,6 +1846,9 @@ function NoticeShelf({ notices, onDismiss, floating = false, align = "left" }: {
               title={notice.message}
             >
               {notice.message}
+              {notice.count && notice.count > 1 ? (
+                <span style={{ opacity: 0.6, marginLeft: 6, fontVariantNumeric: "tabular-nums" }}>×{notice.count}</span>
+              ) : null}
             </span>
             {onDismiss && (
               <button

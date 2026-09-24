@@ -1,0 +1,219 @@
+# Hardware Flashing Manual Verification Checklist
+
+## Status
+
+**Every acceptance criterion below is UNVERIFIED until it is exercised on the
+listed real hardware and the evidence fields are completed.** Unit tests with
+fake transports prove guard behavior only; they do not establish electrical,
+boot-ROM, cable, vendor-tool, recovery, or retention behavior.
+**This checklist authorizes no destructive write.** It records future acceptance
+criteria only; a separate, exact point-of-risk approval is required for every
+real operation. Protected fuse/eFuse programming is never a casual test.
+
+Use a disposable or recoverable test device first. Do not repurpose a production
+device as the initial test target.
+
+## Evidence record
+
+Complete one record per attempt before checking any acceptance item:
+
+| Field | Value |
+| --- | --- |
+| Date / operator | **UNVERIFIED** |
+| Device make, model, and board revision | **UNVERIFIED** |
+| Protocol and tool version | **UNVERIFIED** |
+| Chip identity, flash geometry, boot mode | **UNVERIFIED** |
+| VID/PID, serial/path, and cable/adapter | **UNVERIFIED** |
+| Reviewed layout ID and source | **UNVERIFIED** |
+| Test image filename, byte length, SHA-256 | **UNVERIFIED** |
+| Target region and absolute offset | **UNVERIFIED** |
+| Backup file ID/path, byte length, SHA-256 | **UNVERIFIED** |
+| Readback method, byte length, SHA-256 | **UNVERIFIED** |
+| Recovery owner and procedure | **UNVERIFIED** |
+
+## Common preflight
+
+- [ ] **UNVERIFIED** Device identity is observed through the real transport,
+  recorded above, and matches the reviewed chip-specific layout.
+- [ ] **UNVERIFIED** The requested protocol, chip, named target region, and
+  absolute byte offset are explicit; there is no inferred “safe” offset.
+- [ ] **UNVERIFIED** The layout accounts for `preloader`, `lk*`, `tee*`,
+  `fuses`/`eFuses`, MCU bootloader where applicable, and chip-specific SPI boot
+  ranges as present or absent.
+- [ ] **UNVERIFIED** A recovery method is physically available: known-good
+  boot cable, power control, boot straps, vendor recovery tool, and a tested
+  operator procedure.
+- [ ] **UNVERIFIED** Firmware input is hashed before any destructive command;
+  the displayed SHA-256 matches the recorded value.
+- [ ] **UNVERIFIED** A readable pre-write backup of the exact destination range
+  is saved to persistent escrow. Its path/ID, length, and SHA-256 are recorded.
+- [ ] **UNVERIFIED** The interface presents point-of-risk confirmation with the
+  exact action, device/target, SHA-256, absolute offset, length, backup
+  reference, and any single named protected-region override.
+- [ ] **UNVERIFIED** Cancelling that confirmation sends no write bytes and does
+  not silently retry or retain an approval for a later operation.
+- [ ] **UNVERIFIED** The protocol can read back the exact written byte range
+  after flashing. A delivery ACK, device “OK”, progress bar, or transfer CRC is
+  not accepted as verification.
+- [ ] **UNVERIFIED** If exact readback is unavailable, the UI refuses flash
+  before confirmation/write and explains the unavailable capability.
+- [ ] **UNVERIFIED** Disconnect, timeout, and cancelled-transfer behavior is
+  recorded as unknown completion; no automatic write retry occurs.
+## Session, identity, and exclusive-interface checks
+
+- [ ] **UNVERIFIED** Starting an operation in one Cody session, then switching
+  to another Cody session mid-transfer, cancels or quarantines the first
+  operation; no approval, write, or result crosses the session boundary.
+- [ ] **UNVERIFIED** Reconnecting the identical device identity reacquires only
+  the authorized session; a different VID/PID, serial/path, or USB identity
+  requires a new device grant and fresh point-of-risk confirmation.
+- [ ] **UNVERIFIED** A second claimant for the same serial or USB interface is
+  rejected without consuming bytes or stealing the active exclusive lease.
+- [ ] **UNVERIFIED** Disconnect/reconnect leaves completion unknown until a new
+  identity-bound operation explicitly verifies the device state.
+
+## Protected-region refusal and override
+
+Protected checks are rejection-only until there is a separately approved
+recoverable-device procedure. Unit/fake transports exercise named-override
+confirmation; this checklist never calls for an actual fuse/eFuse burn. Each
+item remains **UNVERIFIED** until its permitted evidence is completed.
+
+- [ ] **UNVERIFIED** A request targeting `preloader` or `preloader_*` is refused
+  without `allow-preloader`; an unrelated override is refused too.
+- [ ] **UNVERIFIED** A request targeting `lk*` is refused without `allow-lk`.
+- [ ] **UNVERIFIED** A request targeting `tee*` is refused without `allow-tee`.
+- [ ] **UNVERIFIED** A request targeting `fuse*`, `efuse*`, or equivalent
+  `fuses`/`eFuses` label is refused without `allow-fuses`.
+- [ ] **UNVERIFIED** A known MCU bootloader range is refused without
+  `allow-bootloader`.
+- [ ] **UNVERIFIED** A SPI device without explicit chip-specific `spi-boot`
+  ranges is refused; no generic offset such as `0x1000` is treated as safe.
+- [ ] **UNVERIFIED** A defined SPI boot range is refused without
+  `allow-spi-boot`.
+- [ ] **UNVERIFIED** A protocol-owned range explicitly classified `unknown` is
+  refused without `allow-unknown`; its confirmation identifies the exact target
+  and records that its role/topology is unknown.
+- [ ] **UNVERIFIED** A valid named override still triggers a new point-of-risk
+  confirmation that includes the exact override, backup, digest, and offset.
+- [ ] **UNVERIFIED** An override for an unprotected range is refused rather
+  than silently accepted.
+
+## Protocol verification
+
+### ESP serial / SPI flash
+
+- [ ] **UNVERIFIED** Detection reports the actual ESP chip, flash size, mode,
+  and relevant security/encryption state before a layout is selected.
+- [ ] **UNVERIFIED** The real chip’s boot offsets are represented in the
+  reviewed layout and protected from generic writes.
+- [ ] **UNVERIFIED** A non-protected test range is backed up, flashed after
+  exact confirmation, read back by the device, and SHA-256-compared to input.
+- [ ] **UNVERIFIED** Restore from the saved backup is read back and
+  SHA-256-compared to the backup before the device is returned to service.
+- [ ] **UNVERIFIED** Reset/reconnect confirms expected boot behavior after both
+  test flash and restore.
+- [ ] **UNVERIFIED** An ESP32 user selects/uploads a test image through Cody,
+  sees the exact confirmation/backup/readback evidence, and the console resumes
+  exclusive ownership after flashing to capture the expected boot output.
+
+### Fastboot
+
+- [ ] **UNVERIFIED** The device’s actual fastboot identity, lock state, product,
+  and partition information are captured before any write.
+- [ ] **UNVERIFIED** A readback mechanism (for example, a supported fastboot
+  fetch extension for the exact partition/range) is positively detected before
+  the UI permits flash.
+- [ ] **UNVERIFIED** The exact target range is fetched to persistent backup,
+  then fetched again after one flash and SHA-256-compared with input.
+- [ ] **UNVERIFIED** A fastboot target without trustworthy exact readback is
+  refused before confirmation/write, regardless of a successful delivery ACK.
+- [ ] **UNVERIFIED** Every detected partition is protocol-classified; an
+  unclassified partition is marked `unknown`, requires `allow-unknown`, and
+  reports its exact name with role/topology unknown at confirmation.
+- [ ] **UNVERIFIED** The device boots or returns to fastboot as expected after
+  test flash and after verified restore.
+
+### USB DFU
+
+- [ ] **UNVERIFIED** The actual selected DFU alternate has recorded bcdDFU,
+  DfuSe memory map, g-sector geometry, and a contiguous readable/erasable/
+  writable `@Internal Flash` range within the supported STM32 program range.
+- [ ] **UNVERIFIED** A bcdDFU `0x011a` raw-binary `internal-flash` write at
+  an explicit absolute offset preserves, escrows, merges, writes, and exact-
+  reads every touched sector; it remains in DFU with no manifestation/reset
+  before the readback hash matches.
+- [ ] **UNVERIFIED** The conservative whole-internal-flash `allow-bootloader`
+  confirmation is recorded. A generic bcdDFU `0x0110` device remains
+  detect/dump/exec only and refuses flash.
+- [ ] **UNVERIFIED** Device recovery/re-enumeration is recorded after refusal,
+  test flash, and restore.
+
+### CMSIS-DAP / DAPLink (not shipped)
+
+- [ ] **UNVERIFIED** WebUSB transport feasibility through DAP.js/DAPLink is
+  assessed only with a real probe and exact target identity; this change ships
+  no CMSIS-DAP implementation.
+- [ ] **UNVERIFIED** No generic DAP memory-write/flash action is enabled without
+  a target-specific flash algorithm, immutable geometry/protection profile,
+  reset sequence, full erase-footprint preservation, and exact readback.
+- [ ] **UNVERIFIED** The limitations in
+  `hardware-host-helper.md#cmsis-dap-boundary` are satisfied before a
+  device-specific CMSIS-DAP protocol can be proposed.
+### STM32, Gecko, and STK500 serial bootloaders
+
+- [ ] **UNVERIFIED** The selected serial adapter, baud settings, boot entry
+  sequence, and chip identity work with the physical board.
+- [ ] **UNVERIFIED** Application range, bootloader range, option-byte/fuse
+  range, and any protected regions are represented in the reviewed layout.
+- [ ] **UNVERIFIED** The selected protocol reads back exact application bytes;
+  backup, post-write hash verification, and restore hash verification succeed.
+- [ ] **UNVERIFIED** A protocol/device lacking exact readback is refused before
+  write rather than returning an unverified success.
+- [ ] **UNVERIFIED** Cancellation during an actual transfer produces no retry;
+  device state and recovery result are recorded.
+
+### ADB authenticated file operations
+
+- [ ] **UNVERIFIED** The physical device shows a deliberate authenticated ADB
+  trust prompt and the observed key/device identity is recorded.
+- [ ] **UNVERIFIED** A test file push is SHA-256-checked, staged to a
+  non-destructive location, pulled back, and SHA-256-compared before/after its
+  atomic replacement path.
+- [ ] **UNVERIFIED** The exact destination, digest, offset where applicable,
+  and backup/rollback path appear in point-of-risk confirmation.
+- [ ] **UNVERIFIED** Raw partition, fuse, mount, or command bypass attempts are
+  refused; file operations do not become a shell escape.
+- [ ] **UNVERIFIED** Interrupted push/pull recovery preserves the original
+  destination or restores it from escrow.
+- [ ] **UNVERIFIED** A file of at least 100 MB is interrupted after a recorded
+  offset, then resumes only after authenticated reacquisition; the final remote
+  file and local source have matching SHA-256.
+- [ ] **UNVERIFIED** Switching Cody sessions during that 100 MB+ transfer does
+  not resume or complete the original operation in the new session.
+
+## Optional local helper (not shipped)
+
+The helper described in `hardware-host-helper.md` is design-only. These items
+are **UNVERIFIED** and do not authorize deployment:
+
+- [ ] **UNVERIFIED** Package signatures, key rotation, origin binding,
+  one-time grants, page-key proof, device binding, TTL, and sequence checks are
+  exercised on each supported OS.
+- [ ] **UNVERIFIED** Native local confirmation names exact device, target,
+  offset, image hash, backup, and protected override immediately before write.
+- [ ] **UNVERIFIED** Revocation from Cody and from the local UI terminates the
+  grant, cancels queued work, and removes temporary input without a write.
+- [ ] **UNVERIFIED** Every vendor invocation is schema-allowlisted; arbitrary
+  shells, paths, environment, and command strings remain impossible.
+- [ ] **UNVERIFIED** Linux user socket, macOS user service, and Windows
+  per-user named pipe reject other users and network clients.
+- [ ] **UNVERIFIED** Generic UF2 is not presented as flash or verified success;
+  it remains manual preparation until a device-specific exact readback path
+  exists.
+
+## Completion gate
+
+Do not mark a protocol hardware-verified until every applicable item has dated
+evidence, including the pre-write backup and exact post-write readback hash.
+A protocol with no trustworthy post-write readback remains flash-disabled.

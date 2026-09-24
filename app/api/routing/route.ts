@@ -6,11 +6,16 @@ import { autoBindEnabled, readRouteMemory, setAutoBind } from "@/lib/routing/rou
 /**
  * GET /api/routing — Cody's routing memory: whether auto-binding is on, the
  * providers currently blacked out (with their resets), and the roles Cody
- * has re-pointed together with the baselines it will restore.
+ * has re-pointed together with the baselines it will restore, and the
+ * fallback chains it has filtered: per chain key, the user's `baseline`, the
+ * chain actually `written`, and each `dropped` entry with its reason and
+ * source (`credits`, `quota`, `block` for a deadline set after a rejected
+ * request rather than measured quota, or `disabled` when every saved
+ * credential is disabled).
  *
  * PUT /api/routing {autoBind} — the one switch. ON lets the usage-poll
- * reconciler write `modelRoles` / `task.agentModelOverrides` around blacked-
- * out providers; OFF keeps it observing only. It is a Cody setting, not an
+ * reconciler write `modelRoles` / `retry.fallbackChains` /
+ * `task.agentModelOverrides` around blacked-out providers; OFF keeps it observing only. It is a Cody setting, not an
  * engine one: it lives in `cody-route-memory.json`, so an engine update or
  * switch cannot lose it, and it needs no container restart to change.
  *
@@ -22,7 +27,18 @@ export const dynamic = "force-dynamic";
 
 function payload() {
   const memory = readRouteMemory();
-  return { autoBind: autoBindEnabled(), blackouts: memory.blackouts, bindings: Object.values(memory.bindings) };
+  return {
+    autoBind: autoBindEnabled(),
+    blackouts: memory.blackouts,
+    bindings: Object.values(memory.bindings),
+    chains: Object.values(memory.chains).map((chain) => ({
+      key: chain.key,
+      baseline: chain.baseline,
+      written: chain.active,
+      dropped: chain.dropped,
+      boundAt: chain.boundAt,
+    })),
+  };
 }
 
 export function GET(request: Request) {

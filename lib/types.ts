@@ -80,6 +80,14 @@ export interface AssistantMessage {
   stopReason?: string;
   errorMessage?: string;
   timestamp?: number;
+  /** Engine-measured request timings, in ms. omp records all three on every
+   * assistant message it writes and sends them on `message_end`; an engine
+   * that does not report them leaves them absent, which is never 0. They are
+   * what makes the transcript's token rate and tool durations measured values
+   * rather than wall-clock guesses (`lib/message-rate.ts`). */
+  duration?: number;
+  ttft?: number;
+  completedAt?: number;
   contextSnapshot?: {
     promptTokens?: number;
   };

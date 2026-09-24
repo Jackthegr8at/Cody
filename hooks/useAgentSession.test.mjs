@@ -260,3 +260,23 @@ test("abandoned new-session sends finish without promoting a dead chat instance"
   const bash = hook.slice(hook.indexOf("const executeBash = useCallback"), hook.indexOf("const handleAbort = useCallback"));
   assert.match(bash, /if \(hookAliveRef\.current\) \{\s*await loadSession\(sid\)/);
 });
+
+test("engine/provider errors are cleaned and classified through lib/error-text before they reach a notice", () => {
+  // Raw provider errors from the prompt, notice, and retry paths share the
+  // same classifier so auth/quota/refusal details stay readable.
+  assert.match(hook, /import \{ describeEngineError, errorDedupeKey, type ErrorKind \} from "@\/lib\/error-text";/);
+  assert.match(hook, /addEngineErrorNotice\(raw, engineNameRef\.current\);/);
+  assert.match(hook, /addEngineErrorNotice\(message, engineNameRef\.current\);/);
+  assert.match(hook, /const errorMessage = rawErrorMessage \? describeEngineError\(rawErrorMessage\)\.detail : undefined;/);
+  assert.match(hook, /if \(described\.kind === "aborted"\) return null;/);
+});
+
+test("the notice reducer deduplicates repeats and caps visible errors at two", () => {
+  assert.match(hook, /const MAX_VISIBLE_ERROR_NOTICES = 2;/);
+  const bump = hook.slice(hook.indexOf("function bumpDuplicate"), hook.indexOf("function fillPendingNotices"));
+  assert.match(bump, /count: \(next\[index\]\.count \?\? 1\) \+ 1, exiting: false/);
+  const reducer = hook.slice(hook.indexOf("export function noticeReducer"), hook.indexOf("export function useAgentSession"));
+  assert.match(reducer, /bumpDuplicate\(state\.visible, action\.notice\)/);
+  assert.match(reducer, /bumpDuplicate\(state\.pending, action\.notice\)/);
+  assert.match(reducer, /errorCapHit \? \(notice\) => notice\.type === "error" : undefined/);
+});

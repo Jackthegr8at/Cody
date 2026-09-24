@@ -1,3 +1,5 @@
+import { describeEngineError } from "../lib/error-text";
+
 export interface SessionControlScope {
   sessionId: string | null;
   provider: string | null;
@@ -189,29 +191,15 @@ export function fallbackAttributionForSubagentEvent(
  */
 export type FallbackReasonKind = "refusal" | "usage";
 
-const REFUSAL_PATTERNS = [
-  /\brefusal\b/i,
-  /reasoning_extraction/i,
-  /\bsensitive\b/i,
-  /terms of service/i,
-  /content polic/i,
-];
-
-const USAGE_PATTERNS = [
-  /usage limit/i,
-  /rate.?limit/i,
-  /\bquota\b/i,
-  /\b429\b/i,
-  /too many requests/i,
-  /out of credits/i,
-];
-
+// The refusal/usage split itself now lives in lib/error-text.ts, which also
+// tells apart auth/credits/overloaded/outdated/transport failures for the
+// notice UI — this function keeps its old two-value contract (every existing
+// caller and test expects exactly "refusal" | "usage" | null) by collapsing
+// error-text's finer kinds down to it.
 export function classifyFallbackReason(reason: string | undefined): FallbackReasonKind | null {
   if (!reason) return null;
-  // Refusal is checked first: a refusal message may also mention limits
-  // (provider blurb, "learn more" links), and misreading a refusal as a quota
-  // is the error that wastes the user's time.
-  if (REFUSAL_PATTERNS.some((pattern) => pattern.test(reason))) return "refusal";
-  if (USAGE_PATTERNS.some((pattern) => pattern.test(reason))) return "usage";
+  const kind = describeEngineError(reason).kind;
+  if (kind === "refusal") return "refusal";
+  if (kind === "usage") return "usage";
   return null;
 }

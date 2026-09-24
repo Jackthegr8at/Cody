@@ -15,6 +15,7 @@ import path from "path";
 import { peekCatalogCache } from "../models-cache";
 import { getAgentDir } from "../omp/paths";
 import { getOpenRouterAccount } from "../openrouter/account";
+import { restartIdleRpcSessions } from "../rpc-manager";
 import type { UsageSnapshot } from "../usage/types";
 import { DEFAULT_AGENT_ROLES } from "./agent-roles";
 import { reconcileRouting, type RoutingReconciliation } from "./reconcile";
@@ -64,9 +65,19 @@ export async function reconcileRoutingForRequest(snapshot: UsageSnapshot): Promi
 	// A prepaid balance decides an OpenRouter blackout, but only from cache:
 	// `refresh` is the top-up flow's business, not a background poll's.
 	const openRouter = await getOpenRouterAccount().catch(() => null);
-	return reconcileRouting(snapshot, {
+	const routing = reconcileRouting(snapshot, {
 		agents: discoverAgentNames(),
 		catalog: cachedCatalogKeys(),
 		openRouter,
 	});
+	// A running omp child read `modelRoles` and `retry.fallbackChains` once,
+	// at start; only subagent spawns re-read them. So a live session would
+	// keep walking the chain it booted with, spent providers included. Idle
+	// children are restarted to pick the new config up, exactly as a save in
+	// Settings does; a child mid-turn is left alone. Writes happen only on a
+	// transition, so this is once per exhaustion or reset, not per poll.
+	if (routing.chainChanges.length > 0 || routing.roleChanges.length > 0) {
+		await restartIdleRpcSessions().catch(() => undefined);
+	}
+	return routing;
 }

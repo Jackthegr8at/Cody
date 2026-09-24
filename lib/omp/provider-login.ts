@@ -20,10 +20,12 @@ import { homedir } from "os";
 import type { ProviderLoginAccount, ProviderLoginList, ProviderLoginSurface, ProviderLoginUi } from "../harness/types";
 import { listOmpCredentials, removeOmpCredential, removeOmpProvider, type OmpCredentialRemoval, type OmpCredentialRow, type OmpCredentialsSnapshot } from "../harness/omp-credentials";
 import { invalidateModelsCache } from "../models-cache";
+import { forgetProviderAccountName, forgetProviderAccountNames, normalizeProviderAccountName, readProviderAccountNames, resolveProviderAccountName, setProviderAccountName, type ProviderAccountNameEntry } from "../provider-account-names";
 import { getUsageSnapshot } from "../usage/cache";
 import { rankProviderAccounts } from "../usage/select";
 import type { UsageAccount, UsageAccountService } from "../usage/types";
 import { enableProvider } from "./model-roles";
+import { getAgentDir } from "./paths";
 import { RpcProcess, type RpcFrame } from "./rpc-process";
 import { disposeUtilityRpc, type OmpLoginProvider, runUtilityCommand } from "./rpc-utility";
 
@@ -82,6 +84,7 @@ function buildProviderAccounts(
   usageAccounts: readonly UsageAccount[],
   providerId: string,
   providerName: string,
+  names: Readonly<Record<string, ProviderAccountNameEntry>>,
 ): ProviderLoginAccount[] {
   const rows = credentials.filter((row) => row.provider === providerId);
   const ranks = rankProviderAccounts([...usageAccounts], providerId);
@@ -95,7 +98,7 @@ function buildProviderAccounts(
     const state: UsageAccountService = row.disabledCause !== null ? "disabled" : row.blockedUntil !== null ? "limited" : (rank?.state ?? "standby");
     return {
       id: String(row.id),
-      label: row.identity ?? providerName,
+      label: resolveProviderAccountName(names, row.provider, String(row.id), row.identity) ?? row.identity ?? providerName,
       position,
       state,
       planType: rank?.account.planType ?? null,
@@ -130,7 +133,9 @@ export function createOmpProviderLogins(overrides: OmpProviderLoginDeps = {}): P
         providers: providers
           .filter((provider) => provider.available !== false)
           .map((provider) => {
-            const accounts = credentials ? buildProviderAccounts(credentials, usageAccounts, provider.id, provider.name) : undefined;
+            const names = credentials ? readProviderAccountNames(getAgentDir()) : {};
+            const accounts = credentials ? buildProviderAccounts(credentials, usageAccounts, provider.id, provider.name, names) : undefined;
+            const activeAccounts = accounts?.filter((account) => account.state !== "disabled") ?? [];
             return {
               id: provider.id,
               name: provider.name,
@@ -138,8 +143,8 @@ export function createOmpProviderLogins(overrides: OmpProviderLoginDeps = {}): P
               kind: "oauth" as const,
               // omp's AuthStorage is Cody's own to edit (lib/harness/omp-credentials.ts);
               // logout only offers itself when there is a stored credential to remove.
-              canLogout: accounts !== undefined && accounts.length > 0,
-              ...(accounts ? { accounts, multiAccount: accounts.length > 1 } : {}),
+              canLogout: accounts !== undefined && activeAccounts.length > 0,
+              ...(accounts ? { accounts, multiAccount: activeAccounts.length > 1, canRenameAccount: activeAccounts.length > 0 } : {}),
             };
           }),
       };
@@ -223,6 +228,7 @@ export function createOmpProviderLogins(overrides: OmpProviderLoginDeps = {}): P
   async function logout(providerId: string): Promise<void> {
     const outcome = await deps.removeProvider(providerId);
     if (outcome.code) throw new Error(outcome.message ?? `Cody could not disconnect "${providerId}".`);
+    forgetProviderAccountNames(providerId, getAgentDir());
     disposeUtilityRpc();
   }
 
@@ -231,11 +237,25 @@ export function createOmpProviderLogins(overrides: OmpProviderLoginDeps = {}): P
     if (!Number.isSafeInteger(credentialId)) throw new Error(`"${accountId}" is not a valid account id.`);
     const outcome = await deps.removeCredential(providerId, credentialId);
     if (outcome.code) throw new Error(outcome.message ?? `Cody could not remove that ${providerId} account.`);
+    if (outcome.removed) forgetProviderAccountName(providerId, accountId, outcome.identity, getAgentDir());
     disposeUtilityRpc();
     return { removed: outcome.removed, providerRemoved: outcome.providerRemoved };
   }
 
-  return { list, login, logout, removeAccount };
+  async function renameAccount(providerId: string, accountId: string, name: string): Promise<{ accountId: string; label: string }> {
+    const credentialId = Number(accountId);
+    if (!Number.isSafeInteger(credentialId)) throw new Error(`"${accountId}" is not a valid account id.`);
+    const normalizedName = normalizeProviderAccountName(name);
+    const snapshot = await deps.listCredentials();
+    if (!snapshot.available) throw new Error(snapshot.reason ?? "OMP account details are unavailable.");
+    const account = snapshot.credentials.find((row) => row.provider === providerId && row.id === credentialId);
+    if (!account) throw new Error(`Cody found no "${providerId}" account matching that id.`);
+    if (account.disabledCause !== null) throw new Error("Disabled account history cannot be renamed.");
+    const label = setProviderAccountName(providerId, accountId, account.identity, normalizedName ?? "", getAgentDir()) ?? account.identity ?? providerId;
+    return { accountId, label };
+  }
+
+  return { list, login, logout, removeAccount, renameAccount };
 }
 
 export const ompProviderLogins: ProviderLoginSurface = createOmpProviderLogins();

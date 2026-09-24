@@ -1,10 +1,12 @@
 import * as path from "node:path";
-import { displayInternalEndpoint, issueDisplayCapability, todoInternalEndpoint } from "./capability";
+import { devicesInternalEndpoint, displayInternalEndpoint, issueDisplayCapability, sessionsInternalEndpoint, todoInternalEndpoint } from "./capability";
 
 export interface DisplayMcpLaunch {
   serverPath: string;
   endpoint: string;
   todoEndpoint: string;
+  sessionsEndpoint: string;
+  devicesEndpoint: string;
   capability: string;
   engineLabel: string;
 }
@@ -15,6 +17,8 @@ export function createDisplayMcpLaunch(sessionId: string, engineLabel = "Cody"):
     serverPath: path.join(packageRoot, "bin", "cody-display-mcp.js"),
     endpoint: displayInternalEndpoint(),
     todoEndpoint: todoInternalEndpoint(),
+    sessionsEndpoint: sessionsInternalEndpoint(),
+    devicesEndpoint: devicesInternalEndpoint(),
     capability: issueDisplayCapability(sessionId),
     engineLabel,
   };
@@ -33,6 +37,8 @@ export function claudeDisplayMcpConfig(sessionId: string): string {
           CODY_DISPLAY_CAPABILITY: launch.capability,
           CODY_DISPLAY_ENDPOINT: launch.endpoint,
           CODY_TODO_ENDPOINT: launch.todoEndpoint,
+          CODY_SESSIONS_ENDPOINT: launch.sessionsEndpoint,
+          CODY_DEVICES_ENDPOINT: launch.devicesEndpoint,
           CODY_ENGINE_LABEL: launch.engineLabel,
         },
       },
@@ -66,6 +72,8 @@ export function displayMcpAcpServer(sessionId: string, engineLabel = "Cody"): {
       { name: "CODY_DISPLAY_CAPABILITY", value: launch.capability },
       { name: "CODY_DISPLAY_ENDPOINT", value: launch.endpoint },
       { name: "CODY_TODO_ENDPOINT", value: launch.todoEndpoint },
+      { name: "CODY_SESSIONS_ENDPOINT", value: launch.sessionsEndpoint },
+      { name: "CODY_DEVICES_ENDPOINT", value: launch.devicesEndpoint },
       { name: "CODY_ENGINE_LABEL", value: launch.engineLabel },
     ],
   };

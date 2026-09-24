@@ -53,6 +53,7 @@ export interface ProviderMethod {
    * when a row carries several. */
   name?: string;
   canLogout?: boolean;
+  canRenameAccount?: boolean;
   hint?: string;
   /** The key method's variables; `key` and `env` carry the same list. */
   variables?: ProviderMethodVariable[];
@@ -181,6 +182,7 @@ function loginMethod(login: ProviderLoginOption): ProviderMethod {
     loginId: login.id,
     name: login.name,
     canLogout: login.canLogout,
+    ...(login.canRenameAccount !== undefined ? { canRenameAccount: login.canRenameAccount } : {}),
     ...(login.hint ? { hint: login.hint } : {}),
     ...(login.accounts ? { accounts: login.accounts } : {}),
     ...(login.multiAccount !== undefined ? { multiAccount: login.multiAccount } : {}),
