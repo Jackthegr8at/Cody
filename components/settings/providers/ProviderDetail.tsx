@@ -102,17 +102,18 @@ function AccountStateChip({ state, resetsAt }: { state: ProviderLoginAccount["st
   return <span style={{ ...chipStyle, color: "var(--status-warning)" }}>{reset ? `Limited · resets ${reset}` : "Limited"}</span>;
 }
 
-/** The account's most-binding usage window, using the same quota treatment as
- * the composer and provider directory. */
+/** The account's own most-binding usage window, as a compact bar — the same
+ * shared primitive and colour rule the composer and the Providers directory's
+ * Usage block both draw with. */
 function AccountUsageBar({ account }: { account: UsageAccount }) {
   const binding = selectBindingWindow([account]);
   if (!binding) return null;
   const percent = clampQuotaPercent(binding.window.utilization);
   const color = usageToneColor(percent, binding.window.state);
   return (
-    <div style={{ width: 48, flexShrink: 0 }} aria-label={`${Math.round(percent)}% of ${binding.window.label} used`}>
+    <span style={{ width: 48, flexShrink: 0 }} aria-label={`${Math.round(percent)}% of ${binding.window.label} used`}>
       <QuotaBar percent={percent} color={color} />
-    </div>
+    </span>
   );
 }
 
@@ -125,7 +126,8 @@ function AccountRow({ account, canEdit, canRename, busy, onRemove, onRename, usa
   busy: boolean;
   onRemove: () => void;
   onRename: () => void;
-  /** Matching usage-snapshot account by credential id, when reported. */
+  /** The matching usage-snapshot account (by credential id), when the engine
+   * reports one; absent renders no bar at all rather than an empty one. */
   usageAccount?: UsageAccount | null;
 }) {
   const title = account.position === 0 ? "Primary" : account.position === 1 ? "Secondary" : `Account ${account.position + 1}`;

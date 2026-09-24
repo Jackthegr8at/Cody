@@ -29,8 +29,8 @@ export interface OperationArtifacts {
  export interface HardwareTransportLease {
    transport: HardwareTransport;
   /** Stable grant identity captured before an ADB transport reconnect. */
-	identity?: string;
-	release(): Promise<void>;
+  identity?: string;
+  release(): Promise<void>;
 }
 
 export interface HardwareTransportProvider {

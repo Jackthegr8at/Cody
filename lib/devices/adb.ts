@@ -613,10 +613,9 @@ async function reconnectStaging(context: HardwareContext): Promise<AdbStagingIo>
     throw new AdbProtocolError("ADB transport disconnected. This runner cannot reacquire the exclusive hardware lease; start a fresh operation to resume from verified chunks.");
   }
   const previousTransport = context.transport;
-	await closeCachedAdb(previousTransport);
-		await reacquire.call(context);
-
-	const adb = await adbFor(context);
+  await closeCachedAdb(previousTransport);
+  await reacquire.call(context);
+  const adb = await adbFor(context);
   return stagingIo(adb, await shellCapabilities(adb));
 }
 
@@ -639,9 +638,8 @@ async function runShellCommand(command: string, context: HardwareContext, adb: A
 
 async function reboot(request: HardwareRequest, context: HardwareContext, adb: Adb): Promise<HardwareResult> {
   const mode = request.options?.mode;
-	if (mode !== undefined && typeof mode !== "string") throw new AdbProtocolError("ADB reboot mode must be a string.");
-
-	const normalized = mode ?? "";
+  if (mode !== undefined && typeof mode !== "string") throw new AdbProtocolError("ADB reboot mode must be a string.");
+  const normalized = mode ?? "";
   if (normalized !== "" && normalized !== "recovery" && normalized !== "bootloader" && normalized !== "sideload" && normalized !== "fastboot") {
       throw new AdbProtocolError("ADB reboot supports only system, recovery, bootloader, sideload, or fastboot modes.");
     }

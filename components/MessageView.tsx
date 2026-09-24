@@ -1,8 +1,7 @@
 "use client";
 
-import { memo, useState, useRef, useEffect, useMemo, useCallback, type ComponentProps, type TransitionEvent } from "react";
+import { memo, useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback, useContext, type ComponentProps, type TransitionEvent } from "react";
 import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, Brain, CircleAlert, CircleSlash, LoaderCircle } from "lucide-react";
-import { useLayoutEffect, useContext } from "react";
 import { MarkdownBody } from "./MarkdownBody";
 import { ClickableImage } from "./ImageLightbox";
 import { TranscriptViewportContext } from "./TranscriptViewportContext";

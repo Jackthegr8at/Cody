@@ -268,15 +268,22 @@ test("engine/provider errors are cleaned and classified through lib/error-text b
   assert.match(hook, /addEngineErrorNotice\(raw, engineNameRef\.current\);/);
   assert.match(hook, /addEngineErrorNotice\(message, engineNameRef\.current\);/);
   assert.match(hook, /const errorMessage = rawErrorMessage \? describeEngineError\(rawErrorMessage\)\.detail : undefined;/);
+  // Every terminal-message/provider error path uses the same classifier.
+  assert.match(hook, /addEngineErrorNotice\(detail, engineNameRef\.current\);/, "message_end's stopReason \"error\" branch");
   assert.match(hook, /if \(described\.kind === "aborted"\) return null;/);
 });
 
 test("the notice reducer deduplicates repeats and caps visible errors at two", () => {
   assert.match(hook, /const MAX_VISIBLE_ERROR_NOTICES = 2;/);
+  // A repeat of the same (dedupeKey-matching) notice bumps `count` and clears
+  // `exiting` in place instead of appending a second copy.
   const bump = hook.slice(hook.indexOf("function bumpDuplicate"), hook.indexOf("function fillPendingNotices"));
   assert.match(bump, /count: \(next\[index\]\.count \?\? 1\) \+ 1, exiting: false/);
   const reducer = hook.slice(hook.indexOf("export function noticeReducer"), hook.indexOf("export function useAgentSession"));
   assert.match(reducer, /bumpDuplicate\(state\.visible, action\.notice\)/);
   assert.match(reducer, /bumpDuplicate\(state\.pending, action\.notice\)/);
+  // The error cap evicts the oldest ERROR notice specifically (not just the
+  // oldest of any type), or a full info/success shelf would never actually
+  // free an error slot.
   assert.match(reducer, /errorCapHit \? \(notice\) => notice\.type === "error" : undefined/);
 });

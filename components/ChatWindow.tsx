@@ -787,7 +787,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
   // Refs only, so the value is stable for the life of the component and no
   // block re-renders because the reader scrolled.
   const transcriptViewport = useMemo<TranscriptViewport>(() => ({ followingRef, anchorRef: readerAnchorRef }), [followingRef, readerAnchorRef]);
-
   useEffect(() => {
     onActiveSubagentCountChange?.(activeSubagentCount);
     return () => onActiveSubagentCountChange?.(0);
@@ -1778,18 +1777,18 @@ function NoticeShelf({ notices, onDismiss, floating = false, align = "left" }: {
           ? "var(--status-error)"
           : notice.type === "warning"
             ? "var(--status-warning)"
-              : notice.type === "success"
-                ? "var(--status-success)"
-                : "var(--accent)";
+          : notice.type === "success"
+            ? "var(--status-success)"
+            : "var(--accent)";
         const isError = notice.type === "error";
-        // Refusals are a model decision, distinct from a broken connection or
-        // provider error; keep the specific icon while retaining Cody's
-        // multi-line error treatment and dismiss affordance.
+        // Refusals are model decisions, distinct from provider failures; retain
+        // the specific icon while errors keep Cody's longer, readable treatment.
         const isRefusal = notice.errorKind === "refusal";
         return (
           <div
             key={notice.id}
             className="notice-shelf-item"
+            title={notice.message}
             style={{
               display: "flex",
               alignItems: isError ? "flex-start" : "center",
