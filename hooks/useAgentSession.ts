@@ -2827,7 +2827,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       optimisticUserMessageKeyRef.current = null;
       if (!agentRunningRef.current) return;
       if (runError) {
-        addNotice({ type: "error", message: runError });
+        addEngineErrorNotice(runError, engineNameRef.current);
         if (isQuotaLikeError(runError)) {
           toast.error("Quota reached", runError, { durationMs: 12000 });
         } else {
@@ -2866,7 +2866,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       slashCommandRunRef.current = false;
       onAgentEnd?.();
     }
-  }, [addNotice, clearLiveToolResults, dispatchPendingModelSwitch, holdTailForReader, loadSession, onAgentEnd, refreshSubagentUsage, resetSubagentActivityState]);
+  }, [addNotice, addEngineErrorNotice, clearLiveToolResults, dispatchPendingModelSwitch, holdTailForReader, loadSession, onAgentEnd, refreshSubagentUsage, resetSubagentActivityState]);
 
   // The engine restarted (container restart, crash) while this client was
   // waiting for a turn: the resumed engine is idle and no agent_end will ever
@@ -3685,8 +3685,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const rawErrorMessage = typeof event.errorMessage === "string" && event.errorMessage.trim()
           ? event.errorMessage.trim()
           : undefined;
-        // Keep the retry banner compact, but retain the raw text for the
-        // provider/quota retry bookkeeping below.
+        // The retry banner is a compact one-liner, not a full notice — clean
+        // the provider's text the same way (no JSON, no request id, no
+        // trailing URL) but keep it as the bare detail rather than wrapping
+        // it in a refusal/usage sentence, which would not fit next to
+        // "Retrying 2/5". Retain the raw text for quota retry bookkeeping.
         const errorMessage = rawErrorMessage ? describeEngineError(rawErrorMessage).detail : undefined;
         if (attribution.job.kind === "main") {
           setRetryInfo({ attempt: event.attempt as number, maxAttempts: event.maxAttempts as number, errorMessage });
@@ -4029,8 +4032,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             setPendingModel(selectedModel);
             if (existingSid) {
               await sendAgentCommand(sid, { type: "set_model", provider: selectedModel.provider, modelId: selectedModel.modelId });
-              // set_model reapplies the model default, so preserve a level
-              // the user chose before the first prompt.
+              // set_model re-applies the model default, so restore the
+              // reasoning level the user chose before the first prompt.
               if (thinkingLevel !== "auto") {
                 await sendAgentCommand(sid, { type: "set_thinking_level", level: thinkingLevel });
               }

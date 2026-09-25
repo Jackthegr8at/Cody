@@ -854,7 +854,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
   // Refs only, so the value is stable for the life of the component and no
   // block re-renders because the reader scrolled.
   const transcriptViewport = useMemo<TranscriptViewport>(() => ({ followingRef, anchorRef: readerAnchorRef }), [followingRef, readerAnchorRef]);
-
   useEffect(() => {
     onActiveSubagentCountChange?.(activeSubagentCount);
     return () => onActiveSubagentCountChange?.(0);

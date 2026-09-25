@@ -125,7 +125,8 @@ function AccountRow({ account, canEdit, canRename, busy, onRemove, onRename, usa
   busy: boolean;
   onRemove: () => void;
   onRename: () => void;
-  /** Matching usage-snapshot account by credential id, when reported. */
+  /** The matching usage-snapshot account (by credential id), when the engine
+   * reports one; when absent, no empty bar is rendered. */
   usageAccount?: UsageAccount | null;
 }) {
   const title = account.position === 0 ? "Primary" : account.position === 1 ? "Secondary" : `Account ${account.position + 1}`;

@@ -268,6 +268,8 @@ test("engine/provider errors are cleaned and classified through lib/error-text b
   assert.match(hook, /addEngineErrorNotice\(raw, engineNameRef\.current\);/);
   assert.match(hook, /addEngineErrorNotice\(message, engineNameRef\.current\);/);
   assert.match(hook, /const errorMessage = rawErrorMessage \? describeEngineError\(rawErrorMessage\)\.detail : undefined;/);
+  // Every terminal-message/provider error path uses the same classifier.
+  assert.match(hook, /addEngineErrorNotice\(detail, engineNameRef\.current\);/, "message_end's stopReason \"error\" branch");
   assert.match(hook, /if \(described\.kind === "aborted"\) return null;/);
 });
 
