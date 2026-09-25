@@ -187,7 +187,7 @@ function ChainCard({ chainKey, roleNames, entries, modelOptions, candidate, onCa
   );
 }
 
-export function RetryFallbackPanel({ models, onOpenModelPlan, panelId = "models" }: { models: RuntimeModelEntry[]; onOpenModelPlan?: () => void; panelId?: string }) {
+export function RetryFallbackPanel({ models, onOpenPresets, panelId = "models" }: { models: RuntimeModelEntry[]; onOpenPresets?: () => void; panelId?: string }) {
   // Works inside the settings shell (the engine's short name, the save
   // corner) and outside it, where it falls back to the default label.
   const shell = useContext(ShellContext);
@@ -401,9 +401,9 @@ export function RetryFallbackPanel({ models, onOpenModelPlan, panelId = "models"
         {visibleKeys.length === 0 ? (
           <div style={{ padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
             <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{engineName} has no fallback chains configured — a failed call simply retries the same model, with nowhere else to go.</p>
-            {onOpenModelPlan && (
-              <button type="button" onClick={onOpenModelPlan} style={{ alignSelf: "flex-start", padding: 0, border: "none", background: "none", color: "var(--accent)", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5 }}>
-                <Sparkles size={13} /> Generate chains with Plan roles &amp; fallbacks
+            {onOpenPresets && (
+              <button type="button" onClick={onOpenPresets} style={{ alignSelf: "flex-start", padding: 0, border: "none", background: "none", color: "var(--accent)", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5 }}>
+                <Sparkles size={13} /> Set them up from a model preset
               </button>
             )}
           </div>

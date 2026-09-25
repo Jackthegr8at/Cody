@@ -29,6 +29,17 @@ export interface OneShotRequest {
   systemPrompt: string;
   prompt: string;
   timeoutMs?: number;
+  /** Comma-joined into `--tools=<csv>`, replacing the default `--no-tools`.
+   * For a caller that hands the model a live tool (e.g. web_search) rather
+   * than running it fully tool-free. An empty array still means zero tools,
+   * same as omitting this and getting `--no-tools`. */
+  tools?: string[];
+  /** Spawn cwd. Defaults to the OS temp dir, matching every existing caller. */
+  cwd?: string;
+  /** Merged on top of `engineChildEnv()`. Lets a caller redirect state that
+   * reads an env var (e.g. `PI_CODING_AGENT_DIR`) without touching the
+   * process's own environment. */
+  extraEnv?: Record<string, string | undefined>;
 }
 
 /** The model's last answer, or the reason there is none — never both. */
@@ -73,6 +84,49 @@ interface LastAnswer {
   message: string | null;
 }
 
+/** A `tool_execution_start` frame, normalized. */
+export interface ToolStartEvent {
+  toolCallId: string;
+  toolName: string;
+  args: unknown;
+}
+
+/** A `tool_execution_end` frame, normalized. `resultExcerpt` is bounded here
+ * (not left to the caller) because the real payload can be an entire rendered
+ * web page — a progress log must never grow with it. */
+export interface ToolEndEvent {
+  toolCallId: string;
+  toolName: string;
+  isError: boolean;
+  resultExcerpt: string;
+}
+
+const TOOL_RESULT_EXCERPT_MAX = 300;
+
+/** Best-effort short text out of a tool result payload. omp's own text
+ * results are `{content: [{type: "text", text}], ...}`; anything else (a
+ * structured `details` blob, a bare string, or a shape a future omp version
+ * changes) still degrades to *some* bounded text rather than throwing. */
+function excerptToolResult(result: unknown): string {
+  let text = "";
+  if (typeof result === "string") {
+    text = result;
+  } else if (isRecord(result) && Array.isArray(result.content)) {
+    text = result.content
+      .flatMap((block) => (isRecord(block) && typeof block.text === "string" ? [block.text] : []))
+      .join(" ");
+  }
+  if (!text.trim()) {
+    try {
+      text = JSON.stringify(result);
+    } catch {
+      text = String(result);
+    }
+  }
+  text = text.trim().replace(/\s+/g, " ");
+  return text.length > TOOL_RESULT_EXCERPT_MAX ? `${text.slice(0, TOOL_RESULT_EXCERPT_MAX - 1)}…` : text;
+}
+
 /**
  * The NDJSON reducer, separated from the process so it can be exercised
  * without spawning anything.
@@ -89,7 +143,10 @@ interface LastAnswer {
  * what was reported (a restarted or rewritten message) yields no delta at all
  * rather than duplicated text; the final answer still carries the truth.
  */
-export function createFrameReader(onDelta?: (text: string) => void): {
+export function createFrameReader(
+  onDelta?: (text: string) => void,
+  toolHooks: { onToolStart?: (event: ToolStartEvent) => void; onToolEnd?: (event: ToolEndEvent) => void } = {},
+): {
   consume(line: string): void;
   sawFrame(): boolean;
   answer(): string | null;
@@ -115,10 +172,29 @@ export function createFrameReader(onDelta?: (text: string) => void): {
         return;
       }
       if (!isRecord(frame)) return;
-      // Any well-formed frame proves the child spoke; only these four can
-      // carry text, and everything else is skipped before it is inspected.
       seen = true;
       const type = frame.type;
+      // Tool frames never carry assistant text; handled separately from the
+      // answer-bearing types below, and reported before they are skipped.
+      if (type === "tool_execution_start") {
+        toolHooks.onToolStart?.({
+          toolCallId: typeof frame.toolCallId === "string" ? frame.toolCallId : "",
+          toolName: typeof frame.toolName === "string" ? frame.toolName : "",
+          args: frame.args,
+        });
+        return;
+      }
+      if (type === "tool_execution_end") {
+        toolHooks.onToolEnd?.({
+          toolCallId: typeof frame.toolCallId === "string" ? frame.toolCallId : "",
+          toolName: typeof frame.toolName === "string" ? frame.toolName : "",
+          isError: frame.isError === true,
+          resultExcerpt: excerptToolResult(frame.result),
+        });
+        return;
+      }
+      // Any other well-formed frame proves the child spoke; only these four
+      // can carry text, and everything else is skipped before it is inspected.
       if (type !== "turn_end" && type !== "message_end" && type !== "message_start" && type !== "message_update") {
         return;
       }
@@ -137,6 +213,8 @@ export function createFrameReader(onDelta?: (text: string) => void): {
 /** Extra hooks the streaming caller needs and the plain one does not. */
 interface RunHooks {
   onDelta?: (text: string) => void;
+  onToolStart?: (event: ToolStartEvent) => void;
+  onToolEnd?: (event: ToolEndEvent) => void;
   signal?: AbortSignal;
 }
 
@@ -169,8 +247,9 @@ function runOmpPrint(
     // These runs are pure judgement over the prompt they were handed. Tools,
     // skills, rules and extensions would let the model wander the filesystem,
     // spend the turn and (worse) return an answer justified by something it
-    // read there.
-    "--no-tools",
+    // read there. A caller that hands the model a live tool (research)
+    // passes `tools` and gets an explicit allow-list instead.
+    ...(request.tools ? [`--tools=${request.tools.join(",")}`] : ["--no-tools"]),
     "--no-skills",
     "--no-rules",
     // Prewalk runs a preliminary planning turn of its own. Without this the run
@@ -192,16 +271,21 @@ function runOmpPrint(
     `--system-prompt=${request.systemPrompt}`,
     ...(request.model ? [`--model=${request.model}`] : []),
     request.prompt,
-    // The OS temp dir, not the user's project: in the project directory omp
-    // would pick up its MCP config and context files, which is both slower and
-    // a way for repository content to reach a model the user did not point at
-    // this project.
+    // The OS temp dir, not the user's project, unless the caller supplies its
+    // own (research uses a dedicated throwaway dir per run rather than the
+    // shared OS temp root): in the project directory omp would pick up its
+    // MCP config and context files, which is both slower and a way for
+    // repository content to reach a model the user did not point at this
+    // project.
     // Same environment as every other engine spawn: a provider key saved in
     // Settings must reach the session namer and the planner too, or both
     // silently fall back (a truncated first-message name, the heuristic plan).
-  ], { cwd: tmpdir(), stdio: ["ignore", "pipe", "pipe"], env: engineChildEnv() });
+    // `extraEnv` layers on top for a caller that needs the child to resolve
+    // its OWN state (agent dir, MCP config, skills) somewhere other than the
+    // real install — see research.ts's module doc for why.
+  ], { cwd: request.cwd ?? tmpdir(), stdio: ["ignore", "pipe", "pipe"], env: engineChildEnv(request.extraEnv) });
 
-  const reader = createFrameReader(hooks.onDelta);
+  const reader = createFrameReader(hooks.onDelta, { onToolStart: hooks.onToolStart, onToolEnd: hooks.onToolEnd });
   let pending = "";
   let stderr = "";
   let settled = false;
@@ -300,9 +384,22 @@ export async function runOneShotModel(request: OneShotRequest): Promise<OneShotR
  * optimization: the returned result is derived exactly as `runOneShotModel`
  * derives it, so a run whose streaming frames were never recognized still
  * answers with the full text.
+ *
+ * `onToolStart`/`onToolEnd` report the child's own tool calls (e.g. research's
+ * web_search) as they happen, for a caller building a progress log.
  */
 export async function runOneShotModelStreaming(
-  request: OneShotRequest & { onDelta?: (text: string) => void; signal?: AbortSignal },
+  request: OneShotRequest & {
+    onDelta?: (text: string) => void;
+    onToolStart?: (event: ToolStartEvent) => void;
+    onToolEnd?: (event: ToolEndEvent) => void;
+    signal?: AbortSignal;
+  },
 ): Promise<OneShotResult> {
-  return runOneShot(request, { onDelta: request.onDelta, signal: request.signal });
+  return runOneShot(request, {
+    onDelta: request.onDelta,
+    onToolStart: request.onToolStart,
+    onToolEnd: request.onToolEnd,
+    signal: request.signal,
+  });
 }

@@ -2682,6 +2682,48 @@ config").
 - **OMP 17.4 compaction**: `compaction.strategy`/`remoteEnabled` no longer exist upstream — `compaction.methodOrder` (ordered preference list) replaced them. `settings-config.ts` reads legacy keys through OMP's own migration mapping and deletes them when writing `methodOrder`.
 - Retry/fallback UI lives in `components/settings/RetryFallbackPanel.tsx` (see its module comment for the never-persist-an-empty-chain rule).
 
+### Model presets: per-conversation role overlays, researched on the web (`lib/model-presets/`)
+
+A preset (built-ins Max / High / Medium / Low, plus user-created ones) is a
+complete answer to "which model, at which reasoning level, plays each omp
+role", with the fallback chains that go with it. Presets live in Cody's
+instance data dir (`cody-model-presets.json`), never in `config.yml`.
+
+- **Per conversation, never global.** A chat is bound to one preset
+  (`cody-session-presets.json`); the binding is materialized as an omp config
+  layer (`cody-model-presets/<hash>.yml`) appended to `PI_CONFIG_FILES` at
+  spawn (`launchWithSessionOverlays` in rpc-manager: preset overlay first,
+  Local-only routing last, so Local-only still wins). Switching presets in
+  one chat never touches another chat or the user's own `config.yml`. The
+  binding follows omp's temp-id -> real-id rename, is copied on fork and is
+  forgotten on delete; a deleted preset reads as base settings.
+- **Only in Smart mode, and it never fights the user.** The composer offers
+  presets as rows under Smart (`hooks/useSessionPreset.ts`,
+  `hooks/session-preset-state.ts`). A preset is applied ONLY by a direct pick:
+  nothing re-applies one on load, reconnect or session switch. A manual model
+  or reasoning pick leaves Smart (and therefore the preset) exactly as a
+  manual pick always has. A pick during a turn answers 409 `session_busy` and
+  is resent once the run ends.
+- **Editing a preset moves the chats bound to it** without killing a turn:
+  idle chats restart now, a mid-turn chat at `agent_end`
+  (`restartSessionForRoutingWhenIdle`, `routingRestartPending`).
+- **Research is a sandboxed omp print-mode child**
+  (`lib/model-presets/research.ts`): tools restricted to `web_search`, a
+  fresh temp cwd (no project `.mcp.json` or context files) and a fresh agent
+  dir with an EMPTY `mcp.json` and only `agent.db`/`models.yml`/`config.yml`
+  symlinked. `--tools` alone is not enough: user MCP servers bypass it, and
+  an untrusted web page must never reach a tool that can touch files or
+  commands. Proposals are validated against the live roster (selectors, each
+  model's own `thinkingEfforts`, vision), cite their sources, and are only
+  written to a preset when the user applies them. One run at a time; the
+  snapshot survives a restart (`cody-model-research.json`).
+- **Trap: the server's import graph cannot use `@/` aliases.**
+  `bin/cody-server.js` loads `lib/` through a bare `createJiti`, so one alias
+  anywhere under `lib/rpc-manager.ts` stops the server booting, while every
+  test (which loads with `tsconfigPaths`) still passes.
+  `lib/server-import-graph.test.mjs` walks that graph from the server's own
+  entry list.
+
 ### Auth and model config
 - Auth flows go through RPC commands (`get_login_providers`, `login`) against the omp child process; credentials live in omp's `agent.db` (SQLite) which Cody never touches directly.
 - `models.yml` in the omp agent directory (`~/.omp/agent/models.yml`, `.yaml` fallback) is read and written from the Providers hub's detail drawer, in a custom endpoint's "Advanced" form (`components/ModelsConfig.tsx`'s editors, rendered by `settings/providers/ProviderDetail.tsx`) — not the Models hub, which only reads the resulting catalog.

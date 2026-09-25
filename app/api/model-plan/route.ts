@@ -2,17 +2,15 @@ import { NextResponse } from "next/server";
 import { requireEngine } from "@/lib/engine-guard";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import {
-  bestAvailableModel,
   constrainPlanDraft,
   deriveChains,
   heuristicPlan,
-  providerOf,
-  resolveRosterModel,
   ROLE_NAMES,
   validatePlan,
 } from "@/lib/model-plan/derive";
+import { plannerCandidates, savedDefaultProvider, suggestedPlanner } from "@/lib/model-plan/planner-candidates";
 import { planWithModel } from "@/lib/model-plan/planner";
-import { loadRoster, type RosterModel } from "@/lib/model-plan/roster";
+import { loadRoster } from "@/lib/model-plan/roster";
 import { clearModelRoles, readModelRoles, writeModelRoles } from "@/lib/omp/model-roles";
 import {
   deleteNativeSettingsPaths,
@@ -31,30 +29,6 @@ export const dynamic = "force-dynamic";
  */
 const SURFACE = "The OMP model-roles planner";
 
-// A planner must read the full roster and return JSON. A catalog may omit a
-// context limit, but a published tiny limit cannot hold that request.
-const MIN_PLANNER_CONTEXT = 8_000;
-
-function plannerCandidates(models: RosterModel[]): RosterModel[] {
-  return models.filter(
-    (model) => model.contextWindow === null || model.contextWindow >= MIN_PLANNER_CONTEXT,
-  );
-}
-
-function savedDefaultProvider(defaultSelector: string | undefined, roster: RosterModel[]): string | undefined {
-  if (!defaultSelector) return undefined;
-  return resolveRosterModel(defaultSelector, roster)?.provider ?? providerOf(defaultSelector);
-}
-
-function suggestedPlanner(
-  defaultSelector: string | undefined,
-  candidates: RosterModel[],
-  preferredProvider: string | undefined,
-): RosterModel | null {
-  const current = defaultSelector ? resolveRosterModel(defaultSelector, candidates) : null;
-  if (current && !current.local) return current;
-  return bestAvailableModel(candidates, { preferredProvider });
-}
 function savedCustomRoles(roles: Record<string, string>): Record<string, string> {
   return Object.fromEntries(Object.entries(roles).filter(([role]) => !ROLE_NAMES.includes(role)));
 }

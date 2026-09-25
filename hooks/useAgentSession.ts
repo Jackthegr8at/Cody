@@ -37,11 +37,14 @@ import { getPreferredToolPreset, subscribeToPreferredToolPreset } from "@/lib/to
 import {
   advanceSmartModelForAutomaticChange,
   clearSmartModelAfterManualSelection,
+  clearSmartModelAfterThinkingLevelChange,
   parseSmartModelProvenance,
   resolveSmartModel,
   smartModelForSession,
   type SmartModelProvenance,
+  type ThinkingLevelChangeSource,
 } from "@/hooks/session-model-provenance";
+import { newSessionSpawnPlan } from "@/hooks/session-preset-state";
 import {
   classifyFallbackReason,
   fallbackAttributionForRole,
@@ -702,6 +705,13 @@ export interface UseAgentSessionOptions {
   /** Loopback URLs the assistant mentioned in a live reply — candidates for
    *  auto-opening the Preview panel once something answers there. */
   onPreviewUrlsSeen?: (urls: string[], sessionId?: string) => void;
+  /** What a brand-new (unspawned) chat should send `/api/agent/new` as
+   *  `presetId` — the composer's preset picker's current pick, computed
+   *  by `hooks/useSessionPreset.ts`. `undefined` omits the field entirely
+   *  (presets unsupported, or not yet loaded); `null` is an explicit Base
+   *  settings pick. Read via `opts.newSessionPresetId` inside
+   *  ensureNewSession rather than destructured above: nothing else needs it. */
+  newSessionPresetId?: string | null;
 }
 
 export type ThinkingLevelOption = string;
@@ -1228,6 +1238,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (next) persistSmartModel(next);
       else clearPersistedSmartModel(sessionId);
     }, []);
+    // A manual reasoning-level pick leaves Smart exactly like a manual
+    // model pick; a preset's own default level (applied right after a
+    // preset switch) must not — see handleThinkingLevelChange's `source`.
+    const clearSmartModelForThinkingLevel = useCallback((sessionId: string, source: ThinkingLevelChangeSource, accepted: boolean) => {
+      const next = clearSmartModelAfterThinkingLevelChange(smartPinnedModelRef.current, sessionId, source, accepted);
+      if (next === smartPinnedModelRef.current) return;
+      smartPinnedModelRef.current = next;
+      setSmartPinnedModel(next);
+      if (next) persistSmartModel(next);
+      else clearPersistedSmartModel(sessionId);
+    }, []);
   // Guards stale branch/leaf context responses: two rapid navigate clicks must
   // not let the older response overwrite the newer branch's messages.
   const contextRequestSeqRef = useRef(0);
@@ -1301,6 +1322,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const ensuringNewSessionRef = useRef<Promise<string | null> | null>(null);
   const newSessionLocalOnlyRef = useRef(false);
+  // A manual reasoning-level pick made before this new chat has spawned —
+  // leaves Smart exactly like an explicit model pick does (`newSessionModel
+  // !== null`), so `ensureNewSession` and `isAutoModelSelection` both read
+  // it through `newSessionSpawnPlan`. Reset when the user explicitly picks
+  // Smart again (`selectSmartModel`).
+  const manualPreSpawnLevelRef = useRef(false);
   const newSessionPromotedRef = useRef(false);
   // Raw child-session events stream at token rate; coalesce the per-subagent
   // revision bumps to one per animation frame so an open dialog only re-pages
@@ -1955,10 +1982,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
       const promise = (async () => {
         const selectedModel = newSessionModel ?? newSessionDefaultModel;
-        // No explicit pick is Smart. Persist that source against the real session
-        // identity before its first reconciliation can resolve a concrete model.
-        const smartSpawn = newSessionModel === null && !newSessionLocalOnlyRef.current;
-        if (selectedModel) setPendingModel(selectedModel);
+        // No explicit pick and no manual pre-spawn reasoning-level pick is
+        // Smart. Persist that source against the real session identity
+        // before its first reconciliation can resolve a concrete model.
+        const spawn = newSessionSpawnPlan({
+          modelPicked: newSessionModel !== null,
+          localOnly: newSessionLocalOnlyRef.current,
+          manualLevelPicked: manualPreSpawnLevelRef.current,
+          presetId: opts.newSessionPresetId,
+        });
+        if (selectedModel && spawn.sendModel) setPendingModel(selectedModel);
         const toolNames = getToolNamesForPreset(toolPreset);
         const res = await fetch("/api/agent/new", {
           method: "POST",
@@ -1969,10 +2002,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             ...(sessionKind ? { kind: sessionKind } : {}),
             ...(sessionKind === "sidebar" && contextSessionId ? { contextSessionId } : {}),
             toolNames,
-            ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
-            ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
+            ...(selectedModel && spawn.sendModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
+            ...(thinkingLevel !== "auto" && spawn.sendThinkingLevel ? { thinkingLevel } : {}),
             ...(advisorEnabled ? { advisor: true } : {}),
             ...(newSessionLocalOnlyRef.current ? { localOnly: true } : {}),
+            ...(opts.newSessionPresetId !== undefined && spawn.sendPresetId ? { presetId: opts.newSessionPresetId } : {}),
           }),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1983,7 +2017,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         dispatchCompactionStatus({ type: "reset", sessionId: realId });
         if (newSessionLocalOnlyRef.current) setLocalOnly((current) => ({ ...current, active: true, pending: false }));
         updateSessionControlScope(realId, selectedModel, true);
-        if (smartSpawn) {
+        if (spawn.smartSpawn) {
           pendingSmartSpawnRef.current = realId;
           setSmartModelProvenance({ forSession: realId });
         }
@@ -1996,7 +2030,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       } finally {
         ensuringNewSessionRef.current = null;
       }
-    }, [advisorEnabled, contextSessionId, isNew, newSessionCwd, sessionKind, newSessionModel, newSessionDefaultModel, setSmartModelProvenance, thinkingLevel, toolPreset, updateSessionControlScope]);
+    }, [advisorEnabled, contextSessionId, isNew, newSessionCwd, opts.newSessionPresetId, sessionKind, newSessionModel, newSessionDefaultModel, setSmartModelProvenance, thinkingLevel, toolPreset, updateSessionControlScope]);
 
   const selectLocalOnly = useCallback(async (): Promise<boolean> => {
     if (localOnly.pending || !localOnly.supported) return false;
@@ -4063,6 +4097,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const selectSmartModel = useCallback((): boolean => {
     if (sessionIdRef.current) return false;
     newSessionLocalOnlyRef.current = false;
+    manualPreSpawnLevelRef.current = false;
     setLocalOnly((current) => ({ ...current, active: false, pending: false, error: undefined, models: undefined }));
     setNewSessionModel(null);
     pendingSmartSpawnRef.current = null;
@@ -4531,13 +4566,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, []);
 
-  const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
+  const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption, source: ThinkingLevelChangeSource = "manual") => {
     const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
     if (!sid) {
       // A new conversation has no engine yet. The pick is held here and
       // ensureNewSession applies it at spawn, before the first prompt; dropping
       // it left the selector stuck on Auto and the first turn on the default.
       if (!isNew) return;
+      // A MANUAL pick here leaves Smart, same as an explicit pre-spawn model
+      // pick — the picker hides and the eventual spawn drops any bound
+      // preset (see `newSessionSpawnPlan`). A "preset"-sourced call never
+      // reaches this branch (it only fires from a live PUT's success, which
+      // requires a real session id), but source is still checked so a
+      // future caller cannot fall into this by accident.
+      if (source === "manual") manualPreSpawnLevelRef.current = true;
       thinkingConfiguredAutoRef.current = level === "auto";
       setThinkingLevel(level);
       return;
@@ -4557,6 +4599,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       await sendAgentCommand(sid, { type: "set_thinking_level", level });
       if (thinkingLevelPendingRequestRef.current !== request || !sameSessionControlScope(thinkingLevelScopeRef.current, scope)) return;
+      // "If I change the reasoning level or model then it's no longer smart
+      // mode" — but only a MANUAL pick means that; a preset's own default
+      // level, applied right after a preset switch, must not cancel the
+      // preset the user just chose (source distinguishes the two).
+      clearSmartModelForThinkingLevel(sid, source, true);
       await refreshLiveModelState(sid);
       if (thinkingLevelPendingRequestRef.current !== request || !sameSessionControlScope(thinkingLevelScopeRef.current, scope)) return;
       addNotice({ type: "info", message: translate("agentSession.thinkingLevelApplied", { level: thinkingLevelLabel(level, translate) }) });
@@ -4572,7 +4619,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setThinkingLevelTarget(null);
       }
     }
-  }, [addNotice, beginAuthoritativeModelSync, isNew, refreshLiveModelState]);
+  }, [addNotice, beginAuthoritativeModelSync, clearSmartModelForThinkingLevel, isNew, refreshLiveModelState]);
 
   const handleModeChange = useCallback(async (modeId: string) => {
     const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
@@ -5042,7 +5089,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // for as long as the running model is still the one Smart chose in THIS
     // session (both facts are id-scoped, so a switch to another conversation
     // can never inherit them).
-    isAutoModelSelection: (isNew && newSessionModel === null && !localOnly.active)
+    isAutoModelSelection: (isNew && newSessionSpawnPlan({
+      modelPicked: newSessionModel !== null,
+      localOnly: localOnly.active,
+      manualLevelPicked: manualPreSpawnLevelRef.current,
+      presetId: opts.newSessionPresetId,
+    }).smartSpawn)
       || (smartPinnedModel !== null
         && smartPinnedModel.forSession === (session?.id ?? sessionIdRef.current)
         && displayModelProvider === smartPinnedModel.provider

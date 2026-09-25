@@ -1,12 +1,15 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, Footprints, ListChecks, Loader2, Paperclip, Pin, RefreshCw, ShieldCheck, SlidersHorizontal, Sparkles, Split, Target, TriangleAlert, Zap, ZapOff } from "lucide-react";
+import { ChevronDown, Footprints, Gauge, ListChecks, Loader2, Paperclip, Pin, RefreshCw, ShieldCheck, SlidersHorizontal, Sparkles, Split, Target, TriangleAlert, Zap, ZapOff } from "lucide-react";
 import type { SessionModeOption } from "@/hooks/useAgentSession";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import { ALL_CAPABILITIES, OMP_ENGINE_ID, type ActiveEngineInfo, type EngineCapabilities } from "./SettingsTabs";
 
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
+import type { SessionPresetResponse } from "@/lib/model-presets/types";
+import { formatSmartTriggerLabel, type ComposerPresetOption, type PendingPresetPick } from "@/hooks/session-preset-state";
+import type { ParsedPresetSelector } from "@/lib/model-presets/selector";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
 import { formatGoalElapsed } from "@/lib/web-mode-state";
 import { toast } from "@/components/ui/toast";
@@ -53,7 +56,7 @@ import { selectableThinkingLevels } from "@/lib/thinking-levels";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { STORAGE_EVENTS } from "@/lib/storage-keys";
 import { migrateComposerAllowlist, mirrorServerVisibility, modelVisibilityKey, pushRecentModel, readComposerVisibility, type ComposerVisibility } from "@/lib/composer-model-visibility";
-import { useSettingsRoute } from "@/hooks/useSettingsData";
+import { fetchSettingsRoute, useSettingsRoute } from "@/hooks/useSettingsData";
 import { patchSettingsSchema } from "@/hooks/useConfigWriter";
 import { deriveFastModeState } from "@/lib/fast-mode-state";
 import { useSettingsOpener } from "./settings/shell-context";
@@ -83,6 +86,9 @@ interface ModelOption {
 const NO_MODES: SessionModeOption[] = [];
 /** Stable empty list keeps quota derivation memo-friendly when no session is live. */
 const NO_ACTIVE_MODELS: readonly SessionActiveModel[] = [];
+/** Stable empty list keeps the preset section memo-friendly when presets
+ *  are unsupported or not yet loaded. */
+const NO_PRESETS: ComposerPresetOption[] = [];
 
 interface Props {
   onSend: (message: string, images?: AttachedImage[]) => void;
@@ -129,6 +135,23 @@ interface Props {
    * active engine cannot support this routing mode. */
   localOnly?: { active: boolean; pending: boolean; supported: boolean; error?: string };
   onSelectLocalOnly?: () => Promise<boolean>;
+  /** Every configured preset — "Base settings" is implicit and not included
+   *  here. Empty/absent hides the preset section entirely, alongside
+   *  Smart's own capabilities.models gate. */
+  presets?: ComposerPresetOption[];
+  /** The user's base config.yml `default` role, for the "Base settings"
+   *  row's own muted hint. */
+  baseDefaultModel?: ParsedPresetSelector | null;
+  /** This chat's bound preset; null = Base settings; undefined = not yet
+   *  known (nothing preset-related renders while unknown). */
+  activePresetId?: string | null;
+  /** A preset pick the engine deferred with 409 session_busy, held until
+   *  the run ends. */
+  pendingPresetPick?: PendingPresetPick | null;
+  /** Switch this chat's preset (or set a new chat's spawn default). Absent
+   *  hides the preset section, matching every other capability-gated
+   *  control here. */
+  onPresetChange?: (presetId: string | null, name: string) => void;
   /** The engine's last unprompted model switch for this session (retry
    * fallback, usage-aware routing). Renders a persistent marker beside the
    * model control naming what moved and why — the switch outlives its toast. */
@@ -158,7 +181,7 @@ interface Props {
   isCompacting?: boolean;
   compactResult?: CompactResultInfo | null;
   thinkingLevel?: string;
-  onThinkingLevelChange?: (level: string) => void;
+  onThinkingLevelChange?: (level: string, source?: "manual" | "preset") => void;
   /** A reasoning-level command is awaiting engine acknowledgement. */
   thinkingLevelPending?: boolean;
   /** The requested reasoning level while an acknowledgement is pending. */
@@ -1685,7 +1708,7 @@ function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; plan?: A
 }
 
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, canAttachWhileStreaming = false, canAttachImagesWhileStreaming = false, capabilities = ALL_CAPABILITIES, engine = null, model, sessionId, activeModels = NO_ACTIVE_MODELS, isAutoModelSelection, modelNames, modelList, modelError, modelErrorCode, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, localOnly, onSelectLocalOnly, autoModelSwitch, modelSwitchPending, modelChangeWhileStreaming = false, fastModeEnabled, fastModeActive, fastModeCapable, fastModeSupported, fastModePending, fastModeUnavailable, onFastModeChange,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, canAttachWhileStreaming = false, canAttachImagesWhileStreaming = false, capabilities = ALL_CAPABILITIES, engine = null, model, sessionId, activeModels = NO_ACTIVE_MODELS, isAutoModelSelection, modelNames, modelList, modelError, modelErrorCode, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, localOnly, onSelectLocalOnly, presets = NO_PRESETS, baseDefaultModel = null, activePresetId, pendingPresetPick = null, onPresetChange, autoModelSwitch, modelSwitchPending, modelChangeWhileStreaming = false, fastModeEnabled, fastModeActive, fastModeCapable, fastModeSupported, fastModePending, fastModeUnavailable, onFastModeChange,
   onAbortCompaction, isCompacting, compactResult,
   thinkingLevel, onThinkingLevelChange, thinkingLevelPending, thinkingLevelTarget, availableModes = NO_MODES, currentModeId = null, onModeChange, availableThinkingLevels, modelNameOverride,
   retryInfo, queuedMessages, inputHistory = [], onAbortRetry,
@@ -2916,6 +2939,47 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     </>
   ) : null;
 
+  // Muted "model · level" hint for one preset's `default` role — or a
+  // fallback when unconfigured/unparsable, so a row never shows literally
+  // nothing. Not exported from hooks/session-preset-state.ts: it needs t()
+  // and modelNames, which only exist inside a component.
+  const formatPresetHint = (split: ParsedPresetSelector | null): string => {
+    if (!split) return t("chatInput.presetNoDefault");
+    const name = formatModelDisplayName(split.modelId, modelNames?.[`${split.provider}:${split.modelId}`]);
+    return split.thinkingLevel ? `${name} \u00b7 ${thinkingLevelLabel(split.thinkingLevel, t)}` : name;
+  };
+  // "Base settings" (id null) + every configured preset — Presets only ever
+  // apply while the composer is on Smart (AGENTS.md "Composer model + tools
+  // controls"), so this list is hidden the instant a manual pick leaves it,
+  // exactly like the picker itself.
+  const presetRows = capabilities.models && onPresetChange && isAutoModelSelection && presets.length > 0 ? (
+    <div style={{ borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
+      <DropdownToggleRow
+        testId="preset-base"
+        icon={<Gauge size={13} strokeWidth={1.8} aria-hidden="true" style={{ flexShrink: 0, marginTop: 2, color: activePresetId === null ? "var(--accent)" : "var(--text-dim)" }} />}
+        label={t("chatInput.presetBaseSettings")}
+        hint={pendingPresetPick?.presetId === null ? t("chatInput.presetPending") : formatPresetHint(baseDefaultModel)}
+        pressed={activePresetId === null}
+        pending={pendingPresetPick?.presetId === null}
+        isMobile={isMobile}
+        onToggle={() => onPresetChange(null, t("chatInput.presetBaseSettings"))}
+      />
+      {presets.map((preset) => (
+        <DropdownToggleRow
+          key={preset.id}
+          testId={`preset-${preset.id}`}
+          icon={<Gauge size={13} strokeWidth={1.8} aria-hidden="true" style={{ flexShrink: 0, marginTop: 2, color: activePresetId === preset.id ? "var(--accent)" : "var(--text-dim)" }} />}
+          label={preset.name}
+          hint={pendingPresetPick?.presetId === preset.id ? t("chatInput.presetPending") : formatPresetHint(preset.defaultModel)}
+          pressed={activePresetId === preset.id}
+          pending={pendingPresetPick?.presetId === preset.id}
+          isMobile={isMobile}
+          onToggle={() => onPresetChange(preset.id, preset.name)}
+        />
+      ))}
+    </div>
+  ) : null;
+
   // Every model the session may pick: the catalog minus what is hidden. The
   // running model stays listed even when hidden, so the label always names
   // something the list has.
@@ -2987,6 +3051,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         ?? model.modelId)
     : null;
   const currentName = displayModelName;
+  // The preset this chat is bound to, resolved to its CURRENT display name
+  // (built-ins default to Max/High/Medium/Low but may be renamed) — never
+  // derived from the id. Undefined/null activePresetId (not yet known, or
+  // explicit Base settings) means no suffix: plain "Smart".
+  const activePresetOptionName = activePresetId ? presets.find((preset) => preset.id === activePresetId)?.name ?? null : null;
+  const smartTriggerLabel = formatSmartTriggerLabel(t("chatInput.smartModel"), activePresetOptionName);
   // A failed load surfaces modelError; only an in-flight load shows the
   // loading chip, so "no models" can only appear after the fetch settled.
   const showModelsLoading = Boolean(modelsLoading) && !modelError;
@@ -3020,42 +3090,35 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   // Smart row on a LIVE session: there is no "auto" runtime state to fall
   // back into (the session already has a resolved model), so this reaches
-  // for the same answer omp would give a brand-new session — the configured
-  // OMP roles' `default` — and pins the picker to it. Unset or unmatched
-  // roles surface a toast rather than silently doing nothing.
+  // for the same answer omp would give a brand-new session under the
+  // chat's OWN bound preset (or Base settings) — GET
+  // /api/sessions/[id]/preset's smartDefault — and pins the picker to it,
+  // applying its reasoning level the same way a preset switch does. Fetched
+  // fresh through the shared route cache (hooks/useSettingsData.ts) rather
+  // than trusted from whatever hooks/useSessionPreset.ts last prefetched: a
+  // click is a deliberate action and must never act on a stale read. Unset
+  // or unmatched roles surface a toast rather than silently doing nothing.
   const handleSmartModelForLiveSession = useCallback(async () => {
-    if (!onModelChange) return;
+    if (!onModelChange || !sessionId) return;
     try {
-      const res = await fetch("/api/model-roles");
-      if (!res.ok) throw new Error(`model-roles fetch failed: ${res.status}`);
-      const data = await res.json() as { roles?: Record<string, string> };
-      const defaultRole = data.roles?.default;
-      const slash = defaultRole ? defaultRole.indexOf("/") : -1;
-      if (!defaultRole || slash === -1) {
+      const entry = await fetchSettingsRoute<SessionPresetResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/preset`);
+      const smartDefault = entry.data?.smartDefault;
+      if (!smartDefault) {
         toast.info(t("chatInput.smartModelUnavailable", { name: engineName }));
         return;
       }
-      const provider = defaultRole.slice(0, slash);
-      const rest = defaultRole.slice(slash + 1);
-      // Exact match first — a model id can itself contain a colon (self-hosted
-      // tags such as `qwen3:8b`) — before stripping an optional :thinking suffix.
-      const match = modelList?.find((m) => m.provider === provider && m.id === rest)
-        ?? (() => {
-          const colon = rest.lastIndexOf(":");
-          if (colon === -1) return undefined;
-          const base = rest.slice(0, colon);
-          return modelList?.find((m) => m.provider === provider && m.id === base);
-        })();
+      const match = modelList?.find((m) => m.provider === smartDefault.provider && m.id === smartDefault.modelId);
       if (!match) {
         toast.info(t("chatInput.smartModelUnavailable", { name: engineName }));
         return;
       }
       await onModelChange(match.provider, match.id, "smart");
+      if (smartDefault.thinkingLevel && onThinkingLevelChange) onThinkingLevelChange(smartDefault.thinkingLevel, "preset");
     } catch (e) {
       console.error("Failed to resolve smart model:", e);
       toast.info(t("chatInput.smartModelUnavailable", { name: engineName }));
     }
-  }, [modelList, onModelChange, t, engineName]);
+  }, [modelList, onModelChange, onThinkingLevelChange, sessionId, t, engineName]);
 
   // Turn-based engines take one prompt at a time: no steering, no follow-up
   // queue. Rather than leave Enter silently inert, the composer says it is
@@ -4014,7 +4077,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     {localOnly?.active
                       ? t("chatInput.localOnly")
                       : isAutoModelSelection
-                        ? t("chatInput.smartModel")
+                        ? smartTriggerLabel
                         : currentName ?? (modelOptions.length > 0
                           ? t("chatInput.selectModel")
                           : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noModels"))}
@@ -4124,6 +4187,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         </span>
                       </button>
                     )}
+                    {presetRows}
                     {(fastRow || prewalkRows) && (
                       <div style={{ borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
                         {fastRow}

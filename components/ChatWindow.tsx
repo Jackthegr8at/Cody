@@ -32,6 +32,8 @@ import { captureTranscriptAnchor } from "@/lib/transcript-anchor";
 import { TranscriptViewportContext, type TranscriptViewport } from "@/components/TranscriptViewportContext";
 import { formatModelDisplayName } from "@/lib/model-display";
 import { deriveSessionActiveModels } from "@/lib/session-active-models";
+import { useSessionPreset } from "@/hooks/useSessionPreset";
+import type { SmartDefault } from "@/lib/model-presets/types";
 
 interface Props {
   session: SessionInfo | null;
@@ -758,6 +760,42 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     chatInputRef?.current?.insertIfEmpty(content);
   }, [chatInputRef]);
 
+  // "Smart" is omp's model-ROLE resolution (config.yml modelRoles reached
+  // through /api/model-roles), not a generic "pick one for me". Only an
+  // engine with the models surface has roles to resolve, so pi — which has
+  // chatExtras but not models — was being offered a control that fetched
+  // omp's config. Model presets are also an omp role overlay and share this
+  // exact gate. Computed before useAgentSession below: useSessionPreset
+  // needs it, and useSessionPreset is called first (see its module doc).
+  const smartModelCapable = capabilities.models;
+  // Filled in for real once useAgentSession below has returned
+  // handleModelChange/handleThinkingLevelChange/isAutoModelSelection — this
+  // starts as a no-op only because useSessionPreset (which owns the actual
+  // preset switch) must be called BEFORE useAgentSession (its
+  // newSessionPresetId feeds useAgentSession's own spawn options below), so
+  // neither of those exists yet at this point in the render. The callback
+  // only ever actually FIRES later, asynchronously, once a preset PUT's own
+  // network round trip resolves — long after this ref is filled in for
+  // real, below.
+  const applyPresetSmartDefaultRef = useRef<(smartDefault: SmartDefault) => void>(() => {});
+  const onPresetSmartDefaultResolved = useCallback((smartDefault: SmartDefault) => {
+    applyPresetSmartDefaultRef.current(smartDefault);
+  }, []);
+  // Same ordering constraint as applyPresetSmartDefaultRef above: a preset
+  // pick made in an already-spawned-but-unpromoted new chat (after `/`,
+  // after toggling fast mode, ...) must reach the SPAWNED id — sessionIdRef,
+  // returned by useAgentSession below — not just the promoted `session`
+  // prop, which lags spawn until the first send. Filled in for real once
+  // useAgentSession has returned it.
+  const resolveSpawnedSessionIdRef = useRef<() => string | null>(() => null);
+  const resolveSpawnedSessionId = useCallback(() => resolveSpawnedSessionIdRef.current(), []);
+  const presetState = useSessionPreset({
+    capable: smartModelCapable,
+    sessionId: session?.id ?? null,
+    resolveSpawnedSessionId,
+    onSmartDefaultResolved: onPresetSmartDefaultResolved,
+  });
+
   const {
     loading, error, messages, entryIds, streamState,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelSelectable, modelsLoading, modelError, modelErrorCode, modelThinkingLevels, thinkingLevel, thinkingLevelPending, thinkingLevelTarget, fastModeEnabled, fastModeActive, fastModePending, fastModeUnavailable, promptCapabilities, steeringSupported,
@@ -781,8 +819,36 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     session, newSessionCwd, advisorEnabled, subagentsCapable, engineName: engine?.shortName, thinkingDefaultExpanded, onAgentEnd: wrappedOnAgentEnd, onSessionNamed, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
     onOpenFile, onOpenPreview, onPreviewUrlsSeen,
+    newSessionPresetId: presetState.newSessionPresetId,
   });
+  resolveSpawnedSessionIdRef.current = () => sessionIdRef.current;
   const sessionBusy = agentRunning || bashRunning;
+  // The REAL Smart-pin implementation (see the ref's own comment above):
+  // only while this chat is actually on Smart, in DIRECT response to the
+  // preset PUT that just succeeded — never a reactive re-apply. Reassigned
+  // every render so it always closes over the current handlers/flag.
+  applyPresetSmartDefaultRef.current = (smartDefault) => {
+    if (!isAutoModelSelection) return;
+    void (async () => {
+      // omp's set_model re-applies the target model's own default level, so
+      // a level sent before the model change has actually gone out is
+      // immediately overwritten. If the model change itself fails (queued
+      // behind a running provider call and rejected, an ACP restriction,
+      // Local-only refusing it, ...), the preset's level must not apply
+      // either — it would then be a manual-looking level on the OLD model.
+      const modelApplied = await handleModelChange(smartDefault.provider, smartDefault.modelId, "smart");
+      if (modelApplied && smartDefault.thinkingLevel) await handleThinkingLevelChange(smartDefault.thinkingLevel, "preset");
+    })();
+  };
+  // The pending re-send of a preset pick the engine deferred with 409 — the
+  // one automatic exception "presets never re-apply themselves" allows.
+  // Falling edge only, mirroring ChatInput's own usage-refresh effect.
+  const wasBusyForPresetRef = useRef(sessionBusy);
+  useEffect(() => {
+    const wasBusy = wasBusyForPresetRef.current;
+    wasBusyForPresetRef.current = sessionBusy;
+    if (wasBusy && !sessionBusy) presetState.retryPendingPick();
+  }, [sessionBusy, presetState.retryPendingPick]);
   // Refs only, so the value is stable for the life of the component and no
   // block re-renders because the reader scrolled.
   const transcriptViewport = useMemo<TranscriptViewport>(() => ({ followingRef, anchorRef: readerAnchorRef }), [followingRef, readerAnchorRef]);
@@ -1124,11 +1190,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
   // steer handler is shared by the composer and the subagent dialog's
   // "Cancel subtask", so both hide together when steering is not on offer.
   const steerWhileRunning = (chatExtras || steeringSupported) && agentRunning ? handleSteer : undefined;
-  // "Smart" is omp's model-ROLE resolution (config.yml modelRoles reached
-  // through /api/model-roles), not a generic "pick one for me". Only an engine
-  // with the models surface has roles to resolve, so pi — which has chatExtras
-  // but not models — was being offered a control that fetched omp's config.
-  const smartModelCapable = capabilities.models;
   // Who may change the model. `modelSelectable` is null for an engine with a
   // global registry — there the rpc-dialect set_model surface is what decides,
   // as it always did. It is a boolean for a session-scoped engine (ACP), where
@@ -1151,7 +1212,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       capabilities={capabilities}
       engine={engine}
       model={displayModelValue}
-      sessionId={session?.id ?? null}
+      sessionId={session?.id ?? sessionIdRef.current ?? null}
       activeModels={activeModels}
       isAutoModelSelection={smartModelCapable && isAutoModelSelection}
       modelNames={modelNames}
@@ -1162,6 +1223,11 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       modelsRefreshKey={modelsRefreshKey}
       onModelChange={canChangeModel ? handleModelChange : undefined}
       onSelectSmartModel={smartModelCapable && isNew ? selectSmartModel : undefined}
+      presets={presetState.presets}
+      baseDefaultModel={presetState.baseDefaultModel}
+      activePresetId={presetState.activePresetId}
+      pendingPresetPick={presetState.pendingPick}
+      onPresetChange={smartModelCapable ? presetState.pickPreset : undefined}
       localOnly={localOnly}
       onSelectLocalOnly={selectLocalOnly}
       autoModelSwitch={autoModelSwitch}

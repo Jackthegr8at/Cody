@@ -26,18 +26,22 @@ const SYSTEM_PROMPT = [
 ].join(" ");
 
 // What each role actually drives. Without this, names such as smol and slow
-// invite guesses that conflict with OMP's real role behavior.
-const ROLE_BRIEF = [
-  "default - the main session: every ordinary user-driven turn.",
-  "task - general-purpose subagents doing balanced, multi-step delegated work; do not spend the frontier model by default.",
-  "smol - deliberately mechanical subagents: bulk edits, data collection, and low-judgement work.",
-  "tiny - constant small background work: titles, classifiers, and extractions.",
-  "plan - planning and design turns, where deliberate reasoning pays off.",
-  "slow - the deliberate role for the hardest problems; quality over latency.",
-  "vision - anything with images attached; the model must accept image input.",
-  "commit - short, formulaic commit messages at high volume.",
-  "advisor - OMP's rigorous second-opinion reviewer, not a cheapest background classifier.",
-].join("\n");
+// invite guesses that conflict with OMP's real role behavior. Exported so the
+// researched-preset planner (lib/model-presets/research.ts) can reuse the same
+// wording instead of re-describing OMP's roles from scratch, extending it with
+// roles this planner does not assign (e.g. memory).
+export const ROLE_BRIEF_LINES: Record<string, string> = {
+  default: "default - the main session: every ordinary user-driven turn.",
+  task: "task - general-purpose subagents doing balanced, multi-step delegated work; do not spend the frontier model by default.",
+  smol: "smol - deliberately mechanical subagents: bulk edits, data collection, and low-judgement work.",
+  tiny: "tiny - constant small background work: titles, classifiers, and extractions.",
+  plan: "plan - planning and design turns, where deliberate reasoning pays off.",
+  slow: "slow - the deliberate role for the hardest problems; quality over latency.",
+  vision: "vision - anything with images attached; the model must accept image input.",
+  commit: "commit - short, formulaic commit messages at high volume.",
+  advisor: "advisor - OMP's rigorous second-opinion reviewer, not a cheapest background classifier.",
+};
+const ROLE_BRIEF = Object.values(ROLE_BRIEF_LINES).join("\n");
 
 function buildUserPrompt(roster: Roster): string {
   return [
@@ -85,9 +89,11 @@ function buildUserPrompt(roster: Roster): string {
 
 /**
  * Return the outermost balanced `{...}`. The scanner handles a code fence or
- * extra prose and ignores braces inside strings.
+ * extra prose and ignores braces inside strings. Exported so other one-shot
+ * JSON planners (lib/model-presets/research.ts) parse a model's answer the
+ * same defensive way instead of duplicating the scanner.
  */
-function extractJsonObject(text: string): string | null {
+export function extractJsonObject(text: string): string | null {
   const start = text.indexOf("{");
   if (start === -1) return null;
 

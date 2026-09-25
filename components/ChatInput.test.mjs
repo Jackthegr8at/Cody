@@ -1083,6 +1083,73 @@ test("keeps Smart model selection free of engine and model suffixes", () => {
   assert.match(html, />Smart</);
   assert.doesNotMatch(html, /Smart[^<]*[·—]/);
 });
+test("the Smart trigger names the chat's bound preset", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ChatInput, {
+      onSend() {},
+      onAbort() {},
+      isStreaming: false,
+      capabilities: { chatExtras: true, models: true, fastMode: false, subagents: false, skills: false },
+      model: { provider: "openai", modelId: "gpt-5" },
+      modelNames: { "openai/gpt-5": "GPT-5" },
+      isAutoModelSelection: true,
+      onModelChange() {},
+      presets: [{ id: "high", name: "High", defaultModel: null }],
+      activePresetId: "high",
+    }),
+  );
+
+  assert.match(html, />Smart · High</);
+});
+
+test("the Smart trigger stays plain Smart on an explicit Base settings pick, even with presets configured", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ChatInput, {
+      onSend() {},
+      onAbort() {},
+      isStreaming: false,
+      capabilities: { chatExtras: true, models: true, fastMode: false, subagents: false, skills: false },
+      model: { provider: "openai", modelId: "gpt-5" },
+      modelNames: { "openai/gpt-5": "GPT-5" },
+      isAutoModelSelection: true,
+      onModelChange() {},
+      presets: [{ id: "high", name: "High", defaultModel: null }],
+      activePresetId: null,
+    }),
+  );
+
+  assert.match(html, />Smart</);
+  assert.doesNotMatch(html, /Smart[^<]*[·—]/);
+});
+
+test("Smart's live resolution reads the chat's own bound preset, not the global model-roles route", () => {
+  // /api/model-roles answered the SAME "default" role for every chat on the
+  // engine; a preset overlay is per-conversation, so the model-roles route
+  // can no longer be the source of truth for what a live Smart click resolves to.
+  const handler = composerSource.slice(
+    composerSource.indexOf("const handleSmartModelForLiveSession = useCallback"),
+    composerSource.indexOf("const turnWaiting ="),
+  );
+  assert.doesNotMatch(handler, /\/api\/model-roles/);
+  assert.match(handler, /`\/api\/sessions\/\$\{encodeURIComponent\(sessionId\)\}\/preset`/);
+  assert.match(handler, /fetchSettingsRoute/);
+  // The resolved level applies through the SAME preset-sourced path used
+  // after a preset switch — never counted as the user's own manual pick.
+  assert.match(handler, /onThinkingLevelChange\(smartDefault\.thinkingLevel, "preset"\)/);
+});
+
+test("a preset switch pins the chat's model and reasoning through the existing Smart path, never as a manual pick", async () => {
+  const chatWindowSource = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
+  const apply = chatWindowSource.slice(
+    chatWindowSource.indexOf("applyPresetSmartDefaultRef.current = (smartDefault)"),
+    chatWindowSource.indexOf("// The pending re-send of a preset pick"),
+  );
+  // Gated on Smart actually being on — a race that lands after the user
+  // left Smart must not pin a model out from under a manual pick.
+  assert.match(apply, /if \(!isAutoModelSelection\) return;/);
+  assert.match(apply, /handleModelChange\(smartDefault\.provider, smartDefault\.modelId, "smart"\)/);
+  assert.match(apply, /handleThinkingLevelChange\(smartDefault\.thinkingLevel, "preset"\)/);
+});
 test("keeps rpc model switches available at a turn boundary and marks session-scoped pickers unavailable", () => {
   const renderStreamingPicker = (modelChangeWhileStreaming) => renderToStaticMarkup(
     React.createElement(ChatInput, {

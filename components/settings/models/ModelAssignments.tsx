@@ -2,18 +2,21 @@
 
 /**
  * Settings › Models › Assignments: which model plays each role, what
- * happens when one fails, the planner that proposes both, and Cody's own
- * Distill chain. Four views behind one segmented control so a long
- * fallback-chain editor never pushes the roles off screen.
+ * happens when one fails, the named presets a conversation can switch
+ * between from the composer, and Cody's own Distill chain. Five views
+ * behind one segmented control so a long fallback-chain editor never
+ * pushes the roles off screen.
  *
  * The role and chain pickers offer the models that reach sessions AND are
  * visible to this user; a role already on a hidden model is flagged in
  * `ModelRoles` rather than silently re-pointed.
  *
  * The first three views are the ENGINE's config (`capabilities.models`);
- * Distill is Cody's own file and rides on its route saying `supported`, so
- * an engine with no roles surface can still have a Distill view and
- * nothing else.
+ * Presets are Cody's own file (`cody-model-presets.json`) and ride on the
+ * same gate — a preset only ever overlays omp role selectors, so it needs
+ * the engine's roles surface to mean anything; Distill is Cody's own file
+ * too and rides on its route saying `supported`, so an engine with no
+ * roles surface can still have a Distill view and nothing else.
  */
 import { useEffect, useMemo, useState } from "react";
 import { useSettingsShell } from "../shell-context";
@@ -24,20 +27,20 @@ import { OMP_ENGINE_ID } from "@/components/SettingsTabs";
 import { LocalModelProfileCard, type LocalModelProfileBody, type PromptProfileOverride } from "@/components/LocalModelProfile";
 import { toast } from "@/components/ui/toast";
 import type { ModelCatalogHandle } from "@/hooks/useModelCatalog";
-import { ModelPlanPanel } from "../ModelPlanPanel";
+import { ModelPresets } from "./ModelPresets";
 import { RetryFallbackPanel, type RuntimeModelEntry } from "../RetryFallbackPanel";
 import { DistillAssignment } from "./DistillAssignment";
 import { RoutingBindingCard } from "./RoutingBindingCard";
 import { ModelRoles, type RoleModelOption } from "./ModelRoles";
 import { LocalRoutingAssignment, useLocalRoutingConfig } from "./LocalRoutingAssignment";
 
-type View = "local" | "roles" | "retry" | "plan" | "distill";
+type View = "local" | "roles" | "retry" | "presets" | "distill";
 
 const VIEWS: { id: View; label?: string }[] = [
   { id: "local" },
   { id: "roles", label: "Roles" },
   { id: "retry", label: "Retry & fallback" },
-  { id: "plan", label: "Plan" },
+  { id: "presets", label: "Presets" },
   { id: "distill", label: "Distill" },
 ];
 
@@ -49,6 +52,7 @@ function viewForHighlight(highlight: string | null): View | null {
   if (highlight.startsWith("schema-retry.") || highlight === "retry-transient-errors") return "retry";
   if (highlight === "local-model-prompt-profile") return "local";
   if (highlight === "distill-chain") return "distill";
+  if (highlight.startsWith("model-presets-")) return "presets";
   return null;
 }
 
@@ -141,8 +145,8 @@ export function ModelAssignments({ catalog, panelId, engineViews, distillView }:
       )}
             {active === "roles" && <ModelRoles models={roleOptions} panelId={panelId} />}
       {active === "retry" && engine?.id === OMP_ENGINE_ID && <RoutingBindingCard />}
-      {active === "retry" && <RetryFallbackPanel models={visibleModels} panelId={panelId} onOpenModelPlan={() => setView("plan")} />}
-      {active === "plan" && <ModelPlanPanel />}
+      {active === "retry" && <RetryFallbackPanel models={visibleModels} panelId={panelId} onOpenPresets={() => setView("presets")} />}
+      {active === "presets" && <ModelPresets models={roleOptions} panelId={panelId} />}
       {active === "distill" && <DistillAssignment models={roleOptions} panelId={panelId} />}
     </div>
   );

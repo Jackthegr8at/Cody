@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   advanceSmartModelForAutomaticChange,
   clearSmartModelAfterManualSelection,
+  clearSmartModelAfterThinkingLevelChange,
   parseSmartModelProvenance,
   resolveSmartModel,
   smartModelForSession,
@@ -54,4 +55,24 @@ test("only a complete persisted record is accepted as Smart provenance", () => {
     parseSmartModelProvenance({ forSession: "smart-session", provider: "provider-a", modelId: "default" }),
     { forSession: "smart-session", provider: "provider-a", modelId: "default" },
   );
+});
+
+test("a manual reasoning-level pick clears Smart provenance exactly like a manual model pick", () => {
+  const smart = { forSession: "smart-session", provider: "provider-a", modelId: "default" };
+  assert.equal(clearSmartModelAfterThinkingLevelChange(smart, "smart-session", "manual", true), null);
+});
+
+test("a preset-driven reasoning-level change never clears Smart provenance, even when accepted", () => {
+  const smart = { forSession: "smart-session", provider: "provider-a", modelId: "default" };
+  assert.deepEqual(clearSmartModelAfterThinkingLevelChange(smart, "smart-session", "preset", true), smart);
+});
+
+test("a rejected manual reasoning-level pick preserves Smart provenance", () => {
+  const smart = { forSession: "smart-session", provider: "provider-a", modelId: "default" };
+  assert.deepEqual(clearSmartModelAfterThinkingLevelChange(smart, "smart-session", "manual", false), smart);
+});
+
+test("a reasoning-level change for an unrelated session never touches this session's Smart provenance", () => {
+  const smart = { forSession: "smart-session", provider: "provider-a", modelId: "default" };
+  assert.deepEqual(clearSmartModelAfterThinkingLevelChange(smart, "other-session", "manual", true), smart);
 });

@@ -64,3 +64,22 @@ export function smartModelForSession(
 ): SmartModelProvenance | null {
   return sessionId && provenance?.forSession === sessionId ? provenance : null;
 }
+
+/** A manual reasoning-level pick leaves Smart exactly like a manual model
+ *  pick does ("If I change the reasoning level or model then it's no longer
+ *  smart mode"). A preset's OWN default level, applied automatically right
+ *  after a preset switch, must NOT — clearing here would cancel the very
+ *  preset the user just chose. The two are distinguished explicitly by
+ *  `source` rather than inferred, so a future third caller cannot default
+ *  into clearing by accident. */
+export type ThinkingLevelChangeSource = "manual" | "preset";
+
+export function clearSmartModelAfterThinkingLevelChange(
+  provenance: SmartModelProvenance | null,
+  sessionId: string,
+  source: ThinkingLevelChangeSource,
+  accepted: boolean,
+): SmartModelProvenance | null {
+  if (source !== "manual") return provenance;
+  return clearSmartModelAfterManualSelection(provenance, sessionId, accepted);
+}

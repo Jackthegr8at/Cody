@@ -26,6 +26,7 @@ import { PlanKeeper } from "./plan-keeper/keeper";
 import { readPlanOverlay } from "./plan-keeper/overlay";
 import { materializeLocalModelProfile, resolveLocalModelPromptProfile, type LocalModelProfileLaunch, type ModelProfileTarget, type ResolvedLocalModelProfile } from "./local-model-profile-runtime";
 import { copySessionLocalRouting, materializeLocalRoutingOverlay, readLocalRoutingIntent, renameSessionLocalRouting, validateLocalRoutingModelSelection } from "./local-model-routing";
+import { copySessionPreset, renameSessionPreset, sessionPresetOverlay } from "./model-presets/overlay";
 import { selectPromptProfileId, type PromptProfileId } from "./local-model-profile";
 import { PRESET_FULL } from "./tool-presets";
 import { isRecord } from "./type-guards";
@@ -600,10 +601,35 @@ function patchEstimatedTokensAfter(result: unknown): void {
   }
 }
 
+/** Layer this conversation's model preset (lib/model-presets) over the
+ * launch profile. The preset overlay goes AFTER the prompt-profile overlay —
+ * they set disjoint keys — and before Local-only, which replaces the launch
+ * wholesale while it is on: a Local-only chat is limited to local models, so
+ * a preset naming cloud models must not apply there. */
+function withPresetOverlay(profile: LocalModelProfileLaunch | undefined, sessionId: string): LocalModelProfileLaunch | undefined {
+  const overlay = sessionPresetOverlay(sessionId);
+  if (!overlay) return profile;
+  const inherited = profile?.env?.PI_CONFIG_FILES ?? process.env.PI_CONFIG_FILES;
+  return {
+    ...(profile ?? { profileId: "full" as const }),
+    env: {
+      ...profile?.env,
+      PI_CONFIG_FILES: [inherited, overlay].filter((value): value is string => typeof value === "string" && value.length > 0).join(path.delimiter),
+    },
+  };
+}
+
+/** Every per-conversation overlay, in precedence order: the launch profile,
+ * then the chat's model preset, then Local-only. Relaunches rebuild this from
+ * the persisted state, so a restart always picks up the chat's current preset. */
+export function launchWithSessionOverlays(profile: LocalModelProfileLaunch | undefined, sessionId: string): LocalModelProfileLaunch | undefined {
+  return launchWithLocalRouting(withPresetOverlay(profile, sessionId), sessionId);
+}
+
 /** Append a session-owned Local-only overlay after the prompt overlay. The
  * routing overlay owns model selection; the profile overlay owns compaction
  * and context-file suppression, so neither can overwrite the other. */
-export function launchWithLocalRouting(profile: LocalModelProfileLaunch | undefined, sessionId: string): LocalModelProfileLaunch | undefined {
+function launchWithLocalRouting(profile: LocalModelProfileLaunch | undefined, sessionId: string): LocalModelProfileLaunch | undefined {
   const intent = readLocalRoutingIntent(sessionId);
   if (!intent.enabled && intent.error) {
     throw new WebRpcError(`Local-only routing cannot start safely: ${intent.error}`, "local_routing_unavailable");
@@ -932,8 +958,56 @@ export class AgentSessionWrapper {
     this.localProfileResolution = resolution;
   }
 
-  /** Apply a persisted routing-overlay change only when this wrapper is idle. */
+  /** Set when a persisted overlay (a preset edit) changed while this chat was
+   * mid-turn: the restart happens at the turn's end instead of killing it. */
+  private routingRestartPending = false;
+  /** One routingForRouting run at a time per wrapper. A request that arrives
+   *  while one is in flight never races it into restart()'s own
+   *  session_restarting guard: it coalesces into a single follow-up run
+   *  (never more than one queued) so every caller settles without throwing,
+   *  and any overlay change that landed mid-run still gets applied. */
+  private routingRestartInFlight: Promise<boolean> | null = null;
+  private routingRestartCoalesce = false;
+
+  /** Restart onto the current persisted overlays now if idle, else as soon as
+   * the running turn ends. Never interrupts provider or tool work. */
+  async restartForRoutingWhenIdle(): Promise<{ restarted: boolean; active: boolean }> {
+    if (this.isRunning()) {
+      this.routingRestartPending = true;
+      return { restarted: false, active: true };
+    }
+    return { restarted: await this.restartForRouting(), active: false };
+  }
+
+  /** Apply a persisted routing-overlay change only when this wrapper is idle.
+   *  Serialized per wrapper: see routingRestartInFlight above. */
   async restartForRouting(): Promise<boolean> {
+    if (this.routingRestartInFlight) {
+      this.routingRestartCoalesce = true;
+      return this.routingRestartInFlight;
+    }
+    const run = this.runRoutingRestart().finally(() => {
+      this.routingRestartInFlight = null;
+      if (this.routingRestartCoalesce) {
+        this.routingRestartCoalesce = false;
+        // Something coalesced onto the run that just finished: its overlay
+        // read may already be stale, so true up once more rather than let a
+        // picked preset silently not apply.
+        void this.restartForRouting().catch((error: unknown) => {
+          console.warn("[rpc-manager] coalesced routing restart failed:", error);
+        });
+      }
+    });
+    this.routingRestartInFlight = run;
+    return run;
+  }
+
+  /** The actual restart. Never called concurrently with itself — restartForRouting
+   *  above serializes — but still re-checks isRunning() after its own get_state
+   *  round trip: a prompt that starts during that await sets promptRunning
+   *  synchronously and is sent to the still-live process (see send()'s "prompt"
+   *  case), and restart() would kill it mid-turn if this went on regardless. */
+  private async runRoutingRestart(): Promise<boolean> {
     if (this.isRunning()) return false;
     // The cached launch profile of a Local-only session IS the Local-only
     // launch: its frozen envelope profile plus the overlay that limits the
@@ -958,7 +1032,13 @@ export class AgentSessionWrapper {
     } catch {
       // No readable model: the engine's full default profile is the safe base.
     }
-    const effective = launchWithLocalRouting(base, this._sessionId);
+    // A prompt may have started while get_state was in flight. Defer to the
+    // turn-end restart instead of killing a turn already underway.
+    if (this.isRunning()) {
+      this.routingRestartPending = true;
+      return false;
+    }
+    const effective = launchWithSessionOverlays(base, this._sessionId);
     this.localProfileLaunch = effective;
     this.localProfileResolution = resolution;
     await this.restart(base);
@@ -1104,6 +1184,20 @@ export class AgentSessionWrapper {
           this.lastReplyText = null;
           invalidateSessionListCache();
           void this.getPlanKeeper()?.notifyTerminalAgentEnd();
+          if (this.routingRestartPending) {
+            this.routingRestartPending = false;
+            // After this frame has reached every listener, and only if nothing
+            // started in between (a queued follow-up, a steer).
+            setTimeout(() => {
+              if (!this.isAlive() || this.isRunning()) {
+                this.routingRestartPending = true;
+                return;
+              }
+              void this.restartForRouting().catch((error: unknown) => {
+                console.warn("[rpc-manager] deferred routing restart failed:", error);
+              });
+            }, 0);
+          }
         }
         break;
       case "message_end": {
@@ -2052,6 +2146,7 @@ export class AgentSessionWrapper {
         // A branch keeps its parent resumable, so clone rather than move the
         // frozen Local-only snapshot and account ownership sidecars.
         copySessionLocalRouting(parentSessionId, newSessionId);
+        copySessionPreset(parentSessionId, newSessionId);
         const owner = getSessionOwner(parentSessionId);
         if (owner) setSessionOwner(newSessionId, owner);
         return { cancelled: false, newSessionId };
@@ -2300,8 +2395,16 @@ export async function restartSessionForRouting(sessionId: string): Promise<{ res
   const session = getRegistry().get(sessionId);
   if (!(session instanceof AgentSessionWrapper)) return { restarted: false, active: false };
   if (session.isRunning()) return { restarted: false, active: true };
-  await session.restartForRouting();
-  return { restarted: true, active: false };
+  const restarted = await session.restartForRouting();
+  return { restarted, active: !restarted };
+}
+
+/** Restart onto changed persisted overlays now if idle, or when the running
+ * turn ends — for a change the chat did not ask for itself (an edited preset). */
+export async function restartSessionForRoutingWhenIdle(sessionId: string): Promise<{ restarted: boolean; active: boolean }> {
+  const session = getRegistry().get(sessionId);
+  if (!(session instanceof AgentSessionWrapper)) return { restarted: false, active: false };
+  return session.restartForRoutingWhenIdle();
 }
 
 /**
@@ -2490,8 +2593,8 @@ export async function startRpcSession(
     }
     const initialResolution = profileTarget ? resolveLocalModelPromptProfile(profileTarget) : undefined;
     const initialProfile = initialResolution ? materializeLocalModelProfile(initialResolution) : undefined;
-    const launchProfile = launchWithLocalRouting(initialProfile, sessionId);
-    const holder: { wrapper?: AgentSessionWrapper } = {};
+    const launchProfile = launchWithSessionOverlays(initialProfile, sessionId);
+    const holder: { wrapper?: AgentSessionWrapper; renamed: boolean } = { renamed: false };
     const proc = new RpcProcess({
       cwd,
       launch: buildEngineRpcLaunch(harness, { cwd, sessionFile, toolNames, advisor, profile: launchProfile, kind }),
@@ -2505,7 +2608,14 @@ export async function startRpcSession(
       relaunch: (file, profile) => buildEngineRpcLaunch(harness, {
         cwd,
         sessionFile: file,
-        profile: launchWithLocalRouting(profile, holder.wrapper?.sessionId || sessionId),
+        // Until the rename below moves the temp-key binding onto the real id,
+        // a relaunch (synchronizeLocalModelProfile's startup sync, in
+        // particular) must keep resolving preset/Local-only overlays by the
+        // temp key: the wrapper's own sessionId flips to the real id the
+        // moment identity is known (waitUntilReady), well before the rename
+        // call below runs, so reading by sessionId here would silently miss
+        // a binding that is still filed under the temp key.
+        profile: launchWithSessionOverlays(profile, holder.renamed ? (holder.wrapper?.sessionId || sessionId) : sessionId),
         kind,
       }),
       kind,
@@ -2547,8 +2657,10 @@ export async function startRpcSession(
       // rename, unlike a fork: the temporary id has no resumable parent.
       renameSessionOwner(sessionId, realSessionId);
       renameSessionLocalRouting(sessionId, realSessionId);
+      renameSessionPreset(sessionId, realSessionId);
       aliasDisplaySession(sessionId, realSessionId);
     }
+    holder.renamed = true;
     created.onDestroy(() => {
       if (registry.get(created.sessionId) === created) registry.delete(created.sessionId);
       if (registry.get(realSessionId) === created) registry.delete(realSessionId);

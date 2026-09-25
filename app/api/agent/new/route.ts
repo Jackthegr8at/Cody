@@ -15,6 +15,8 @@ import { getHarness } from "@/lib/harness";
 import { engineSessionTitle, getEngineSession, upsertEngineSession } from "@/lib/harness/engine-sessions";
 import { EngineCommandError } from "@/lib/harness/errors";
 import { configuredLocalRoutingModels, renameSessionLocalRouting, setSessionLocalOnly } from "@/lib/local-model-routing";
+import { forgetSessionPreset, setSessionPreset } from "@/lib/model-presets/overlay";
+import { getPreset, setLastUsedPreset } from "@/lib/model-presets/store";
 
 /** Same bound as /api/agent/[id]: the browser's prompt frame is capped at
  * PROMPT_FRAME_BUDGET_BYTES (900 KiB, lib/image-compress.ts), so 4 MiB is
@@ -59,7 +61,7 @@ export async function POST(req: Request) {
     }
 
     // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
-    const { provider, modelId, toolNames, thinkingLevel, advisor, localOnly, kind, contextSessionId, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: string; advisor?: boolean; localOnly?: boolean; kind?: "sidebar"; contextSessionId?: string | null; [key: string]: unknown };
+    const { provider, modelId, toolNames, thinkingLevel, advisor, localOnly, kind, contextSessionId, presetId, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: string; advisor?: boolean; localOnly?: boolean; kind?: "sidebar"; contextSessionId?: string | null; presetId?: string | null; [key: string]: unknown };
     // A stale or forged sessionId must never reach the child RPC.
     delete promptCommand.sessionId;
     if (typeof promptCommand.type !== "string" || !promptCommand.type.trim()) {
@@ -68,6 +70,9 @@ export async function POST(req: Request) {
 
     if (localOnly !== undefined && typeof localOnly !== "boolean") {
       return NextResponse.json({ error: "localOnly must be a boolean", code: "invalid_local_routing" }, { status: 400 });
+    }
+    if (presetId !== undefined && presetId !== null && typeof presetId !== "string") {
+      return NextResponse.json({ error: "presetId must be a preset id or null", code: "invalid_preset" }, { status: 400 });
     }
 
     // Must be unique per request: startRpcSession coalesces concurrent callers
@@ -87,6 +92,18 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Local-only routing is available only for omp sessions.", code: "local_routing_unsupported" }, { status: 400 });
     }
     const localIntent = localOnly === true ? setSessionLocalOnly(tempKey, true) : null;
+    // A model preset is an omp role overlay. A sidebar chat is isolated from
+    // role configuration by design and never takes one.
+    const presetForLaunch = typeof presetId === "string" && harness.id === "omp" && kind !== "sidebar" ? presetId : null;
+    if (presetForLaunch !== null) {
+      if (!getPreset(presetForLaunch)) {
+        return NextResponse.json({ error: "That preset no longer exists.", code: "not_found" }, { status: 404 });
+      }
+      // Bound under the temporary key; startRpcSession moves it onto omp's
+      // real id once the child announces it.
+      setSessionPreset(tempKey, presetForLaunch);
+    }
+    if (presetId !== undefined && kind !== "sidebar" && harness.id === "omp") setLastUsedPreset(presetForLaunch);
     const localEnvelope = localIntent?.envelope;
     if (localIntent && !localEnvelope) throw new Error("Local-only routing did not produce a safe context envelope.");
     const selectedForLaunch = localIntent?.primary ?? (provider && modelId ? { provider, modelId } : undefined);
@@ -104,19 +121,27 @@ export async function POST(req: Request) {
     // Resolved before the spawn: the sidebar's context tools are handed this
     // account, and every session they read is gated by its ownership.
     const actor = getRequestUser(req);
-    const { session, realSessionId } = await startRpcSession(
-      tempKey,
-      "",
-      cwd,
-      toolNames,
-      advisor === true,
-      engineMode ? "" : undefined,
-      profileTarget,
-      kind,
-      // Sidebar only: its context tools read this account's sessions, and
-      // default `read_session` to whichever main chat the panel is pointed at.
-      kind === "sidebar" ? { contextSessionId: typeof contextSessionId === "string" ? contextSessionId : null, user: actor } : undefined,
-    );
+    let started: Awaited<ReturnType<typeof startRpcSession>>;
+    try {
+      started = await startRpcSession(
+        tempKey,
+        "",
+        cwd,
+        toolNames,
+        advisor === true,
+        engineMode ? "" : undefined,
+        profileTarget,
+        kind,
+        // Sidebar only: its context tools read this account's sessions, and
+        // default `read_session` to whichever main chat the panel is pointed at.
+        kind === "sidebar" ? { contextSessionId: typeof contextSessionId === "string" ? contextSessionId : null, user: actor } : undefined,
+      );
+    } catch (error) {
+      // No session came of it, so its pre-spawn binding must not linger.
+      if (presetForLaunch !== null) forgetSessionPreset(tempKey);
+      throw error;
+    }
+    const { session, realSessionId } = started;
     if (localIntent) renameSessionLocalRouting(tempKey, realSessionId);
 
     // Keep the files-route allowed-roots cache (see app/api/files/[...path]/route.ts)
