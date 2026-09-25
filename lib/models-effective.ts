@@ -29,6 +29,13 @@ function thinkingLevelsFor(model: OmpModel, fallbackEfforts: boolean): string[] 
   return ["off", ...efforts];
 }
 
+/** Every rate zero or absent. What that means (local, free, or not yet in
+ *  omp's catalog) is lib/model-price-fill.ts's call, not this projection's. */
+function isUnpriced(cost: OmpModel["cost"]): boolean {
+  if (!cost) return true;
+  return [cost.input, cost.output, cost.cacheRead, cost.cacheWrite].every((rate) => !(typeof rate === "number" && rate > 0));
+}
+
 export const EMPTY_MODELS: ModelsData = {
   models: {},
   modelList: [],
@@ -96,6 +103,7 @@ export async function loadEffectiveModels(harness: HarnessAdapter): Promise<Mode
         && model.contextWindow > 0
         ? { contextWindow: model.contextWindow }
         : {}),
+      ...(isUnpriced(model.cost) ? { unpriced: true as const } : {}),
     }))
     .sort(compareModelEntries);
   // Provider login state is an omp surface (agent.db credentials); engines

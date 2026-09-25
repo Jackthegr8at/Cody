@@ -319,7 +319,13 @@ lib/
                        an inversion, not an allowlist, so a model neither list
                        names stays visible — see the same note
   models-effective.ts  the effective (already-curated) catalog loader shared by
-                       /api/models and /api/providers's per-provider counts
+                       /api/models and /api/providers's per-provider counts;
+                       flags `unpriced` rows (every rate zero or absent)
+  models-dev.ts        the one models.dev reader (hourly cache), shared by the
+                       Add-model-from-catalog picker and the price fill
+  model-price-fill.ts  fills models.dev prices into models.yml for models omp's
+                       bundled catalog does not list yet — see "Prices for
+                       models omp does not know yet" below
   composer-model-visibility.ts  browser-side mirror of the visibility file so
                        the composer repaints without a round trip, and the
                        store of record on an open instance (no accounts)
@@ -1347,6 +1353,24 @@ must name the panel that fixes it.
   carrying only `cost`/`modelOverrides`; treating them as custom endpoints is
   what turned the price seed into a phantom "connected" row. Pinned by
   `lib/provider-directory.test.mjs`.
+- **Prices for models omp does not know yet** (`lib/model-price-fill.ts`).
+  omp prices every turn from its BUNDLED catalog (`@oh-my-pi/pi-catalog`
+  `models.json`, read for membership by `lib/omp/bundled-catalog.ts`), so a
+  model reached through runtime discovery before omp's next release (a new
+  GPT on a ChatGPT subscription) reads as free. `/api/models` reconciles in
+  the background at most every 30 min: an `unpriced` model omp's catalog does
+  NOT list, with an exact models.dev match on the same provider (or a
+  declared `PRICE_PROVIDER_ALIASES` entry — only `openai-codex → openai`,
+  because omp's own catalog prices the two identically) and a nonzero rate,
+  gets that rate in `providers.<id>.modelOverrides.<model>.cost`, so omp
+  still does the math. A model omp LISTS at zero is omp's decision (prepaid
+  plan, free tier) and is never touched. Every write is recorded in
+  `cody-price-fill.json`; if models.yml no longer holds exactly that value
+  the user changed it, and the entry becomes a permanent tombstone. Once
+  omp's catalog lists the model, Cody removes its value (handback). Only the
+  four flat rates exist in models.yml's override schema — a long-context
+  tier is not carried. Verified on a live omp: the utility registry reports
+  the written cost for a discovered `openai-codex` model.
 - **An engine's own CLI advice is not Cody's advice.** `OMP_BIN_MISSING`
   (lib/omp/omp-cli.ts) is the one missing-binary string, and it names Settings
   › System › Engines — not "install oh-my-pi or set CODY_OMP_BIN", which is

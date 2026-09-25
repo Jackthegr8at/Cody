@@ -1,6 +1,9 @@
 export interface ModelsData {
   models: Record<string, string>;
-  modelList: { id: string; name: string; provider: string; supportsFastMode?: boolean; contextWindow?: number }[];
+  /** `unpriced`: omp reports every rate as zero or absent — a local model, a
+   *  free tier, or a model omp's catalog does not know yet
+   *  (lib/model-price-fill.ts decides which). */
+  modelList: { id: string; name: string; provider: string; supportsFastMode?: boolean; contextWindow?: number; unpriced?: true }[];
   defaultModel: { provider: string; modelId: string } | null;
   thinkingLevels: Record<string, string[]>;
   connectedProviders?: { id: string; name: string; disabled: boolean }[];

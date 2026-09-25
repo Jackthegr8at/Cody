@@ -3,7 +3,9 @@ import { requireEngine } from "@/lib/engine-guard";
 import { getHarness } from "@/lib/harness";
 import { loadFullCatalog } from "@/lib/model-catalog-full";
 import { seedPayAsYouGoPricesOnce } from "@/lib/model-pricing-overlay";
+import { fillMissingModelPricesInBackground, type CatalogModel } from "@/lib/model-price-fill";
 import { EMPTY_MODELS, loadEffectiveModelsCached, SESSION_SCOPED_MODELS } from "@/lib/models-effective";
+import { restartIdleRpcSessions } from "@/lib/rpc-manager";
 
 export const dynamic = "force-dynamic";
 
@@ -61,6 +63,15 @@ export async function GET(req: Request) {
     // process, never over a rate the user set, and a failure here must not
     // cost the caller its catalog.
     seedPayAsYouGoPricesOnce(harness.id, providersIn(payload));
+    // A model omp reached before its catalog knew it (a new GPT on a ChatGPT
+    // subscription, say) is priced at zero until omp's next release. Fill
+    // models.dev's published rate in the background, at most every half
+    // hour; omp takes it at the next spawn, so idle sessions restart onto it.
+    fillMissingModelPricesInBackground(
+      harness.id,
+      (payload.modelList ?? []) as readonly CatalogModel[],
+      async () => { await restartIdleRpcSessions(); },
+    );
     return Response.json(payload);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
