@@ -219,6 +219,9 @@ function buildAccount(
     unlimited,
     windows,
     ...(resetCredits ? { resetCredits } : {}),
+    // Set only when a live response refreshed these windows: that is omp's
+    // record of the account actually serving traffic, not merely polled.
+    lastServedAt: toIsoString(readNumber(metadata.headersUpdatedAt)) ?? null,
   };
 }
 

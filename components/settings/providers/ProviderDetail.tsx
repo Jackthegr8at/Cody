@@ -95,7 +95,7 @@ function formatLocalTime(iso: string | null): string | null {
 }
 
 function AccountStateChip({ state, resetsAt }: { state: ProviderLoginAccount["state"]; resetsAt: string | null }) {
-  if (state === "serving") return <span style={{ ...chipStyle, color: "var(--accent)" }}>Serving</span>;
+  if (state === "in_use") return <span style={{ ...chipStyle, color: "var(--accent)" }}>In use</span>;
   if (state === "standby") return <span style={{ ...chipStyle, color: "var(--text-dim)" }}>Standby</span>;
   if (state === "disabled") return <span style={{ ...chipStyle, color: "var(--status-error)" }}>Disabled</span>;
   const reset = formatLocalTime(resetsAt);

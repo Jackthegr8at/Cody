@@ -52,8 +52,13 @@ export interface UseUsageResult {
  * polling every 90 seconds for a widget nobody will ever see is pure noise.
  * Passing `false` before the active engine is known and `true` after is the
  * normal case: the effect re-runs on the flip.
+ *
+ * `sessionId` scopes the read to one conversation: the answer then also says
+ * which account that conversation's latest reply was served by
+ * (`snapshot.sessionAccounts`). Switching conversations drops the previous
+ * one's answer at once and re-reads, so it can never label another chat.
  */
-export function useUsage(enabled = true): UseUsageResult {
+export function useUsage(enabled = true, sessionId: string | null = null): UseUsageResult {
   const [snapshot, setSnapshot] = useState<UsageSnapshot | null>(null);
   // Starts true: before the first response there is nothing to report, and
   // `loading: false` there would read as a settled "no quota" answer.
@@ -68,6 +73,8 @@ export function useUsage(enabled = true): UseUsageResult {
   // once, on mount) and the self-rescheduling timer always call the current
   // closure instead of a stale one.
   const loadRef = useRef<() => void>(() => {});
+  const sessionRef = useRef(sessionId);
+  sessionRef.current = sessionId;
 
   const clearTimer = useCallback(() => {
     if (timerRef.current !== null) {
@@ -96,7 +103,8 @@ export function useUsage(enabled = true): UseUsageResult {
     abortRef.current = controller;
     setLoading(true);
 
-    fetch("/api/usage", { signal: controller.signal })
+    const session = sessionRef.current;
+    fetch(session ? `/api/usage?session=${encodeURIComponent(session)}` : "/api/usage", { signal: controller.signal })
       .then(async (response) => {
         const body = (await response.json().catch(() => null)) as UsageSnapshot | null;
         if (!mountedRef.current || controller.signal.aborted) return;
@@ -106,7 +114,8 @@ export function useUsage(enabled = true): UseUsageResult {
         // screen either way, but record that this read did not land: the UI
         // must not turn a transport failure into a claim about the engine.
         if (response.ok && body) {
-          setSnapshot(body);
+          // A read that raced a conversation switch describes the old one.
+          setSnapshot(session === sessionRef.current ? body : { ...body, sessionAccounts: undefined });
           setFailed(false);
         } else {
           setFailed(true);
@@ -139,6 +148,8 @@ export function useUsage(enabled = true): UseUsageResult {
   useEffect(() => {
     mountedRef.current = true;
     if (!enabled) return;
+    // The account-in-use answer belongs to the conversation that asked.
+    setSnapshot((current) => (current?.sessionAccounts ? { ...current, sessionAccounts: undefined } : current));
     loadRef.current();
 
     // Coming back into view/focus reschedules the pending timer at whatever
@@ -164,10 +175,10 @@ export function useUsage(enabled = true): UseUsageResult {
       // leaving dev with no usage data until the next poll.
       inFlightRef.current = false;
     };
-    // load/scheduleNext are read through refs/stable callbacks, so `enabled`
-    // is the only reason this effect ever re-runs.
+    // load/scheduleNext are read through refs/stable callbacks; `enabled` and
+    // the conversation are the only reasons this effect re-runs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled]);
+  }, [enabled, sessionId]);
 
   // Disabled reports a settled "nothing to say", never "still checking": a
   // caller that renders on `loading` must not spin forever on a hook that
@@ -175,7 +186,10 @@ export function useUsage(enabled = true): UseUsageResult {
   return enabled ? { snapshot, loading, failed, refresh } : { snapshot: null, loading: false, failed: false, refresh };
 }
 export type { ResetCredit, ResetCreditAccount, ResetCreditOutcome, ResetCreditsSnapshot } from "@/lib/harness/reset-credits";
-export interface UseResetCreditsResult { snapshot: ResetCreditsSnapshot | null; loading: boolean; failed: boolean; redeeming: boolean; refresh: () => void; redeem: (accountId: string, creditId: string) => Promise<ResetCreditOutcome>; }
+/** `refresh(true)` is the user asking again: the server then checks the
+ *  provider live (at most once a minute). Every other read — the timer, focus,
+ *  opening the popover — is served from the server's shared cache. */
+export interface UseResetCreditsResult { snapshot: ResetCreditsSnapshot | null; loading: boolean; failed: boolean; redeeming: boolean; refresh: (force?: boolean) => void; redeem: (accountId: string, creditId: string) => Promise<ResetCreditOutcome>; }
 function resetBalanceStorageKey(observerId: string, accountId: string): string { return STORAGE_KEYS.resetCreditBalancePrefix + ":" + observerId + ":" + accountId; }
 function observeResetCreditBalances(snapshot: ResetCreditsSnapshot): void {
   if (typeof window === "undefined" || !snapshot.available || !snapshot.observerId) return;
@@ -193,7 +207,11 @@ export function useResetCredits(enabled = true): UseResetCreditsResult {
   const [snapshot, setSnapshot] = useState<ResetCreditsSnapshot | null>(null);
   const [loading, setLoading] = useState(enabled); const [failed, setFailed] = useState(false); const [redeeming, setRedeeming] = useState(false); const [refreshVersion, setRefreshVersion] = useState(0);
   const redeemingRef = useRef(false);
-  const refresh = useCallback(() => { setRefreshVersion((version) => version + 1); }, []);
+  const forceNextRef = useRef(false);
+  const refresh = useCallback((force = false) => {
+    if (force) forceNextRef.current = true;
+    setRefreshVersion((version) => version + 1);
+  }, []);
   useEffect(() => {
     if (!enabled) { setLoading(false); return; }
     let cancelled = false;
@@ -204,7 +222,9 @@ export function useResetCredits(enabled = true): UseResetCreditsResult {
       loadInFlight = true;
       setLoading(true);
       try {
-        const response = await fetch("/api/usage/reset-credits", { cache: "no-store" });
+        const force = forceNextRef.current;
+        forceNextRef.current = false;
+        const response = await fetch(force ? "/api/usage/reset-credits?refresh=1" : "/api/usage/reset-credits", { cache: "no-store" });
         const value: unknown = await response.json();
         if (!response.ok || !value || typeof value !== "object" || Array.isArray(value)) throw new Error("Reset-credit read failed.");
         const next = value as ResetCreditsSnapshot;

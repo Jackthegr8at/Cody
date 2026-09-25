@@ -1,9 +1,12 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth/http";
+import { canAccessSession } from "@/lib/auth/session-owners";
+import { resolveSessionPath } from "@/lib/session-reader";
 import { usageReaderInstalled } from "@/lib/usage/omp-usage";
-import { getUsageSnapshot } from "@/lib/usage/cache";
+import { credentialForPin, getUsageSnapshot } from "@/lib/usage/cache";
+import { readSessionCredentialPins } from "@/lib/usage/session-pins";
 import { reconcileRoutingForRequest } from "@/lib/routing/request";
-import type { UsageSnapshot } from "@/lib/usage/types";
+import type { UsageSessionAccount, UsageSnapshot } from "@/lib/usage/types";
 
 /**
  * GET /api/usage — plan-quota windows (e.g. "5h: 42% used, resets 14:00")
@@ -16,6 +19,34 @@ export const dynamic = "force-dynamic";
 
 function emptySnapshot(reason: string): UsageSnapshot {
   return { available: false, accounts: [], fetchedAt: new Date().toISOString(), stale: false, reason };
+}
+
+/** Loose shape check only: the id is looked up, never interpolated into a path. */
+const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * Per provider, the account this conversation's latest reply was served by:
+ * omp's own `credential_pin` entries in the session file, matched against the
+ * credential store's digests. A session the caller cannot see, or one with no
+ * file yet (first turn still running), answers `{}` — "not used yet" — never
+ * an error, and never another account's data.
+ */
+async function sessionAccounts(
+  sessionId: string,
+  user: Parameters<typeof canAccessSession>[1],
+  snapshot: UsageSnapshot,
+): Promise<Record<string, UsageSessionAccount>> {
+  const result: Record<string, UsageSessionAccount> = {};
+  if (!SESSION_ID.test(sessionId) || !canAccessSession(sessionId, user)) return result;
+  const filePath = await resolveSessionPath(sessionId);
+  if (!filePath) return result;
+  for (const [provider, pin] of await readSessionCredentialPins(filePath)) {
+    const credential = credentialForPin(pin.hash);
+    if (!credential || credential.provider !== provider) continue;
+    const account = snapshot.accounts.find((candidate) => candidate.provider === provider && candidate.credentialId === credential.credentialId);
+    if (account) result[provider] = { accountId: account.id, since: pin.timestamp };
+  }
+  return result;
 }
 
 export async function GET(request: Request) {
@@ -48,8 +79,12 @@ export async function GET(request: Request) {
     // Observation runs for every engine; writes to omp's config only when
     // omp is the active engine (reconcile.ts owns that gate).
     const routing = await reconcileRoutingForRequest(snapshot);
+    const sessionId = new URL(request.url).searchParams.get("session");
+    const scoped = sessionId && routing.snapshot.available
+      ? { sessionAccounts: await sessionAccounts(sessionId, resolved.user, routing.snapshot) }
+      : {};
     return NextResponse.json(
-      { ...routing.snapshot, routing: { autoBind: routing.autoBind, blackouts: routing.blackouts, roleChanges: routing.roleChanges, chainChanges: routing.chainChanges, agentChanges: routing.agentChanges } },
+      { ...routing.snapshot, ...scoped, routing: { autoBind: routing.autoBind, blackouts: routing.blackouts, roleChanges: routing.roleChanges, chainChanges: routing.chainChanges, agentChanges: routing.agentChanges } },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {

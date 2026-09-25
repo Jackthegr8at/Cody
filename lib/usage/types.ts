@@ -55,9 +55,32 @@ export interface UsageResetCredits {
   earliestExpiresAt: string | null;
 }
 
-/** Which account, among every account serving one provider, omp is actually
- * routing a model's requests to right now. */
-export type UsageAccountService = "serving" | "standby" | "limited" | "disabled";
+/** Where one account stands among every account serving one provider:
+ *  - `in_use`: the account requests are going to — for a conversation, the
+ *    account omp recorded for its last reply; otherwise the best evidence
+ *    available (see `UsageInUseBasis`);
+ *  - `standby`: healthy, held in reserve, taken over automatically when the
+ *    one in use is limited;
+ *  - `limited`: its binding window is spent;
+ *  - `disabled`: omp disabled the credential outright. */
+export type UsageAccountService = "in_use" | "standby" | "limited" | "disabled";
+
+/** What the `in_use` answer rests on, strongest first:
+ *  - `session`: omp's own `credential_pin` for this conversation — the
+ *    account that served its most recent reply;
+ *  - `recent`: the account whose windows omp last refreshed from a live
+ *    response (any conversation) — used when no conversation is in scope;
+ *  - `expected`: nothing has used the provider yet, so this is the account
+ *    omp would rank first on quota headroom. A prediction, labelled as one. */
+export type UsageInUseBasis = "session" | "recent" | "expected";
+
+/** The account one conversation's most recent reply used, per provider. */
+export interface UsageSessionAccount {
+  /** `UsageAccount.id` of that account. */
+  accountId: string;
+  /** When omp recorded it (the pin's timestamp), or null if unrecorded. */
+  since: string | null;
+}
 
 /** One authenticated account, with every quota window it reports. */
 export interface UsageAccount {
@@ -89,6 +112,10 @@ export interface UsageAccount {
   /** Present when omp has disabled this credential outright (auth failure,
    * replaced, deleted); such an account reports no live windows. */
   disabled?: { cause: string | null };
+  /** ISO time a live response last refreshed this account's windows (omp's
+   *  `headersUpdatedAt`) — i.e. when it last actually served a request, from
+   *  any conversation. Null when omp has only polled it. */
+  lastServedAt?: string | null;
 }
 
 /** Per-window quota capacity for one provider, aggregated across every
@@ -124,4 +151,9 @@ export interface UsageSnapshot {
    * a quota exists here and could not see it", which the UI turns into a
    * connect-this hint rather than silence. */
   unavailableProviders?: { provider: string; reason: string }[];
+  /** Present only on a read scoped to one conversation (`?session=`): per
+   *  provider, the account that conversation's latest reply was served by,
+   *  resolved from omp's own `credential_pin` entries. A provider absent here
+   *  has not been used by that conversation yet. */
+  sessionAccounts?: Record<string, UsageSessionAccount>;
 }

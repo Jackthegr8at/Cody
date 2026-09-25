@@ -9,9 +9,15 @@ import { findOmpPackageRoot } from "../omp/package-source";
 import { resolveOmpBin } from "../omp/omp-cli";
 
 export interface ResetCredit { id: string; expiresAt: string | null; title?: string; }
-/** `provider` is the engine's id ("openai-codex", "anthropic"); `reason` says
- * why a positive balance cannot be spent right now. */
-export interface ResetCreditAccount { id: string; label: string; provider?: string; availableCount: number; canRedeem: boolean; credits: ResetCredit[]; error?: string; reason?: string; }
+/** `provider` is the engine's id ("openai-codex", "anthropic"); `position` is
+ * omp's storage order among that provider's accounts (0 = Primary); `reason`
+ * says why a positive balance cannot be spent right now.
+ *
+ * `checkedAt` is when the provider last ANSWERED for this account. `stale`
+ * marks an answer carried over because the latest check failed — the count is
+ * the last one the provider confirmed, not a fresh reading. `retrying` means
+ * the check failed and no earlier answer exists; Cody backs off and retries. */
+export interface ResetCreditAccount { id: string; label: string; provider?: string; position?: number; availableCount: number; canRedeem: boolean; credits: ResetCredit[]; error?: string; reason?: string; checkedAt?: string; stale?: boolean; retrying?: boolean; }
 export interface ResetCreditsSnapshot { available: boolean; accounts: ResetCreditAccount[]; fetchedAt: string; reason?: string; observerId?: string; }
 export type ResetCreditOutcomeKind = "reset" | "already_redeemed" | "no_credit" | "nothing_to_reset" | "error";
 export type ResetCreditErrorCode = "credit_list_failed" | "no_account" | "account_unavailable" | "unsupported" | "invalid_request" | "in_flight" | "no_credit" | string;
@@ -76,7 +82,8 @@ function safeAccount(value: unknown): ResetCreditAccount | null {
   if (!id || !label || availableCount === null || typeof raw.canRedeem !== "boolean") return null;
   const credits = Array.isArray(raw.credits) ? raw.credits.flatMap((credit): ResetCredit[] => { if (!credit || typeof credit !== "object" || Array.isArray(credit)) return []; const c = credit as Record<string, unknown>; const creditId = safeString(c.id); const title = safeString(c.title); return creditId ? [{ id: creditId, expiresAt: typeof c.expiresAt === "string" ? c.expiresAt : null, ...(title ? { title } : {}) }] : []; }) : [];
   const error = safeString(raw.error); const reason = safeString(raw.reason); const provider = safeString(raw.provider);
-  return { id, label, ...(provider ? { provider } : {}), availableCount, canRedeem: raw.canRedeem, credits, ...(error ? { error } : {}), ...(reason ? { reason } : {}) };
+  const position = typeof raw.position === "number" && Number.isSafeInteger(raw.position) && raw.position >= 0 ? raw.position : null;
+  return { id, label, ...(provider ? { provider } : {}), ...(position !== null ? { position } : {}), availableCount, canRedeem: raw.canRedeem, credits, ...(error ? { error } : {}), ...(reason ? { reason } : {}) };
 }
 function normalizeList(frame: Record<string, unknown> | null): ResetCreditsSnapshot {
   if (!frame || frame.type !== "list") return unavailableResetCredits("Reset-credit helper did not return a valid response.");

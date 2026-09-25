@@ -64,7 +64,10 @@ function normalizeAccounts(provider, raw) {
     } else if (credits.some((credit) => credit.usable === false) && !credits.some((credit) => credit.usable !== false)) {
       canRedeem = false;
     }
-    return [{ id, provider: provider.id, label: labelFor(provider, account, index), availableCount, canRedeem, credits, ...(error ? { error } : {}), ...(reason && !canRedeem ? { reason } : {}), _target: targetFor(account) }];
+    // `position` is omp's storage order among this provider's OAuth accounts —
+    // the order Cody names "Primary"/"Secondary" everywhere else.
+    const position = typeof account.position === "number" && Number.isSafeInteger(account.position) && account.position >= 0 ? account.position : index;
+    return [{ id, provider: provider.id, position, label: labelFor(provider, account, index), availableCount, canRedeem, credits, ...(error ? { error } : {}), ...(reason && !canRedeem ? { reason } : {}), _target: targetFor(account) }];
   });
 }
 async function loadStorage(packageRoot, agentDir) {

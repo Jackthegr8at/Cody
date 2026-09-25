@@ -1,4 +1,4 @@
-import { listOmpCredentials } from "../harness/omp-credentials";
+import { listOmpCredentials, type OmpCredentialRow } from "../harness/omp-credentials";
 import { applyCredentialBlocks, applyCredentialOrder } from "./credential-order";
 import { fetchOmpUsageSnapshot, unavailableUsageSnapshot } from "./omp-usage";
 import { ALIBABA_TOKEN_PLAN_PROVIDER, fetchAlibabaTokenPlanUsage, type AlibabaUsageResult } from "./alibaba-usage";
@@ -31,6 +31,7 @@ async function loadUsageSnapshot(): Promise<UsageSnapshot> {
         // Order first (it assigns credentialId), then blocks, which are
         // keyed by that id.
         snapshot = applyCredentialBlocks(applyCredentialOrder(snapshot, stored.credentials), stored.credentials);
+        recordCredentialPins(stored.credentials);
       }
     } catch {
       // Ordering is a nicety; quota numbers are the point of this read.
@@ -48,6 +49,30 @@ async function loadUsageSnapshot(): Promise<UsageSnapshot> {
       { provider: ALIBABA_TOKEN_PLAN_PROVIDER, reason: alibaba.reason },
     ],
   };
+}
+
+/** One stored OAuth credential, addressed by omp's `credential_pin` digest. */
+export interface CredentialPinTarget { provider: string; credentialId: number }
+
+declare global {
+  var __codyCredentialPinIndex: Map<string, CredentialPinTarget> | undefined;
+}
+
+/** Replace the digest → credential index from a fresh credential-store read.
+ *  Server-only: the digests identify accounts and never go to the browser. */
+function recordCredentialPins(rows: readonly OmpCredentialRow[]): void {
+  const index = new Map<string, CredentialPinTarget>();
+  for (const row of rows) {
+    if (row.pinHash && !row.disabledCause) index.set(row.pinHash, { provider: row.provider, credentialId: row.id });
+  }
+  globalThis.__codyCredentialPinIndex = index;
+}
+
+/** The credential a session's `credential_pin` digest names, from the last
+ *  credential-store read — or null when it names none (logged out, or no read
+ *  has happened yet). */
+export function credentialForPin(hash: string): CredentialPinTarget | null {
+  return globalThis.__codyCredentialPinIndex?.get(hash) ?? null;
 }
 
 /**

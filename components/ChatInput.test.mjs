@@ -254,7 +254,7 @@ test("the popover lists every sibling account serving the selected model's provi
   assert.equal(view.state, "ok");
 
   assert.equal(view.accounts.length, 2);
-  assert.deepEqual(view.accounts.map((a) => a.state), ["serving", "limited"]);
+  assert.deepEqual(view.accounts.map((a) => a.state), ["in_use", "limited"]);
   assert.deepEqual(view.accounts.map((a) => a.percent), [1, 100]);
   const limited = view.accounts.find((a) => a.state === "limited");
   assert.equal(limited.resetsAt, "2026-09-15T00:00:00.000Z");
@@ -266,6 +266,33 @@ test("the popover lists every sibling account serving the selected model's provi
   // Both anthropic siblings are already covered above; "Other limits" keeps
   // only the other provider's window, never a duplicate of either of these.
   assert.deepEqual(view.others.map((entry) => entry.provider), ["openai-codex"]);
+});
+
+// The reported bug, end to end: the conversation's replies come from Primary
+// (41% of its 5-hour window) while Secondary sits idle at 0%. The ring used to
+// gauge Secondary and label it "Serving next"; it must follow the account omp
+// recorded for this conversation.
+test("the ring and the account list follow the account this conversation is on", () => {
+  const snapshot = usageSnapshot({
+    accounts: [
+      usageAccount({ id: "primary", windows: [usageWindow({ id: "anthropic:5h", label: "5-hour window", utilization: 41, resetsAt: "2026-09-25T04:00:00.000Z" })] }),
+      usageAccount({ id: "secondary", windows: [usageWindow({ id: "anthropic:5h", label: "5-hour window", utilization: 0, resetsAt: null })] }),
+    ],
+    sessionAccounts: { anthropic: { accountId: "primary", since: "2026-09-25T02:12:29.130Z" } },
+  });
+  const model = { provider: "anthropic", modelId: "claude-opus-5-5" };
+  const view = buildQuotaView(snapshot, false, false, model);
+
+  assert.equal(view.percent, 41);
+  assert.match(view.label, /Primary/);
+  assert.deepEqual(view.accounts.map((a) => [a.label, a.state]), [["Primary", "in_use"], ["Secondary", "standby"]]);
+  assert.equal(view.accountsBasis, "session");
+
+  // A conversation that has not used Claude yet says so instead of claiming
+  // an account: its first request is routed on headroom.
+  const unused = buildQuotaView({ ...snapshot, sessionAccounts: {} }, false, false, model);
+  assert.equal(unused.accountsBasis, "expected");
+  assert.equal(unused.accounts[0].label, "Secondary");
 });
 
 test("buildQuotaView paints an exhausted low-percentage window as exhausted", () => {

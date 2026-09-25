@@ -18,6 +18,10 @@ export interface OmpCredentialRow {
   disabledCause: string | null;
   /** ISO timestamp of the latest UNEXPIRED rate-limit block, or null. */
   blockedUntil: string | null;
+  /** omp's `credential_pin` digest for this OAuth account (sha256 hex), the
+   *  value a session file records for the account that served it; null for
+   *  API keys, disabled rows, or an OMP build that cannot compute it. */
+  pinHash: string | null;
 }
 export interface OmpCredentialsSnapshot { available: boolean; credentials: OmpCredentialRow[]; reason?: string; }
 export interface OmpCredentialRemoval { removed: boolean; providerRemoved: boolean; code?: string; message?: string; }
@@ -92,6 +96,7 @@ function safeCredentialRow(value: unknown): OmpCredentialRow | null {
     planType: safeString(raw.planType),
     disabledCause: safeString(raw.disabledCause),
     blockedUntil: safeString(raw.blockedUntil),
+    pinHash: typeof raw.pinHash === "string" && /^[0-9a-f]{64}$/.test(raw.pinHash) ? raw.pinHash : null,
   };
 }
 function normalizeList(frame: Record<string, unknown> | null): OmpCredentialsSnapshot {

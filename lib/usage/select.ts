@@ -1,4 +1,4 @@
-import type { UsageAccount, UsageAccountService, UsageWindow } from "./types";
+import type { UsageAccount, UsageAccountService, UsageInUseBasis, UsageWindow } from "./types";
 
 /**
  * Picking the binding constraint.
@@ -40,35 +40,48 @@ export interface ProviderAccountRank {
   state: UsageAccountService;
   /** windows[0], or null when the account has nothing applicable. */
   binding: UsageWindow | null;
+  /** On the `in_use` entry only: what that answer rests on. */
+  basis?: UsageInUseBasis;
+}
+
+/** What is known about which account is actually taking requests. */
+export interface AccountEvidence {
+  /** The account a conversation's latest reply was served by (omp's
+   *  `credential_pin`, resolved by `/api/usage?session=`). Strongest evidence. */
+  inUseAccountId?: string | null;
+  /** With no conversation in scope, fall back to the account that most
+   *  recently served a live request anywhere (`lastServedAt`). A conversation
+   *  that has not used the provider must NOT use this: omp routes a fresh
+   *  session by quota headroom, not by what another session last used. */
+  recent?: boolean;
 }
 
 /**
- * Ranking every account serving one provider by the state omp itself would
- * assign it right now: whichever account is actually taking this provider's
- * traffic ("serving"), any healthy siblings held in reserve ("standby"), any
- * account whose binding window is spent ("limited"), and any credential the
- * engine disabled outright ("disabled") — always last, regardless of usage.
+ * Every account serving one provider, in the order a person should read them:
+ * the one **in use**, then healthy **standby** siblings (by headroom — the
+ * order omp would rotate to), then **limited** (earliest reset first), then
+ * **disabled**.
  *
- * Gauging the tightest account across a provider's siblings is the wrong
- * read: omp rotates the same model onto another credential the moment one is
- * rate-limited, so a gauge built on the exhausted sibling is reporting quota
- * nothing is being charged against anymore. This ranks by the account omp
- * would actually route to next, mirroring its own credential-ranking order.
+ * Which account is in use is the ENGINE's fact, not something to infer from
+ * utilization. omp keeps a conversation on the account that served it (it is
+ * session-sticky, and Anthropic's prompt cache is per account); ranking by
+ * lowest utilization picks the idle sibling precisely because the account in
+ * use is the one burning quota. So the in-use account comes from `evidence`
+ * (see `AccountEvidence`), and headroom only decides it when there is none —
+ * which is also how omp itself routes a conversation's first request.
  *
- * Precedence, most to least preferred: a **measured** account (a real window
- * applies to this model) ordered by ascending binding utilization, then an
- * **unmeasured** one (nothing applies — not limited, but not evidence of
- * anything either, so it never outranks a sibling with real telemetry), then
- * **limited** (earliest reset first), then **disabled**.
+ * Evidence naming a limited or disabled account is overruled: omp will not
+ * send the next request there, so it is shown as what it is and the in-use
+ * slot goes to the account omp will actually rotate onto.
  *
- * `modelId` scopes which windows count as each account's binding window, same
- * as `selectWindowsForModel` below; omit it (or pass `""`) to rank by
- * provider-level (untiered) windows only.
+ * `modelId` scopes which windows count as each account's binding window;
+ * omit it (or pass `""`) to rank by provider-level (untiered) windows only.
  */
 export function rankProviderAccounts(
   accounts: UsageAccount[],
   provider: string,
   modelId?: string,
+  evidence: AccountEvidence = {},
 ): ProviderAccountRank[] {
   const normalizedProvider = normalize(provider);
   if (!normalizedProvider) return [];
@@ -94,8 +107,7 @@ export function rankProviderAccounts(
   // An account with nothing applicable to this model is not limited — no
   // reported window means no reported constraint — but it is also not
   // evidence of anything, so real telemetry on a sibling always outranks a
-  // guess: it sorts after every measured account, ahead only of accounts omp
-  // has actually cut off.
+  // guess: it sorts after every measured account.
   const unmeasured = live.filter((entry) => entry.binding === null);
 
   measured.sort((a, b) => {
@@ -110,9 +122,29 @@ export function rankProviderAccounts(
     return resetA !== resetB ? resetA - resetB : a.index - b.index;
   });
 
+  const usable = [...measured, ...unmeasured];
+  let inUse: (typeof usable)[number] | undefined;
+  let basis: UsageInUseBasis = "expected";
+  if (evidence.inUseAccountId) {
+    inUse = usable.find((entry) => entry.account.id === evidence.inUseAccountId);
+    if (inUse) basis = "session";
+  } else if (evidence.recent) {
+    let latest = Number.NEGATIVE_INFINITY;
+    for (const entry of usable) {
+      const servedAt = entry.account.lastServedAt ? Date.parse(entry.account.lastServedAt) : Number.NaN;
+      if (Number.isFinite(servedAt) && servedAt > latest) {
+        latest = servedAt;
+        inUse = entry;
+      }
+    }
+    if (inUse) basis = "recent";
+  }
+  inUse ??= usable[0];
+
   const ranked: ProviderAccountRank[] = [];
-  for (const { account, windows, binding } of [...measured, ...unmeasured]) {
-    ranked.push({ account, windows, binding, state: ranked.length === 0 ? "serving" : "standby" });
+  if (inUse) ranked.push({ account: inUse.account, windows: inUse.windows, binding: inUse.binding, state: "in_use", basis });
+  for (const entry of usable) {
+    if (entry !== inUse) ranked.push({ account: entry.account, windows: entry.windows, binding: entry.binding, state: "standby" });
   }
   for (const { account, windows, binding } of limited) ranked.push({ account, windows, binding, state: "limited" });
   for (const { account, windows, binding } of disabled) ranked.push({ account, windows, binding, state: "disabled" });
@@ -121,7 +153,7 @@ export function rankProviderAccounts(
 
 /**
  * The windows that actually constrain one model, most binding first, read off
- * the account omp is actually serving this model from right now.
+ * the account that model's requests are going to (see `rankProviderAccounts`).
  *
  * Quota is per provider, so a model is only ever limited by the account that
  * serves it: a spent quota on another provider says nothing about whether
@@ -129,11 +161,9 @@ export function rankProviderAccounts(
  * (null) — the caller must say "no quota reported" rather than borrow another
  * provider's numbers.
  *
- * A provider can have more than one account; the exhausted-but-idle sibling
- * is not the honest gauge, because omp already rotated the model onto
- * whichever account `rankProviderAccounts` ranks first ("serving"). This
- * returns that account's windows, keeping every window-picking caller in
- * sync with the engine instead of naming whichever sibling is tightest.
+ * With several accounts, the honest gauge is the one in use: a sibling's
+ * numbers are not being charged. When every account is limited, the one that
+ * frees up first is returned, so the gauge reads "spent" and says when.
  *
  * Returns a matched account with an empty `windows` list when the provider
  * reports quota but none of it applies to this model.
@@ -141,11 +171,12 @@ export function rankProviderAccounts(
 export function selectWindowsForModel(
   accounts: UsageAccount[],
   model: ModelRef | null | undefined,
+  evidence: AccountEvidence = {},
 ): { account: UsageAccount; windows: UsageWindow[] } | null {
   const provider = normalize(model?.provider);
   if (!provider) return null;
   const modelId = typeof model?.modelId === "string" ? model.modelId : "";
-  const top = rankProviderAccounts(accounts, provider, modelId)[0];
+  const top = rankProviderAccounts(accounts, provider, modelId, evidence)[0];
   return top ? { account: top.account, windows: top.windows } : null;
 }
 
@@ -153,8 +184,9 @@ export function selectWindowsForModel(
 export function selectBindingWindowForModel(
   accounts: UsageAccount[],
   model: ModelRef | null | undefined,
+  evidence: AccountEvidence = {},
 ): { account: UsageAccount; window: UsageWindow } | null {
-  const match = selectWindowsForModel(accounts, model);
+  const match = selectWindowsForModel(accounts, model, evidence);
   const window = match?.windows[0];
   return match && window ? { account: match.account, window } : null;
 }

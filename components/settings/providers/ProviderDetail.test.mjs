@@ -52,7 +52,7 @@ function account(overrides) {
     id: "1",
     label: "person@example.com",
     position: 0,
-    state: "serving",
+    state: "in_use",
     planType: null,
     resetsAt: null,
     canRemove: true,
@@ -78,7 +78,7 @@ test("no accounts and signed out renders Sign in with no accounts list", () => {
   assert.match(html, /Sign in/);
   assert.doesNotMatch(html, /Add account/);
   assert.doesNotMatch(html, /Add secondary account/);
-  assert.doesNotMatch(html, /Serving|Standby|Limited|Disabled/);
+  assert.doesNotMatch(html, /In use|Standby|Limited|Disabled/);
 });
 
 test("accounts undefined and signed in without canLogout shows the TUI logout note, not the rotation note", () => {
@@ -97,14 +97,14 @@ test("accounts undefined and signed in with canLogout is unchanged: Re-login and
 
 test("exactly one account renders Add secondary account, hides Sign out, and titles the row Primary", () => {
   const html = renderCard({
-    method: { canLogout: true, accounts: [account({ position: 0, label: "solo@example.com", state: "serving" })] },
+    method: { canLogout: true, accounts: [account({ position: 0, label: "solo@example.com", state: "in_use" })] },
   });
   assert.match(html, /Add secondary account/);
   assert.doesNotMatch(html, /\bSign out\b/);
   assert.doesNotMatch(html, /rotates between these accounts/);
   assert.match(html, /Primary/);
   assert.match(html, /solo@example\.com/);
-  assert.match(html, /Serving/);
+  assert.match(html, /In use/);
 });
 
 test("two or more accounts renders Add account, the rotation note, and both position titles", () => {
@@ -113,7 +113,7 @@ test("two or more accounts renders Add account, the rotation note, and both posi
       canLogout: true,
       multiAccount: true,
       accounts: [
-        account({ id: "1", position: 0, label: "a@example.com", state: "serving" }),
+        account({ id: "1", position: 0, label: "a@example.com", state: "in_use" }),
         account({ id: "2", position: 1, label: "b@example.com", state: "standby" }),
       ],
     },
@@ -123,7 +123,7 @@ test("two or more accounts renders Add account, the rotation note, and both posi
   assert.match(html, /Claude Code rotates between these accounts automatically/);
   assert.match(html, /Primary/);
   assert.match(html, /Secondary/);
-  assert.match(html, /Serving/);
+  assert.match(html, /In use/);
   assert.match(html, /Standby/);
   assert.doesNotMatch(html, /\bSign out\b/);
 });

@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 /** Isolated Bun bridge to OMP's installed AuthStorage credential list/removal API. */
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -23,6 +25,39 @@ async function loadStorage(packageRoot, agentDir) {
   const ai = await import(pathToFileURL(aiPath).href); const utils = await import(pathToFileURL(utilsPath).href);
   if (typeof ai.AuthStorage?.create !== "function" || typeof utils.getAgentDbPath !== "function") throw new Error("Installed OMP does not expose AuthStorage credential support.");
   const storage = await ai.AuthStorage.create(utils.getAgentDbPath()); await storage.reload(); return storage;
+}
+
+/**
+ * omp records the account that served each session as a `credential_pin`
+ * entry in the session file: a digest of the account's billing scope
+ * (src/session/credential-pin.ts). Hashing each stored credential the same
+ * way is what lets Cody name the account a conversation is ACTUALLY on,
+ * instead of guessing from quota headroom. omp's own function is used when
+ * the installed package ships it; the fallback is the same persisted formula
+ * ("changing it orphans every recorded pin", so it is a stable contract).
+ */
+async function loadPinHasher(packageRoot) {
+  const source = join(packageRoot, "src", "session", "credential-pin.ts");
+  if (existsSync(source)) {
+    try {
+      const pinModule = await import(pathToFileURL(source).href);
+      if (typeof pinModule.credentialPinHash === "function") return pinModule.credentialPinHash;
+    } catch { /* fall through to the documented formula */ }
+  }
+  return (provider, identity) => {
+    if (!identity.accountId && !identity.email) return undefined;
+    return createHash("sha256").update([provider, identity.accountId ?? "", identity.email ?? "", identity.orgId ?? "", identity.projectId ?? ""].join("\0")).digest("hex");
+  };
+}
+function pinHashOf(hasher, provider, credential) {
+  if (!credential || credential.type !== "oauth") return null;
+  const identity = {
+    accountId: safeString(credential.accountId) ?? undefined,
+    email: safeString(credential.email) ?? undefined,
+    orgId: safeString(credential.orgId) ?? undefined,
+    projectId: safeString(credential.projectId) ?? undefined,
+  };
+  try { const hash = hasher(provider, identity); return typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash) ? hash : null; } catch { return null; }
 }
 
 /** email ?? orgName ?? accountId — the display identity for one credential.
@@ -51,7 +86,7 @@ function blockedUntilFor(credentialId, blocks) {
 /** Every stored credential row, active and disabled, allow-listing exactly
  * the fields Cody's UI needs — never the credential object itself, so a
  * token/refresh/api key can never leak through a spread. */
-async function listCredentials(storage) {
+async function listCredentials(storage, hasher) {
   const active = storage.listStoredCredentials();
   const disabled = await storage.listDisabledCredentials();
   const blocks = storage.listCredentialBlocks([...active.map((row) => row.id), ...disabled.map((row) => row.id)]);
@@ -65,6 +100,7 @@ async function listCredentials(storage) {
     planType: null,
     disabledCause: null,
     blockedUntil: blockedUntilFor(row.id, blocks),
+    pinHash: pinHashOf(hasher, row.provider, row.credential),
   }));
   const disabledRows = disabled.map((row) => ({
     id: row.id,
@@ -74,6 +110,7 @@ async function listCredentials(storage) {
     planType: null,
     disabledCause: safeString(row.cause) ?? "disabled",
     blockedUntil: blockedUntilFor(row.id, blocks),
+    pinHash: null,
   }));
   return [...activeRows, ...disabledRows].sort((a, b) => a.id - b.id);
 }
@@ -110,7 +147,7 @@ async function main() {
   try { storage = await loadStorage(request.packageRoot, request.agentDir); } catch (error) { return fail(request.operation, "unsupported", error instanceof Error ? error.message : String(error)); }
   try {
     if (request.operation === "list") {
-      let credentials; try { credentials = await listCredentials(storage); } catch (error) { return fail("list", "credential_list_failed", error instanceof Error ? error.message : String(error)); }
+      let credentials; try { credentials = await listCredentials(storage, await loadPinHasher(request.packageRoot)); } catch (error) { return fail("list", "credential_list_failed", error instanceof Error ? error.message : String(error)); }
       return emit({ type: "list", ok: true, credentials });
     }
     if (request.operation === "unblock") {

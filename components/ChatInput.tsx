@@ -43,9 +43,9 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useResetCredits, useUsage } from "@/hooks/useUsage";
 import { useOpenRouterAccount, type UseOpenRouterAccountResult } from "@/hooks/useOpenRouterAccount";
 import { OpenRouterCredits } from "./OpenRouterCredits";
-import { rankProviderAccounts, selectBindingWindow, selectWindowsForModel, type ModelRef } from "@/lib/usage/select";
+import { rankProviderAccounts, selectBindingWindow, selectWindowsForModel, type AccountEvidence, type ModelRef } from "@/lib/usage/select";
 import { resolveModelAvailability } from "@/lib/usage/availability";
-import type { UsageAccount, UsageAccountService, UsageSnapshot, UsageWindow, UsageWindowState } from "@/lib/usage/types";
+import type { UsageAccount, UsageAccountService, UsageInUseBasis, UsageSnapshot, UsageWindow, UsageWindowState } from "@/lib/usage/types";
 import { brandAccountLabel } from "@/lib/provider-brand";
 import { ModelIcon, ProviderIcon } from "./ProviderIcon";
 import { translate, useI18n } from "@/lib/i18n";
@@ -341,9 +341,11 @@ export interface QuotaKnownView {
   inUse: QuotaInUseWindowView[];
   /** Everything the section above does not cover, de-emphasised. */
   others: QuotaOtherWindowView[];
-  /** Every account serving the selected model's provider, serving-first.
+  /** Every account able to serve the selected model's provider, in use first.
    *  Empty unless more than one account can serve it. */
   accounts: QuotaAccountRowView[];
+  /** What the in-use row rests on; null when there are no account rows. */
+  accountsBasis: UsageInUseBasis | null;
   fetchedAt: string | null;
   stale: boolean;
   /** Subscription name only when the engine reported one. */
@@ -554,11 +556,11 @@ function brandedAccountLabel(accounts: UsageAccount[], account: UsageAccount): s
   return siblings.length > 1 ? `${brand} · ${accountPositionLabel(siblings.indexOf(account))}` : brand;
 }
 
-/** Tone for each per-account state chip — accent for the one actually
- *  serving, muted for a healthy standby, the shared error tone for anything
- *  blocked (limited or disabled alike). */
+/** Tone for each per-account state chip — accent for the account in use,
+ *  muted for a healthy standby, the shared error tone for anything blocked
+ *  (limited or disabled alike). */
 const ACCOUNT_STATE_COLOR: Record<UsageAccountService, string> = {
-  serving: "var(--accent)",
+  in_use: "var(--accent)",
   standby: "var(--text-muted)",
   limited: "var(--status-error)",
   disabled: "var(--status-error)",
@@ -566,11 +568,26 @@ const ACCOUNT_STATE_COLOR: Record<UsageAccountService, string> = {
 
 /** i18n key for each per-account state chip's label. */
 const ACCOUNT_STATE_LABEL_KEYS: Record<UsageAccountService, string> = {
-  serving: "usage.accountServing",
+  in_use: "usage.accountInUse",
   standby: "usage.accountStandby",
   limited: "usage.accountLimited",
   disabled: "usage.accountDisabled",
 };
+
+/** The one line under the account list saying what "In use" rests on. */
+const ACCOUNT_BASIS_NOTE_KEYS: Record<UsageInUseBasis, string> = {
+  session: "usage.accountsBasisSession",
+  recent: "usage.accountsBasisRecent",
+  expected: "usage.accountsBasisExpected",
+};
+
+/** What this conversation says about which account serves `provider`: the
+ *  account omp recorded for its latest reply, if it has used the provider.
+ *  Otherwise nothing — omp routes a conversation's first request by quota
+ *  headroom, so another conversation's account is no evidence here. */
+function sessionEvidence(snapshot: UsageSnapshot, provider: string): AccountEvidence {
+  return { inUseAccountId: snapshot.sessionAccounts?.[provider]?.accountId ?? null };
+}
 
 function isSelectedModel(active: SessionActiveModel, selected: ModelRef): boolean {
   return active.provider.trim().toLocaleLowerCase() === selected.provider.trim().toLocaleLowerCase()
@@ -596,6 +613,7 @@ function buildInUseWindows(
   activeModels: readonly SessionActiveModel[],
   selectedModel: ModelRef,
   nameWindow: (account: UsageAccount, windowLabel: string) => string,
+  evidenceFor: (provider: string) => AccountEvidence,
 ): QuotaInUseWindowView[] {
   const primaryAccountIndex = primary ? accounts.indexOf(primary.account) : -1;
   const primaryKeys = new Set(
@@ -607,7 +625,9 @@ function buildInUseWindows(
 
   for (const active of activeModels) {
     if (isSelectedModel(active, selectedModel) || active.uses.length === 0) continue;
-    const match = selectWindowsForModel(accounts, active);
+    // Subagents inherit their parent's account affinity (omp copies it at
+    // spawn), so the conversation's evidence applies to their models too.
+    const match = selectWindowsForModel(accounts, active, evidenceFor(active.provider));
     if (!match) continue;
     const accountIndex = accounts.indexOf(match.account);
     if (accountIndex < 0) continue;
@@ -743,17 +763,21 @@ export function buildQuotaView(
   };
 
   if (model) {
-    const match = selectWindowsForModel(accounts, model);
+    const evidenceFor = (provider: string) => sessionEvidence(snapshot, provider);
+    const ranks = rankProviderAccounts(accounts, model.provider, model.modelId, evidenceFor(model.provider));
+    // The ring reads the account in use (ranks[0]); taking it from the same
+    // ranking the list below renders guarantees they name the same account.
+    const match = ranks[0] ? { account: ranks[0].account, windows: ranks[0].windows } : null;
     // windows[0] is the pick selectBindingWindowForModel makes — taking it here
     // selects once over the snapshot instead of twice, and guarantees the ring
     // and the list below it name the same window.
     const modelBinding = match?.windows[0] ?? null;
-    const inUse = buildInUseWindows(accounts, match, activeModels, model, nameWindow);
-    // Only worth ranking when more than one account can actually serve this
+    const inUse = buildInUseWindows(accounts, match, activeModels, model, nameWindow, evidenceFor);
+    // Only worth listing when more than one account can actually serve this
     // model — a single-account provider has nothing to disambiguate.
     const providerAccounts = accounts.filter((account) => account.provider === model.provider);
     const accountRows: QuotaAccountRowView[] = providerAccounts.length > 1
-      ? rankProviderAccounts(accounts, model.provider, model.modelId).map((rank) => ({
+      ? ranks.map((rank) => ({
           key: rank.account.id,
           label: accountPositionLabel(providerAccounts.indexOf(rank.account)),
           state: rank.state,
@@ -762,6 +786,7 @@ export function buildQuotaView(
           planType: rank.account.planType,
         }))
       : [];
+    const accountsBasis = accountRows.length > 0 ? (ranks.find((rank) => rank.state === "in_use")?.basis ?? null) : null;
     const others = buildOtherWindows(
       accounts,
       match,
@@ -813,6 +838,7 @@ export function buildQuotaView(
       }),
       others,
       accounts: accountRows,
+      accountsBasis,
       inUse,
       fetchedAt: snapshot.fetchedAt ?? null,
       stale: snapshot.stale === true,
@@ -857,6 +883,7 @@ export function buildQuotaView(
     inUse: [],
     others: [],
     accounts: [],
+    accountsBasis: null,
     fetchedAt: snapshot.fetchedAt ?? null,
     stale: snapshot.stale === true,
     planType: binding.account.planType,
@@ -1053,6 +1080,15 @@ export function QuotaPopover({
     (account.availableCount > 0 || Boolean(account.error))
     && (resetAccounts.length > 1 || account.canRedeem || account.credits.length > 0 || Boolean(account.error)),
   );
+  // Named exactly like the account list above ("Claude · Primary"), never by
+  // the organization/email string omp reports, which the composer must not
+  // print and which truncates to nothing useful anyway.
+  const resetAccountLabel = (account: (typeof resetAccounts)[number]): string => {
+    if (!account.provider || account.position === undefined) return account.label;
+    const siblings = resetAccounts.filter((candidate) => candidate.provider === account.provider).length;
+    const brand = brandAccountLabel(account.provider, account.provider);
+    return siblings > 1 ? `${brand} · ${accountPositionLabel(account.position)}` : brand;
+  };
   const percentText = quota.known ? t("usage.percentUsed", { percent: Math.round(quota.percent) }) : t("usage.unavailable");
   const headlineReset = quota.known ? formatResetTime(quota.resetsAt, locale, now) : null;
   const age = quota.known && quota.fetchedAt ? formatRelativeTime(quota.fetchedAt, locale, now) : null;
@@ -1136,9 +1172,9 @@ export function QuotaPopover({
             {t("usage.reportedPlan", { plan: quota.planType })}
           </div>
         )}
-        {/* Every sibling account serving this model's provider gets exactly
-            one compact row here — never its own window list, which stays
-            reserved for the account actually serving the model. */}
+        {/* One compact row per account able to serve this model's provider:
+            the one in use, then standby. The window list above belongs to the
+            account in use only. */}
         {quota.known && quota.accounts.length > 1 && (
           <section style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
             <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)" }}>
@@ -1179,9 +1215,11 @@ export function QuotaPopover({
                 );
               })}
             </div>
-            <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-muted)" }}>
-              {t("usage.accountsNote")}
-            </div>
+            {quota.accountsBasis && (
+              <div style={{ marginTop: 8, fontSize: 11, lineHeight: 1.45, color: "var(--text-dim)" }}>
+                {t(ACCOUNT_BASIS_NOTE_KEYS[quota.accountsBasis])}
+              </div>
+            )}
           </section>
         )}
         {/* The balance sits directly under the headline, before banked resets
@@ -1204,24 +1242,31 @@ export function QuotaPopover({
               const credit = account.credits[0];
               const expiry = credit ? formatResetTime(credit.expiresAt, locale, now) : null;
               const confirming = resetSelection?.accountId === account.id;
+              const label = resetAccountLabel(account);
+              const checked = account.stale && account.checkedAt ? formatRelativeTime(account.checkedAt, locale, now) : null;
               return (
                 <div key={account.id} style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid color-mix(in srgb, var(--border) 60%, transparent)" }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                    <span style={{ minWidth: 0, fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{account.label}</span>
-                    <span style={{ flexShrink: 0, fontSize: 12, fontVariantNumeric: "tabular-nums", color: "var(--text-muted)" }}>{t("usage.resetCount", { count: account.availableCount })}</span>
+                    <span style={{ minWidth: 0, fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+                    <span style={{ flexShrink: 0, fontSize: 12, fontVariantNumeric: "tabular-nums", color: "var(--text-muted)" }}>
+                      {account.retrying ? "—" : t("usage.resetCount", { count: account.availableCount })}
+                    </span>
                   </div>
                   {expiry && <div style={{ marginTop: 2, fontSize: 11, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>{t("usage.expiresAt", { time: expiry })}</div>}
                   {credit?.title && <div style={{ marginTop: 2, fontSize: 11, color: "var(--text-muted)" }}>{credit.title}</div>}
-                  {account.error && <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)" }}>{account.error}</div>}
+                  {checked && <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)" }}>{t("usage.resetCreditAsOf", { time: checked })}</div>}
+                  {account.retrying
+                    ? <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)" }}>{t("usage.resetCreditRetrying")}</div>
+                    : account.error && <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)" }}>{account.error}</div>}
                   {!account.error && !account.canRedeem && account.reason && <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)" }}>{account.reason}</div>}
                   {credit && account.canRedeem && !confirming && (
-                    <button type="button" onClick={() => setResetSelection({ accountId: account.id, creditId: credit.id, account: account.label })} style={{ marginTop: 6, padding: "3px 7px", border: "1px solid var(--border)", borderRadius: 5, background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 10 }}>
+                    <button type="button" onClick={() => setResetSelection({ accountId: account.id, creditId: credit.id, account: label })} style={{ marginTop: 6, padding: "3px 7px", border: "1px solid var(--border)", borderRadius: 5, background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 10 }}>
                       {t("usage.useReset")}
                     </button>
                   )}
                   {confirming && (
                     <div style={{ marginTop: 6, padding: 7, borderRadius: 6, background: "var(--bg-hover)", fontSize: 10, lineHeight: 1.45, color: "var(--text-muted)" }}>
-                      <div>{t("usage.resetCreditConfirm", { account: account.label })}</div>
+                      <div>{t("usage.resetCreditConfirm", { account: label })}</div>
                       <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 6 }}>
                         <button type="button" onClick={() => setResetSelection(null)} disabled={resetCredits.redeeming} style={{ padding: "3px 7px", border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 10 }}>{t("usage.cancelReset")}</button>
                         <button type="button" onClick={() => void redeemSelectedReset()} disabled={resetCredits.redeeming} style={{ padding: "3px 7px", border: "none", borderRadius: 5, background: "var(--accent-strong)", color: "var(--on-accent)", cursor: resetCredits.redeeming ? "wait" : "pointer", fontSize: 10 }}>{t("usage.useOneReset")}</button>
@@ -1690,7 +1735,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     loading: usageLoading,
     failed: usageFailed,
     refresh: refreshUsage,
-  } = useUsage(true);
+  } = useUsage(true, sessionId ?? null);
   // Banked reset credits stay keyed to the active engine: the server route
   // itself still answers `available:false` for anything but omp (they are
   // redeemed through omp's own credential store specifically, not a generic
@@ -3113,6 +3158,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     refreshResetCredits();
     if (openRouterActive) refreshOpenRouter();
   }, [contextPopoverOpen, refreshUsage, refreshResetCredits, openRouterActive, refreshOpenRouter]);
+  // The popover's own Refresh is the user asking again, so it is the one read
+  // allowed to make the server re-check saved resets with the provider.
+  const refreshQuotaNow = useCallback(() => {
+    refreshUsage();
+    refreshResetCredits(true);
+  }, [refreshUsage, refreshResetCredits]);
   // A brand-new conversation must open with an honest ring, and the composer
   // may have been idle for a whole background poll before it. Keyed on the
   // session (draftKey), never on the model: switching models re-filters the
@@ -4503,7 +4554,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     now={usageNow}
                     failed={usageFailed}
                     refreshing={usageLoading}
-                    onRefresh={refreshUsage}
+                    onRefresh={refreshQuotaNow}
                     anchorTop={contextPopoverAnchor?.top ?? null}
                     anchorRight={contextPopoverAnchor?.right ?? null}
                   />

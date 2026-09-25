@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth/http";
 import { getHarness } from "@/lib/harness";
 import { getUsageSnapshot, markStale } from "@/lib/usage/cache";
-import { isResetCreditIdempotencyKey, listResetCredits, redeemResetCredit, type ResetCreditOutcome, type ResetCreditsSnapshot } from "@/lib/harness/reset-credits";
+import { isResetCreditIdempotencyKey, redeemResetCredit, type ResetCreditOutcome, type ResetCreditsSnapshot } from "@/lib/harness/reset-credits";
+import { getResetCredits, invalidateResetCredits } from "@/lib/harness/reset-credits-cache";
 
 export const dynamic = "force-dynamic";
 const inFlight = new Set<string>();
@@ -19,7 +20,11 @@ function parseRedeem(value: unknown): { accountId: string; creditId: string; ide
 export async function GET(request: Request) {
   const resolved = requireAdmin(request); if ("response" in resolved) return resolved.response;
   if (getHarness().id !== "omp") return noStore(unavailable("The active engine does not support banked reset credits.", resolved.user.id));
-  const snapshot = await listResetCredits();
+  // Served from the shared cache: discovery asks the provider live and it
+  // rate-limits per address (see reset-credits-cache.ts). `?refresh=1` is the
+  // user asking again, still at most once a minute.
+  const force = new URL(request.url).searchParams.get("refresh") === "1";
+  const snapshot = await getResetCredits({ force });
   return noStore({ ...snapshot, observerId: resolved.user.id });
 }
 export async function POST(request: Request) {
@@ -34,7 +39,7 @@ export async function POST(request: Request) {
   if (inFlight.has(key)) return noStore({ outcome: "error", accountId: input.accountId, creditId: input.creditId, code: "in_flight", message: "That reset credit is already being redeemed." }, 409);
   inFlight.add(key);
   let outcome: ResetCreditOutcome;
-  try { outcome = await redeemResetCredit(input); } finally { inFlight.delete(key); }
+  try { outcome = await redeemResetCredit(input); } finally { inFlight.delete(key); invalidateResetCredits(); }
   completed.set(input.idempotencyKey, { outcome, expiresAt: now + COMPLETED_TTL_MS });
   markStale();
   await getUsageSnapshot({ awaitFresh: true }).catch(() => undefined);

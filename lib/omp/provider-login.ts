@@ -73,10 +73,11 @@ const defaultDeps: Required<OmpProviderLoginDeps> = {
   removeProvider: (provider) => removeOmpProvider(provider),
 };
 
-/** Every credential stored for one provider, ranked by the state omp itself
- * would report were it routing that provider right now. `position` is the
- * index in omp's own id-ascending order (disabled credentials included), so
- * removing one account never renumbers the ones left behind. */
+/** Every credential stored for one provider, with the state omp reports for
+ * it. With no conversation in scope, "in use" is the account that most
+ * recently served a live request. `position` is the index in omp's own
+ * id-ascending order (disabled credentials included), so removing one account
+ * never renumbers the ones left behind. */
 function buildProviderAccounts(
   credentials: readonly OmpCredentialRow[],
   usageAccounts: readonly UsageAccount[],
@@ -84,11 +85,14 @@ function buildProviderAccounts(
   providerName: string,
 ): ProviderLoginAccount[] {
   const rows = credentials.filter((row) => row.provider === providerId);
-  const ranks = rankProviderAccounts([...usageAccounts], providerId);
+  const ranks = rankProviderAccounts([...usageAccounts], providerId, undefined, { recent: true });
   return rows.map((row, position) => {
-    const rank = row.identity !== null
-      ? ranks.find((entry) => entry.account.id === row.identity || entry.account.identity === row.identity)
-      : undefined;
+    // The credential row id is exact; identity is the fallback for a
+    // snapshot read before the credential store was.
+    const rank = ranks.find((entry) => entry.account.credentialId === row.id)
+      ?? (row.identity !== null
+        ? ranks.find((entry) => entry.account.id === row.identity || entry.account.identity === row.identity)
+        : undefined);
     // AuthStorage's own disabled/blocked state is authoritative — it is the
     // source lib/usage's snapshot itself was built from — and only falls
     // through to the ranked quota state when neither applies.

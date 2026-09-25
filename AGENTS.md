@@ -856,20 +856,31 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   never pass through Cody: a driver relays a URL out and a code in and reads
   the engine's answer. `/api/auth/all-providers` stays omp-only (it reads
   omp's model catalog to list configured API-key providers).
-- **Several accounts can serve one provider, and Cody never invents a
-  priority for them** (omp only today). omp's `agent.db` may hold more than
-  one OAuth credential per provider (two Claude subscriptions, say) and omp
-  itself rotates the SAME model to a sibling credential on a usage limit
-  before any model fallback — it has no primary/secondary setting, its
-  ordering is emergent (usage-ranked, id-order ties). So Cody MIRRORS that
-  ranking rather than adding a control: `lib/usage/select.ts`
-  `rankProviderAccounts` (disabled last; binding window exhausted →
-  `limited`; the rest by binding-window utilization ascending, measured
-  accounts strictly ahead of unmeasured ones; first = `serving`, rest =
-  `standby`), and `selectWindowsForModel` returns the SERVING account's
-  windows, which is what fixed the composer ring painting the exhausted
-  sibling's 100% instead of the account actually answering. Accounts are
-  named by POSITION everywhere in the composer (`usage.accountPrimary` /
+- **Several accounts can serve one provider, and which one is IN USE is the
+  engine's fact, never a Cody guess** (omp only today). omp's `agent.db` may
+  hold more than one OAuth credential per provider (two Claude subscriptions,
+  say). omp keeps a conversation on the account that served it (session-
+  sticky; Anthropic's prompt cache is per account) and rotates to a sibling
+  only on a limit. It records the serving account after every turn as a
+  `credential_pin` entry in the session file (a sha256 of the account's
+  billing scope, omp `src/session/credential-pin.ts`). Cody reads THAT:
+  `bin/cody-omp-credentials.mjs` emits each OAuth row's `pinHash` (omp's own
+  `credentialPinHash`, falling back to the same persisted formula),
+  `lib/usage/cache.ts` indexes digest → credential row (server-only),
+  `lib/usage/session-pins.ts` reads a session's latest pin per provider
+  (append-only, incremental), and `/api/usage?session=` answers
+  `sessionAccounts: {provider: {accountId, since}}`.
+  `lib/usage/select.ts` `rankProviderAccounts(…, evidence)` then orders
+  `in_use` → `standby` (by headroom) → `limited` → `disabled`, with a
+  `basis` on the in-use row: `session` (the pin), `recent` (no conversation
+  in scope — Settings — so the account omp last refreshed from a live
+  response, `lastServedAt` = omp's `headersUpdatedAt`), or `expected` (the
+  conversation has not used the provider; omp routes its first request on
+  headroom). A pin naming a limited/disabled account is overruled. **Trap —
+  never rank "in use" by lowest utilization:** the account in use is the one
+  burning quota, so headroom picks the idle sibling. That shipped as
+  "Serving next · Secondary 0%" while every reply came from Primary at 41%.
+  Accounts are named by POSITION everywhere in the composer (`usage.accountPrimary` /
   `usage.accountSecondary` / `usage.accountNth`, computed in the snapshot's
   original order, never the rank order) — no emails or org names in the
   quota popup; Settings shows the identity as muted secondary text.
@@ -2039,11 +2050,20 @@ handled or safely ignored.
   POSITION (`brandedAccountLabel` → "Claude · Primary · 5-hour window"), and
   that label is what the ring's tooltip and the popover headline quote — so a
   percentage can never be read as the wrong subscription's. The per-account
-  rows say `Serving next`, not `Serving`: the ranking is Cody's read of what
-  the engine WOULD pick from this reading, and the engine re-ranks per
-  request (it rotates onto a sibling credential mid-run without telling
-  anyone), so claiming the present tense would be a claim the snapshot cannot
-  support.
+  rows say `In use` / `Standby` and one line under them says what "in use"
+  rests on (this conversation's last reply, the most recent request, or an
+  expectation for a conversation that has not used the provider yet).
+- **Saved resets are read gently** (`lib/harness/reset-credits-cache.ts`).
+  omp discovers them live per account — for Claude up to three requests
+  each — and Anthropic rate-limits those endpoints per source address;
+  polling discovery from every tab's timer and focus event got every read a
+  429 and every Claude row "Failed to load saved resets". One process-wide
+  read now serves everyone for 10 minutes, a failed check backs off
+  (2→15 min), the popover's Refresh forces at most one live check a minute,
+  and a failed check keeps the account's last CONFIRMED balance
+  (`cody-reset-credits.json`, 0600) marked stale rather than erasing it.
+  Rows are named like the account list ("Claude · Primary"), never by the
+  org/email string omp reports.
 - **Freshness is refreshed where it changes, and stated where it is read.** A
   usage read happens on mount, on a session switch, when the popover OPENS,
   on an explicit Refresh in the popover footer, and — the one that matters —
