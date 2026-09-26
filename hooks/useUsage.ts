@@ -72,7 +72,7 @@ export function useUsage(enabled = true, sessionId: string | null = null): UseUs
   // Holds the latest `load` so the visibility/focus listeners (registered
   // once, on mount) and the self-rescheduling timer always call the current
   // closure instead of a stale one.
-  const loadRef = useRef<() => void>(() => {});
+  const loadRef = useRef<(force?: boolean) => void>(() => {});
   const sessionRef = useRef(sessionId);
   sessionRef.current = sessionId;
 
@@ -90,7 +90,7 @@ export function useUsage(enabled = true, sessionId: string | null = null): UseUs
     timerRef.current = setTimeout(() => loadRef.current(), delay);
   }, [clearTimer]);
 
-  const load = useCallback(() => {
+  const load = useCallback((force = false) => {
     if (inFlightRef.current) {
       // Already fetching — skip this poll entirely (no request, no state
       // churn) rather than piling a second one on top of it.
@@ -104,7 +104,11 @@ export function useUsage(enabled = true, sessionId: string | null = null): UseUs
     setLoading(true);
 
     const session = sessionRef.current;
-    fetch(session ? `/api/usage?session=${encodeURIComponent(session)}` : "/api/usage", { signal: controller.signal })
+    const params = new URLSearchParams();
+    if (session) params.set("session", session);
+    if (force) params.set("refresh", "1");
+    const url = `/api/usage${params.size > 0 ? `?${params}` : ""}`;
+    fetch(url, { signal: controller.signal, cache: "no-store" })
       .then(async (response) => {
         const body = (await response.json().catch(() => null)) as UsageSnapshot | null;
         if (!mountedRef.current || controller.signal.aborted) return;
@@ -142,7 +146,7 @@ export function useUsage(enabled = true, sessionId: string | null = null): UseUs
 
   const refresh = useCallback(() => {
     clearTimer();
-    loadRef.current();
+    loadRef.current(true);
   }, [clearTimer]);
 
   useEffect(() => {

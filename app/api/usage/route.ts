@@ -73,7 +73,8 @@ export async function GET(request: Request) {
     // The client poll is itself the refresh trigger, so wait for the fresh
     // read rather than being handed the entry it came to replace — otherwise
     // every poll lands after the TTL and reports "may be out of date" forever.
-    const snapshot = await getUsageSnapshot({ awaitFresh: true });
+    const url = new URL(request.url);
+    const snapshot = await getUsageSnapshot({ awaitFresh: true, forceRefresh: url.searchParams.get("refresh") === "1" });
     // One read, one routing decision. Reconciling here rather than on a timer
     // of its own means the blackout registry, the role bindings and the ring
     // are always derived from the SAME snapshot — the single-source-of-truth
@@ -88,7 +89,7 @@ export async function GET(request: Request) {
     try {
       displaySnapshot = withUsageAccountNames(routing.snapshot, readProviderAccountNames(getAgentDir()));
     } catch { /* Keep the measured snapshot and its quota windows. */ }
-    const sessionId = new URL(request.url).searchParams.get("session");
+    const sessionId = url.searchParams.get("session");
     const scoped = sessionId && displaySnapshot.available
       ? { sessionAccounts: await sessionAccounts(sessionId, resolved.user, displaySnapshot) }
       : {};

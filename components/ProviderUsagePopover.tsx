@@ -196,7 +196,7 @@ export function ProviderUsagePopover({ onOpenProviders }: { onOpenProviders: () 
           <button
             type="button"
             className="provider-usage-icon-button ui-focus-ring"
-            onClick={usage.refresh}
+            onClick={() => { setClock(Date.now()); usage.refresh(); }}
             disabled={usage.loading}
             aria-label={t("usage.refresh")}
             title={t("usage.refresh")}

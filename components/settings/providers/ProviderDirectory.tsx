@@ -131,7 +131,7 @@ export function ProviderDirectory() {
   }, [usage]);
   const refreshUsage = useCallback(() => {
     usage.refresh();
-    openRouterAccount.refresh();
+    void openRouterAccount.refreshNow();
   }, [usage, openRouterAccount]);
   const renameUsageAccount = useCallback(async ({ loginId, accountId, name }: RenameUsageAccountInput) => {
     if (!canEdit) throw new Error("Only an administrator can rename provider accounts.");
@@ -266,6 +266,7 @@ export function ProviderDirectory() {
         accounts={usage.snapshot?.accounts ?? []}
         openRouter={openRouterAccount.snapshot}
         unavailableProviders={usage.snapshot?.unavailableProviders ?? []}
+        activeProviderIds={rows.filter((row) => row.connected && !row.disabled).flatMap((row) => [row.id, ...row.catalogIds])}
         updatedText={usageUpdatedText}
         refreshing={usage.loading || openRouterAccount.loading}
         onRefresh={refreshUsage}

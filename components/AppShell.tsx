@@ -1292,7 +1292,7 @@ export function AppShell() {
     <SettingsOpenerContext.Provider value={openSettings}>
     <ToastProvider>
     <style>{`
-      @keyframes session-info-pop {
+      @keyframes top-panel-pop {
         0% {
           opacity: 0;
           transform: translateY(-24px);
@@ -1302,7 +1302,7 @@ export function AppShell() {
           transform: translateY(0);
         }
       }
-      @keyframes session-info-light-wash {
+      @keyframes top-panel-light-wash {
         0% {
           opacity: 0;
           transform: translateX(-110%) skewX(-16deg);
@@ -1315,14 +1315,16 @@ export function AppShell() {
           transform: translateX(115%) skewX(-16deg);
         }
       }
-      .session-info-popover {
+      .session-info-popover,
+      .provider-usage-popover {
         position: relative;
         overflow: hidden;
         transform-origin: top right;
-        animation: session-info-pop var(--dur-slow) var(--ease-out-warm) both;
+        animation: top-panel-pop var(--dur-slow) var(--ease-out-warm) both;
         will-change: transform, opacity;
       }
-      .session-info-popover::after {
+      .session-info-popover::after,
+      .provider-usage-popover::after {
         content: "";
         position: absolute;
         top: 0;
@@ -1331,11 +1333,13 @@ export function AppShell() {
         width: 44%;
         pointer-events: none;
         background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 24%, transparent), transparent);
-        animation: session-info-light-wash var(--dur-slow) var(--ease-out-warm) both;
+        animation: top-panel-light-wash var(--dur-slow) var(--ease-out-warm) both;
       }
       @media (prefers-reduced-motion: reduce) {
         .session-info-popover,
-        .session-info-popover::after {
+        .session-info-popover::after,
+        .provider-usage-popover,
+        .provider-usage-popover::after {
           animation: none;
         }
       }

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -9,6 +10,7 @@ const jiti = createJiti(import.meta.url, {
   tsconfigPaths: true,
 });
 const { ClampedDescription, clampDescriptionStyle } = await jiti.import("./toast.tsx");
+const globalCss = await readFile(new URL("../../app/globals.css", import.meta.url), "utf8");
 
 const TOOL_LIST = "xd://: mounted mcp__ida_reverse_engineering_ida_address_context, mcp__ida_decompile";
 
@@ -37,4 +39,11 @@ test("clamp style helper drops the clamp when expanded", () => {
   assert.equal(expanded.WebkitLineClamp, undefined);
   assert.equal(expanded.overflow, undefined);
   assert.equal(expanded.cursor, "default");
+});
+
+test("toast keyboard focus uses a rounded shadow ring instead of a square outline", () => {
+  const focusRule = globalCss.match(/\.toast-card:focus-visible\s*\{([^}]+)\}/)?.[1] ?? "";
+
+  assert.match(focusRule, /outline:\s*none/);
+  assert.match(focusRule, /box-shadow:\s*var\(--shadow-modal\),\s*0 0 0 2px var\(--accent\)\s*!important/);
 });

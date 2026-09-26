@@ -2064,6 +2064,12 @@ span.linenumber {
   box-shadow: var(--shadow-modal) !important;
   transform: translateY(-2px);
 }
+.toast-card:focus-visible {
+  /* Browser outlines can square off rounded toast corners. Keep the keyboard
+     focus indicator in the card's rounded shadow geometry instead. */
+  outline: none;
+  box-shadow: var(--shadow-modal), 0 0 0 2px var(--accent) !important;
+}
 
 .live-status-dot {
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 12%, transparent);

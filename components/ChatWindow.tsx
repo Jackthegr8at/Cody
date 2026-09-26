@@ -1667,6 +1667,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
             <CompactionProgress status={compactionStatus} />
             <ComposerPanels
               todoPhases={todoPhases}
+              sessionId={session?.id ?? sessionIdRef.current ?? null}
               planOverlay={planOverlay}
               subagents={subagentsCapable && chatExtras ? subagents : []}
               onSelectSubagent={setSelectedSubagent}

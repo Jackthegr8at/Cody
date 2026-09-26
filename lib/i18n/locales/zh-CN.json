@@ -370,6 +370,7 @@
   "devices.artifactEscrowNotice": "保存在此浏览器中供本会话使用。浏览器存储可能被清除；请显式下载重要备份。",
   "chatWindow.thinking": "思考中...",
   "chatWindow.todoBlocker": "已阻塞：{blocker}",
+  "chatWindow.dismissCompletedTasks": "关闭已完成的任务",
   "chatWindow.todoList": "任务",
   "chatWindow.todoPhaseStatus": "{name} {done}/{total}",
   "chatWindow.todoProgress": "已完成 {done}/{total}",

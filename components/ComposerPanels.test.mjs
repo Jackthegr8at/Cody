@@ -9,6 +9,7 @@ const jiti = createJiti(import.meta.url, {
   tsconfigPaths: true,
 });
 const { ComposerPanels } = await jiti.import("./ComposerPanels.tsx");
+const { todoListIdentity } = await jiti.import("./TodoList.tsx");
 
 const noop = () => {};
 
@@ -73,6 +74,30 @@ test("panels start collapsed with live summary in their headers", () => {
   assert.match(html, /aria-expanded="false"/);
   assert.doesNotMatch(html, /Wire panels/);
   assert.doesNotMatch(html, /Map the surface/);
+});
+
+test("only a fully completed task list offers a separate dismiss button", () => {
+  const complete = [{ name: "Build", tasks: [{ content: "Wire panels", status: "completed" }] }];
+  const render = (todoPhases) => renderToStaticMarkup(React.createElement(ComposerPanels, {
+    todoPhases,
+    sessionId: "session-one",
+    subagents: [],
+    onSelectSubagent: noop,
+  }));
+  const html = render(complete);
+  assert.match(html, /aria-label="Dismiss completed tasks"/);
+  assert.match(html, /aria-expanded="false"/);
+  assert.equal((html.match(/<button/g) ?? []).length, 2, "dismiss and expand are independent controls");
+  assert.doesNotMatch(render([{ name: "Build", tasks: [{ content: "Wire panels", status: "in_progress" }] }]), /Dismiss completed tasks/);
+  assert.doesNotMatch(render([{ name: "Build", tasks: [{ content: "Wire panels", status: "completed" }, { content: "Review", status: "pending" }] }]), /Dismiss completed tasks/);
+});
+
+test("task-list identity changes with contents, not completion status", () => {
+  const completed = [{ id: "phase", name: "Build", tasks: [{ id: "task", content: "Wire panels", status: "completed" }] }];
+  const reopened = [{ id: "phase", name: "Build", tasks: [{ id: "task", content: "Wire panels", status: "in_progress" }] }];
+  const changed = [{ id: "phase", name: "Build", tasks: [{ id: "task", content: "Review panels", status: "completed" }] }];
+  assert.equal(todoListIdentity(completed), todoListIdentity(reopened));
+  assert.notEqual(todoListIdentity(completed), todoListIdentity(changed));
 });
 
 test("plan-keeper subtasks nest under their parent with an n/m count, ready to ellipsize", () => {

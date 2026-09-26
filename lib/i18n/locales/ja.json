@@ -370,6 +370,7 @@
   "devices.artifactEscrowNotice": "このブラウザーにセッション用として保存されます。ブラウザー保存領域は消去されることがあるため、重要なバックアップは明示的にダウンロードしてください。",
   "chatWindow.thinking": "思考中...",
   "chatWindow.todoBlocker": "ブロック中: {blocker}",
+  "chatWindow.dismissCompletedTasks": "完了したタスクを閉じる",
   "chatWindow.todoList": "タスク",
   "chatWindow.todoPhaseStatus": "{name} {done}/{total}",
   "chatWindow.todoProgress": "{done}/{total} 完了",

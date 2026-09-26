@@ -370,6 +370,7 @@
   "devices.artifactEscrowNotice": "Stored in this browser for the session. Browser storage can be cleared; download important backups explicitly.",
   "chatWindow.thinking": "Thinking...",
   "chatWindow.todoBlocker": "Blocked: {blocker}",
+  "chatWindow.dismissCompletedTasks": "Dismiss completed tasks",
   "chatWindow.todoList": "Tasks",
   "chatWindow.todoPhaseStatus": "{name} {done}/{total}",
   "chatWindow.todoProgress": "{done}/{total} complete",

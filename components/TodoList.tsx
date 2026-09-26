@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { Ban, CheckCircle2, ChevronDown, Circle, CircleAlert, CircleDotDashed, ListChecks, Wand2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Ban, CheckCircle2, ChevronDown, Circle, CircleAlert, CircleDotDashed, ListChecks, Wand2, X } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
 import type { PlanOverlay, TodoItem, TodoPhase } from "@/lib/pi-types";
 
@@ -16,6 +16,8 @@ function TodoStatusIcon({ status, size = 14 }: { status: TodoItem["status"]; siz
 
 interface TodoListProps {
   phases?: TodoPhase[];
+  /** Current chat; dismissing a completed list must not hide another chat's list. */
+  sessionId?: string | null;
   /** Plan-keeper overlay: subtasks nested under their exact parent task
    * content, and which top-level task contents the keeper (rather than the
    * model) marked complete. Absent/null renders exactly as it did before the
@@ -28,15 +30,63 @@ interface TodoListProps {
   defaultExpanded?: boolean;
 }
 
-export function TodoList({ phases = [], overlay = null, collapsible = false, defaultExpanded = false }: TodoListProps) {
+const DISMISSED_TASKS_STORAGE_PREFIX = "cody:dismissed-tasks:v1:";
+
+/** A compact, stable identity without retaining task text in browser storage. */
+export function todoListIdentity(phases: readonly TodoPhase[]): string {
+  const source = JSON.stringify(phases.map((phase) => [phase.id ?? null, phase.name, phase.tasks.map((task) => [task.id ?? null, task.content])]));
+  let hashA = 0x811c9dc5;
+  let hashB = 0x9e3779b9;
+  for (let index = 0; index < source.length; index++) {
+    const code = source.charCodeAt(index);
+    hashA = Math.imul(hashA ^ code, 0x01000193);
+    hashB = Math.imul(hashB ^ code, 0x85ebca6b);
+  }
+  return `${source.length}:${(hashA >>> 0).toString(16)}:${(hashB >>> 0).toString(16)}`;
+}
+
+export function TodoList({ phases = [], overlay = null, sessionId = null, collapsible = false, defaultExpanded = false }: TodoListProps) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const [collapsed, setCollapsed] = useState(collapsible ? !defaultExpanded : false);
-
-  if (phases.length === 0) return null;
-
   const tasks = phases.flatMap((phase) => phase.tasks);
   const done = tasks.filter((task) => task.status === "completed").length;
+  const allCompleted = tasks.length > 0 && done === tasks.length;
+  const listIdentity = todoListIdentity(phases);
+  const storageKey = sessionId ? `${DISMISSED_TASKS_STORAGE_PREFIX}${sessionId}` : null;
+  const dismissIdentity = `${sessionId ?? "unsaved"}:${listIdentity}`;
+  const [dismissedIdentity, setDismissedIdentity] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!storageKey || !allCompleted) return;
+    try {
+      if (window.localStorage.getItem(storageKey) === listIdentity) setDismissedIdentity(dismissIdentity);
+    } catch {
+      // Storage may be disabled; dismissal still works until this panel unmounts.
+    }
+  }, [storageKey, listIdentity, dismissIdentity, allCompleted]);
+
+  useEffect(() => {
+    if (!storageKey || tasks.length === 0 || allCompleted) return;
+    try {
+      window.localStorage.removeItem(storageKey);
+    } catch {
+      // A denied storage write must not prevent an active task list appearing.
+    }
+    setDismissedIdentity(null);
+  }, [storageKey, tasks.length, allCompleted]);
+
+  if (phases.length === 0 || (allCompleted && dismissedIdentity === dismissIdentity)) return null;
+
+  const dismiss = () => {
+    setDismissedIdentity(dismissIdentity);
+    if (!storageKey) return;
+    try {
+      window.localStorage.setItem(storageKey, listIdentity);
+    } catch {
+      // Keep the immediate dismissal even when persistence is unavailable.
+    }
+  };
   let remainingPreviewTasks = 5;
   const displayedPhases = (expanded ? phases : phases.slice(0, 4)).map((phase) => {
     const displayedTasks = expanded ? phase.tasks : phase.tasks.slice(0, remainingPreviewTasks);
@@ -63,12 +113,13 @@ export function TodoList({ phases = [], overlay = null, collapsible = false, def
       style={{ borderRadius: "var(--radius-card)", width: collapsible ? "100%" : "fit-content", maxWidth: "100%" }}
     >
       {collapsible ? (
+        <div className={`${headerRowClass} ${headerBorderClass}`}>
         <button
           type="button"
           aria-expanded={!collapsed}
           onClick={() => setCollapsed((value) => !value)}
           title={collapsed ? t("chatWindow.expandPanel") : t("chatWindow.collapsePanel")}
-          className={`${headerRowClass} ${headerBorderClass} w-full cursor-pointer text-left`}
+          className="ui-focus-ring flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-left"
           style={{ background: "none" }}
         >
           <ListChecks size={15} strokeWidth={1.8} aria-hidden />
@@ -85,11 +136,22 @@ export function TodoList({ phases = [], overlay = null, collapsible = false, def
             }}
           />
         </button>
+        {allCompleted && (
+          <button type="button" onClick={dismiss} className="ui-focus-ring inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-text-dim hover:bg-bg-hover hover:text-text" aria-label={t("chatWindow.dismissCompletedTasks")} title={t("chatWindow.dismissCompletedTasks")}>
+            <X size={14} strokeWidth={1.8} aria-hidden />
+          </button>
+        )}
+        </div>
       ) : (
         <div className={`${headerRowClass} ${headerBorderClass}`}>
           <ListChecks size={15} strokeWidth={1.8} aria-hidden />
           <strong className="font-medium text-text">{t("chatWindow.todoList")}</strong>
           <span className="ml-auto">{progress}</span>
+          {allCompleted && (
+            <button type="button" onClick={dismiss} className="ui-focus-ring inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-text-dim hover:bg-bg-hover hover:text-text" aria-label={t("chatWindow.dismissCompletedTasks")} title={t("chatWindow.dismissCompletedTasks")}>
+              <X size={14} strokeWidth={1.8} aria-hidden />
+            </button>
+          )}
         </div>
       )}
       {!collapsed && (

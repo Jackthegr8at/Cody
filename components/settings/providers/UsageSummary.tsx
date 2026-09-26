@@ -343,6 +343,8 @@ export interface UsageSummaryProps {
   accounts: readonly UsageAccount[];
   openRouter?: OpenRouterAccountSnapshot | null;
   unavailableProviders?: readonly { provider: string; reason: string }[];
+  /** Connected, enabled provider ids from the directory; unused providers need no warning. */
+  activeProviderIds?: readonly string[];
   /** Already-formatted ("Updated 1 min ago"); the container owns the clock. */
   updatedText?: string | null;
   refreshing?: boolean;
@@ -365,6 +367,7 @@ export function UsageSummary({
   accounts,
   openRouter = null,
   unavailableProviders = [],
+  activeProviderIds = [],
   updatedText = null,
   refreshing = false,
   onRefresh,
@@ -405,7 +408,7 @@ export function UsageSummary({
   const balance = buildOpenRouterRow(openRouter);
   const reportedProviders = new Set(rows.map((row) => row.provider));
   if (balance) reportedProviders.add(balance.provider);
-  const unavailable = unavailableProviders.filter((entry) => !reportedProviders.has(entry.provider));
+  const unavailable = unavailableProviders.filter((entry) => activeProviderIds.includes(entry.provider) && !reportedProviders.has(entry.provider));
 
   if (rows.length === 0 && !balance && unavailable.length === 0) return null;
 
@@ -436,39 +439,24 @@ export function UsageSummary({
 
             return (
               <div key={row.key} role="listitem" className="usage-summary-item" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", minWidth: 0, borderTop: index > 0 ? "1px solid var(--border)" : undefined }}>
-                <button
-                  type="button"
-                  className="usage-summary-row ui-focus-ring"
-                  onClick={() => onOpenAccount?.(row.provider)}
-                  style={{ ...rowStyle(false), flex: 1, minWidth: 0 }}
-                >
-                  <span aria-hidden="true" className="usage-row-icon" style={{ display: "inline-flex", flexShrink: 0 }}>
-                    <ProviderTile brand={row.provider} size={18} />
-                  </span>
-                  <span className="usage-row-title" style={{ width: 140, flexShrink: 0, display: "flex", flexDirection: "column", gap: 1, minWidth: 0, fontSize: 12, fontWeight: 600 }}>
-                    {customName ? <>
-                      <span title={customName} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{customName}</span>
-                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 10, fontWeight: 400, color: "var(--text-muted)" }}>{row.title}</span>
-                    </> : <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.title}</span>}
-                  </span>
-                  <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 4 }}>
-                    <WindowLine view={row.primary} />
-                    {row.secondary && <WindowLine view={row.secondary} muted />}
-                  </span>
-                </button>
-                <div className="usage-summary-actions" style={{ display: "flex", alignItems: "center", gap: 5, paddingRight: 8, flexShrink: 0 }}>
-                  {row.blockedOnly && onRetryBlock && (
-                    <button
-                      type="button"
-                      className="ui-focus-ring"
-                      onClick={() => onRetryBlock(row.provider, row.key)}
-                      disabled={retryingAccountId === row.key}
-                      title="Lift the block so the next request tries this account again"
-                      style={{ ...quietButtonStyle, minHeight: 24, padding: "3px 8px", margin: "0 8px", fontSize: 11, whiteSpace: "nowrap" }}
-                    >
-                      {retryingAccountId === row.key ? "Retrying…" : "Retry now"}
-                    </button>
-                  )}
+                <div className="usage-summary-identity" style={{ display: "flex", alignItems: "center", gap: 2, minWidth: 0, flex: "0 0 220px" }}>
+                  <button
+                    type="button"
+                    className="usage-summary-row ui-focus-ring"
+                    onClick={() => onOpenAccount?.(row.provider)}
+                    aria-label={`Open ${customName ? `${customName}, ${row.title}` : row.title} provider settings`}
+                    style={{ ...rowStyle(false), width: "auto", flex: "0 1 auto", minWidth: 0, paddingRight: 0 }}
+                  >
+                    <span aria-hidden="true" className="usage-row-icon" style={{ display: "inline-flex", flexShrink: 0 }}>
+                      <ProviderTile brand={row.provider} size={18} />
+                    </span>
+                    <span className="usage-row-title" style={{ width: "auto", maxWidth: 140, flexShrink: 1, display: "flex", flexDirection: "column", gap: 1, minWidth: 0, fontSize: 12, fontWeight: 600 }}>
+                      {customName ? <>
+                        <span title={customName} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{customName}</span>
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 10, fontWeight: 400, color: "var(--text-muted)" }}>{row.title}</span>
+                      </> : <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.title}</span>}
+                    </span>
+                  </button>
                   {target && onRenameAccount && (
                     <button
                       type="button"
@@ -483,12 +471,37 @@ export function UsageSummary({
                       aria-expanded={isEditing}
                       aria-controls={isEditing ? editorId : undefined}
                       aria-label={`Rename connection${customName ? ` ${customName}` : ` for ${row.title}`}`}
-                      style={{ ...quietButtonStyle, minHeight: 32, padding: "5px 8px", fontSize: 11, whiteSpace: "nowrap" }}
+                      title="Rename connection"
+                      style={{ width: 28, height: 28, flexShrink: 0, padding: 0, border: "none", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text-muted)", cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center" }}
                     >
-                      <Pencil size={11} aria-hidden="true" /> Rename connection
+                      <Pencil size={13} aria-hidden="true" />
                     </button>
                   )}
                 </div>
+                <button
+                  type="button"
+                  className="usage-summary-usage ui-focus-ring"
+                  onClick={() => onOpenAccount?.(row.provider)}
+                  aria-label={`Open usage for ${customName ? `${customName}, ${row.title}` : row.title}`}
+                  style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", justifyContent: "center", gap: 4, alignSelf: "stretch", padding: "5px 12px", border: "none", background: "var(--bg-panel)", color: "var(--text)", font: "inherit", textAlign: "left", cursor: "pointer" }}
+                >
+                  <WindowLine view={row.primary} />
+                  {row.secondary && <WindowLine view={row.secondary} muted />}
+                </button>
+                {row.blockedOnly && onRetryBlock && (
+                  <div className="usage-summary-actions" style={{ display: "flex", alignItems: "center", gap: 5, paddingRight: 8, flexShrink: 0 }}>
+                    <button
+                      type="button"
+                      className="ui-focus-ring"
+                      onClick={() => onRetryBlock(row.provider, row.key)}
+                      disabled={retryingAccountId === row.key}
+                      title="Lift the block so the next request tries this account again"
+                      style={{ ...quietButtonStyle, minHeight: 24, padding: "3px 8px", margin: "0 8px", fontSize: 11, whiteSpace: "nowrap" }}
+                    >
+                      {retryingAccountId === row.key ? "Retrying…" : "Retry now"}
+                    </button>
+                  </div>
+                )}
                 {target && onRenameAccount && isEditing && (
                   <RenameUsageForm
                     id={editorId}
@@ -541,6 +554,10 @@ export function UsageSummary({
       )}
 
       <style>{`
+        .usage-summary-rename:hover {
+          background: var(--bg-subtle) !important;
+          color: var(--text) !important;
+        }
         @media (max-width: 520px) {
           .usage-summary-row {
             flex-wrap: wrap;
@@ -548,12 +565,16 @@ export function UsageSummary({
           .usage-summary-row .usage-row-title {
             width: auto !important;
           }
+          .usage-summary-identity {
+            flex: 1 1 100% !important;
+          }
           .usage-summary-item {
             flex-wrap: wrap;
             align-items: stretch !important;
           }
-          .usage-summary-item > .usage-summary-row {
+          .usage-summary-item > .usage-summary-usage {
             flex: 1 1 100% !important;
+            padding: 5px 12px 7px 40px !important;
           }
           .usage-summary-actions {
             width: 100%;

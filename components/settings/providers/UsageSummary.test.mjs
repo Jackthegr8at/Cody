@@ -127,6 +127,7 @@ test("UsageSummary renders both Claude accounts, the OpenRouter balance, and not
       accounts: fixtureAccounts(),
       openRouter: openRouterSnapshot,
       unavailableProviders: [{ provider: "gemini", reason: "no key" }],
+      activeProviderIds: ["gemini"],
     }),
   );
   assert.match(html, /Claude · Primary/);
@@ -142,6 +143,23 @@ test("UsageSummary renders both Claude accounts, the OpenRouter balance, and not
 test("UsageSummary renders nothing at all when there is no usage, no balance and nothing unavailable", () => {
   const html = renderToStaticMarkup(React.createElement(UsageSummary, { accounts: [] }));
   assert.equal(html, "");
+});
+
+test("unused providers do not leave a permanent usage-unavailable notice", () => {
+  const html = renderToStaticMarkup(React.createElement(UsageSummary, {
+    accounts: [account({ provider: "openai-codex" })],
+    unavailableProviders: [{ provider: "alibaba-token-plan", reason: "not_installed" }],
+    activeProviderIds: ["openai-codex"],
+  }));
+  assert.match(html, /Codex/);
+  assert.doesNotMatch(html, /Alibaba Token Plan|Usage unavailable/);
+
+  const connected = renderToStaticMarkup(React.createElement(UsageSummary, {
+    accounts: [account({ provider: "openai-codex" })],
+    unavailableProviders: [{ provider: "alibaba-token-plan", reason: "not_installed" }],
+    activeProviderIds: ["openai-codex", "alibaba-token-plan"],
+  }));
+  assert.match(connected, /Usage unavailable for Alibaba Token Plan/);
 });
 
 test("a provider already shown as a row is not repeated in the unavailable footer", () => {
@@ -199,6 +217,12 @@ test("custom connection names keep provider and account-position context, with e
   assert.match(html, /Claude · Primary/);
   assert.match(html, /Claude · Secondary/);
   assert.match(html, /Rename connection/);
+  assert.match(html, /class="usage-summary-rename ui-focus-ring"[^>]*aria-label="Rename connection Work account"[^>]*title="Rename connection"/);
+  const renameIndex = html.indexOf('aria-label="Rename connection Work account"');
+  const identityIndex = html.lastIndexOf('class="usage-summary-identity"', renameIndex);
+  const usageIndex = html.indexOf('class="usage-summary-usage ui-focus-ring"', renameIndex);
+  assert.ok(identityIndex >= 0 && identityIndex < renameIndex && usageIndex > renameIndex, "the edit action stays with the connection name before the usage bars");
+  assert.match(html, /class="usage-summary-rename ui-focus-ring"[^>]*width:28px;height:28px/);
 });
 
 test("a custom name still displays without a roster, but cannot expose rename", () => {

@@ -312,8 +312,9 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
  * states. Each panel is independently collapsible via its header and starts
  * collapsed; the headers always show live progress / running-summary over
  * the full roster, even while the chip list is truncated. */
-export function ComposerPanels({ todoPhases, planOverlay = null, subagents, onSelectSubagent, defaultExpanded = false }: {
+export function ComposerPanels({ todoPhases, planOverlay = null, subagents, onSelectSubagent, sessionId = null, defaultExpanded = false }: {
   todoPhases: TodoPhase[];
+  sessionId?: string | null;
   /** Plan-keeper overlay (subtasks + auto-mark contents) for the in-progress
    * task. Absent/null renders the plan exactly as it did before the keeper
    * existed. */
@@ -326,7 +327,7 @@ export function ComposerPanels({ todoPhases, planOverlay = null, subagents, onSe
   if (todoPhases.length === 0 && subagents.length === 0) return null;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
-      <TodoList phases={todoPhases} overlay={planOverlay} collapsible defaultExpanded={defaultExpanded} />
+      <TodoList phases={todoPhases} overlay={planOverlay} sessionId={sessionId} collapsible defaultExpanded={defaultExpanded} />
       <SubagentsPanel subagents={subagents} onSelectSubagent={onSelectSubagent} defaultExpanded={defaultExpanded} />
     </div>
   );

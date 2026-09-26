@@ -114,6 +114,8 @@ const USAGE_FAILURE_BACKOFF_MS = 10_000;
 type UsageLoader = () => Promise<UsageSnapshot>;
 
 export interface GetUsageSnapshotOptions {
+  /** A user-requested refresh bypasses a warm entry but still joins an in-flight read. */
+  forceRefresh?: boolean;
   /** Serve a cached entry only while it is younger than this. Never shortens
    * the failure backoff — that exists to protect the spawn path. */
   maxAgeMs?: number;
@@ -159,7 +161,7 @@ export function resetUsageCache(): void {
 export function getUsageSnapshot(options: GetUsageSnapshotOptions = {}): Promise<UsageSnapshot> {
   const state = getUsageCacheState();
   const entry = state.entry;
-  if (entry && isFresh(entry, options.maxAgeMs)) return Promise.resolve(entry.snapshot);
+  if (!options.forceRefresh && entry && isFresh(entry, options.maxAgeMs)) return Promise.resolve(entry.snapshot);
 
   const load = state.inFlight ?? startUsageLoad(state, options.load ?? loadUsageSnapshot);
 
