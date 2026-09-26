@@ -116,6 +116,9 @@ export const SESSION_STORAGE_PREFIXES = {
   goal: "cody:goal:",
   /** Explicit Smart model provenance, never inferred from a resolved model. */
   smartModel: "cody:smart-model:",
+  /** Per-session send outbox (lib/outbox.ts): every composer send not yet
+   *  confirmed delivered, so a reload or session switch can resume it. */
+  outbox: "cody:outbox:",
 } as const;
 
 /** Same-window notifications between components that share a stored value. */

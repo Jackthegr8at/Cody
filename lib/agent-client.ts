@@ -70,3 +70,55 @@ export async function sendAgentCommand<T = unknown>(
   }
   return body.data as T;
 }
+
+/**
+ * One delivery attempt for an existing session's composer send (outbox
+ * pipeline, local://send-contract.md). Unlike `sendAgentCommand`, this never
+ * throws for an expected outcome — 202 pending, 409 session_restarting, 503,
+ * a network failure, or any other status all come back as plain data so
+ * `lib/outbox.ts#classifyDeliveryOutcome` can decide retry vs. give up.
+ * `status: null` means the request never got a response at all.
+ */
+export interface PromptDeliveryResponse {
+  status: number | null;
+  success?: boolean;
+  pending?: boolean;
+  code?: string;
+  error?: string;
+  data?: { delivery?: "started" | "queued"; clientMessageId?: string };
+}
+
+export interface PromptDeliveryCommand {
+  type: "prompt";
+  message: string;
+  images?: unknown;
+  streamingBehavior: "steer" | "followUp";
+  clientMessageId: string;
+}
+
+export async function sendPromptDelivery(
+  sessionId: string,
+  command: PromptDeliveryCommand,
+  options: SendAgentCommandOptions = {},
+): Promise<PromptDeliveryResponse> {
+  const controller = options.timeoutMs && options.timeoutMs > 0 ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), options.timeoutMs) : undefined;
+  let res: Response;
+  try {
+    res = await fetch(`/api/agent/${encodeURIComponent(sessionId)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(command),
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+  } catch (error) {
+    // A timeout or a genuine network failure are both "no response" from the
+    // outbox's point of view — the caller retries the identical body either
+    // way, so there is no translated message to construct here.
+    return { status: null, error: error instanceof Error ? error.message : String(error) };
+  } finally {
+    clearTimeout(timer);
+  }
+  const body = (await res.json().catch(() => ({}))) as Omit<PromptDeliveryResponse, "status">;
+  return { status: res.status, ...body };
+}

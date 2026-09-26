@@ -274,6 +274,15 @@ const MCP_LIST_TIMEOUT_MS = 15_000;
  * stay pending forever. Generous enough to cover slow local startup work the
  * child does before acking. */
 const PROMPT_ACK_TIMEOUT_MS = 30_000;
+/** How long a clientMessageId keeps its outcome memoized on the wrapper: long
+ * enough to cover the client's own retry backoff (up to ~2 min per
+ * local://send-contract.md) with headroom, short enough that a wrapper alive
+ * for hours does not remember every id forever. */
+const CLIENT_MESSAGE_ID_TTL_MS = 10 * 60 * 1000;
+/** Bound on how many outcomes one wrapper remembers at once; the oldest is
+ * evicted first once exceeded. A chat sends at most a handful of messages a
+ * minute, so this is generous headroom, not a working limit. */
+const CLIENT_MESSAGE_ID_CAP = 200;
 
 const RESTARTING_MESSAGE = "This session is restarting. Retry in a moment.";
 
@@ -735,6 +744,14 @@ export class AgentSessionWrapper {
    * by startRpcSession so a replacement spawn awaits the old child's exit. */
   /** Resolves once an in-flight destroy finishes; null when idle. */
   destroyPromise: Promise<void> | null = null;
+  /** Outcome cache for send()'s clientMessageId dedupe (prompt/steer/
+   * follow_up): a repeat id rejoins this exact promise instead of re-sending
+   * to omp. TTL + cap keep a long-lived wrapper from remembering forever. */
+  private clientMessageOutcomes = new Map<string, { promise: Promise<unknown>; expiresAt: number }>();
+  /** The most recent successful get_state result (buildWebState), so a GET
+   * route whose bounded get_state times out can still answer something
+   * instead of nothing (see lib/api-utils.ts getStateBounded). */
+  private _lastKnownState: WebSessionState | null = null;
   private _sessionId = "";
   private _sessionFile = "";
   private _sessionName: string | undefined;
@@ -1903,7 +1920,7 @@ export class AgentSessionWrapper {
       this.setSessionId(state.sessionId);
       this._sessionFile = state.sessionFile ?? this._sessionFile;
     }
-    return {
+    const webState: WebSessionState = {
       sessionId: state.sessionId,
       sessionFile: state.sessionFile ?? "",
       sessionName: state.sessionName,
@@ -1944,6 +1961,8 @@ export class AgentSessionWrapper {
       extensionStatuses: Array.from(this.extensionStatuses, ([key, text]) => ({ key, text })),
       extensionWidgets: Array.from(this.extensionWidgets.values()),
     };
+    this._lastKnownState = webState;
+    return webState;
   }
 
   /** After branch/new_session/switch_session the child is on a different
@@ -2015,9 +2034,62 @@ export class AgentSessionWrapper {
     notifyRunningChange();
   }
 
+  /** The most recent successful get_state snapshot this wrapper has built,
+   * or null if none has landed yet (a brand-new child). Read by the GET
+   * routes' bounded get_state fallback (lib/api-utils.ts) when a live round
+   * trip does not land inside their short wait. */
+  lastKnownState(): WebSessionState | null {
+    return this._lastKnownState;
+  }
+
+  /** Evict expired entries, then the oldest ones over the cap — run on every
+   * dedupe lookup so a long-lived wrapper's map stays bounded without a
+   * separate timer. */
+  private pruneClientMessageOutcomes(): void {
+    const now = Date.now();
+    for (const [id, entry] of this.clientMessageOutcomes) {
+      if (entry.expiresAt <= now) this.clientMessageOutcomes.delete(id);
+    }
+    while (this.clientMessageOutcomes.size > CLIENT_MESSAGE_ID_CAP) {
+      const oldest = this.clientMessageOutcomes.keys().next().value;
+      if (oldest === undefined) break;
+      this.clientMessageOutcomes.delete(oldest);
+    }
+  }
+
+  /** A repeat clientMessageId must never re-send to omp: it rejoins the exact
+   * promise the first call created, whether still pending (the caller awaits
+   * the same in-flight command) or already settled successfully (the caller
+   * gets the first outcome, with no second RPC round trip). A REJECTED
+   * outcome is deliberately NOT kept: this wrapper survives a restart() (only
+   * `this.proc` is swapped), so memoizing a transient failure — the child
+   * disposed mid-flight by a routing/profile restart, say — for the rest of
+   * the TTL would make every retry (automatic or manual) rejoin that same
+   * failure forever, and the message could never be delivered. No id — every
+   * other command, and any prompt sent without one — always runs, matching
+   * prior behavior. */
+  private dedupeByClientMessageId(clientMessageId: string | undefined, run: () => Promise<unknown>): Promise<unknown> {
+    if (!clientMessageId) return run();
+    this.pruneClientMessageOutcomes();
+    const existing = this.clientMessageOutcomes.get(clientMessageId);
+    if (existing) return existing.promise;
+    const promise = run();
+    const entry = { promise, expiresAt: Date.now() + CLIENT_MESSAGE_ID_TTL_MS };
+    this.clientMessageOutcomes.set(clientMessageId, entry);
+    promise.catch(() => {
+      // Only remove the entry THIS call inserted: a concurrent send that
+      // found no entry (this one already pruned by TTL/cap) and inserted its
+      // own attempt under the same id must not be evicted by this cleanup.
+      if (this.clientMessageOutcomes.get(clientMessageId) === entry) {
+        this.clientMessageOutcomes.delete(clientMessageId);
+      }
+    });
+    return promise;
+  }
+
   async send(command: Record<string, unknown>): Promise<unknown> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
-    if (!this.isAlive()) throw new Error("Session is no longer running");
+    if (!this.isAlive()) throw new WebRpcError("Session is no longer running", "session_dead");
     this.resetIdleTimer();
     const type = command.type as string;
 
@@ -2045,50 +2117,81 @@ export class AgentSessionWrapper {
           throw new Error("Cannot send a prompt while a shell command is running");
         }
         const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
-        if (!streamingBehavior) {
-          this.promptRunning = true;
-          notifyRunningChange();
-        }
-        try {
-          // omp acks immediately; agent output streams as events, completion is
-          // agent_end (agent runs) or prompt_result (local-only slash commands).
-          const ack = await this.proc.sendCommand<{ agentInvoked?: boolean } | undefined>({
-            type: "prompt",
-            message: command.message as string,
-            ...(toImageContents(command.images) ? { images: toImageContents(command.images) } : {}),
-            ...(streamingBehavior ? { streamingBehavior } : {}),
-          }, PROMPT_ACK_TIMEOUT_MS);
-          // Slash commands fully consumed by a builtin report agentInvoked:false
-          // in the ack itself — no prompt_result frame follows.
-          if (ack?.agentInvoked === false && !streamingBehavior) {
-            this.promptRunning = false;
-            this.emit({ type: "prompt_result", agentInvoked: false });
+        const clientMessageId = typeof command.clientMessageId === "string" ? command.clientMessageId : undefined;
+        return this.dedupeByClientMessageId(clientMessageId, async () => {
+          // Authoritative on the wrapper's OWN isRunning(), never the
+          // caller's guess: idle marks promptRunning=true exactly like a
+          // plain prompt; already running is a queue omp settles on its own.
+          // This decides the reported delivery and the promptRunning flip
+          // ONLY — see useAckTimeout below for why it must NOT also gate the
+          // ack-timeout/recycle safety net.
+          const startingFresh = !streamingBehavior || !this.isRunning();
+          if (startingFresh) {
+            this.promptRunning = true;
             notifyRunningChange();
           }
-        } catch (error) {
-          this.promptRunning = false;
-          notifyRunningChange();
-          if (error instanceof RpcCommandTimeoutError) {
-            // The child took the frame but never acked it, so nothing will ever
-            // report this run: recycle it exactly like the mcp-list timeout
-            // path so the next request spawns a fresh child instead of talking
-            // to a wedged one.
-            await this.destroyAndWait();
-            throw new WebRpcError("The session stopped responding and was reset.", "session_unresponsive");
+          // A TRUE plain prompt (no streamingBehavior at all — used only by a
+          // brand-new session spawn, where there is definitionally no prior
+          // turn) is the only case that may ever be timed out and recycled.
+          // isRunning() is NOT reliable enough to gate this for a
+          // streamingBehavior send: the wrapper's flags are eventually
+          // consistent with the child, and there is a real window between
+          // this session's own agent_end and the agent_start of a queued
+          // follow-up it auto-continues where isRunning() reads idle while
+          // the child is still actually busy. Timing out and recycling in
+          // that window would destroy a child mid-turn on nothing more than
+          // a stale flag read — after the HTTP route may have already
+          // answered 202 for this very send.
+          const useAckTimeout = !streamingBehavior;
+          try {
+            // omp acks immediately; agent output streams as events, completion is
+            // agent_end (agent runs) or prompt_result (local-only slash commands).
+            const ack = await this.proc.sendCommand<{ agentInvoked?: boolean } | undefined>({
+              type: "prompt",
+              message: command.message as string,
+              ...(toImageContents(command.images) ? { images: toImageContents(command.images) } : {}),
+              ...(streamingBehavior ? { streamingBehavior } : {}),
+            }, useAckTimeout ? PROMPT_ACK_TIMEOUT_MS : undefined);
+            // Slash commands fully consumed by a builtin report agentInvoked:false
+            // in the ack itself — no prompt_result frame follows.
+            if (ack?.agentInvoked === false && !streamingBehavior) {
+              this.promptRunning = false;
+              this.emit({ type: "prompt_result", agentInvoked: false });
+              notifyRunningChange();
+            }
+          } catch (error) {
+            if (startingFresh) {
+              this.promptRunning = false;
+              notifyRunningChange();
+            }
+            if (useAckTimeout && error instanceof RpcCommandTimeoutError) {
+              // The child took the frame but never acked it, so nothing will ever
+              // report this run: recycle it exactly like the mcp-list timeout
+              // path so the next request spawns a fresh child instead of talking
+              // to a wedged one. Unreachable for any streamingBehavior send (no
+              // timeout was passed above), so a child is never recycled here for
+              // one — idle-looking or genuinely running.
+              await this.destroyAndWait();
+              throw new WebRpcError("The session stopped responding and was reset.", "session_unresponsive");
+            }
+            throw error;
           }
-          throw error;
-        }
-        return null;
+          if (!streamingBehavior) return null;
+          return { delivery: startingFresh ? "started" : "queued", clientMessageId };
+        });
       }
 
       case "steer":
       case "follow_up": {
-        await this.proc.sendCommand({
-          type,
-          message: command.message as string,
-          ...(toImageContents(command.images) ? { images: toImageContents(command.images) } : {}),
+        const clientMessageId = typeof command.clientMessageId === "string" ? command.clientMessageId : undefined;
+        return this.dedupeByClientMessageId(clientMessageId, async () => {
+          await this.proc.sendCommand({
+            type,
+            message: command.message as string,
+            ...(toImageContents(command.images) ? { images: toImageContents(command.images) } : {}),
+          });
+          return null;
         });
-        return null;
       }
 
       case "abort":

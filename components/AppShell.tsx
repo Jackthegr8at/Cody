@@ -45,6 +45,7 @@ import { STORAGE_KEYS } from "@/lib/storage-keys";
 import { createPreviewAutoOpener, type PreviewAutoOpener } from "@/lib/preview-autoopen";
 import { normalizePreviewUrl, probeLoopbackUrl } from "@/lib/preview-url";
 import type { DisplayRequestV1 } from "@/lib/display/types";
+import { clearCachedSessionData } from "@/lib/session-transcript-cache";
 
 // Loaded on demand: the config modals open on click and the file viewer only
 // renders once a file tab exists, so none of them belong in the first-load chunk.
@@ -988,6 +989,10 @@ export function AppShell() {
   }, []);
 
   const handleSessionDeleted = useCallback((sessionId: string) => {
+    // A deleted session must never resolve from the client cache either — it
+    // mirrors lib/session-reader.ts's own rule for its server-side path
+    // cache ("A deleted session must never resolve").
+    clearCachedSessionData(sessionId);
     setRefreshKey((k) => k + 1);
     if (selectedSession?.id === sessionId) {
       const cwd = selectedSession.cwd;

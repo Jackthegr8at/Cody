@@ -405,6 +405,13 @@ export interface EngineSession {
     bashRunning: boolean;
     compacting: boolean;
   };
+  /**
+   * The most recent successful get_state result this session has captured,
+   * for a GET route whose own bounded get_state round trip times out
+   * (lib/api-utils.ts getStateBounded). Optional: an engine whose get_state
+   * is a pure local read (ACP) can never go stale, so it needs no cache.
+   */
+  lastKnownState?(): unknown;
 }
 
 /**

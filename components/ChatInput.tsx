@@ -1,9 +1,9 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, Footprints, Gauge, ListChecks, Loader2, Paperclip, Pin, RefreshCw, ShieldCheck, SlidersHorizontal, Sparkles, Split, Target, TriangleAlert, Zap, ZapOff } from "lucide-react";
+import { AlertTriangle, ChevronDown, Clock, Footprints, Gauge, ListChecks, Loader2, Paperclip, Pin, RefreshCw, ShieldCheck, SlidersHorizontal, Sparkles, Split, Target, TriangleAlert, Zap, ZapOff } from "lucide-react";
 import type { SessionModeOption } from "@/hooks/useAgentSession";
-import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
+import type { OutboxEntry } from "@/lib/outbox";
 import { ALL_CAPABILITIES, OMP_ENGINE_ID, type ActiveEngineInfo, type EngineCapabilities } from "./SettingsTabs";
 
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
@@ -13,8 +13,7 @@ import type { ParsedPresetSelector } from "@/lib/model-presets/selector";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
 import { formatGoalElapsed } from "@/lib/web-mode-state";
 import { toast } from "@/components/ui/toast";
-import { formatCompactNumber, formatRelativeTime, usageToneColor } from "@/lib/format";
-import { QuotaBar } from "@/components/QuotaBar";
+import { formatCompactNumber } from "@/lib/format";
 import { clearDraft, getDraft, setDraft, type ChatDraftFile, type ChatDraftImage } from "@/lib/draft-store";
 import { WEB_SLASH_COMMANDS, expandWebSlashCommand } from "@/lib/web-slash-commands";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
@@ -44,14 +43,9 @@ import {
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useResetCredits, useUsage } from "@/hooks/useUsage";
-import { useOpenRouterAccount, type UseOpenRouterAccountResult } from "@/hooks/useOpenRouterAccount";
-import { OpenRouterCredits } from "./OpenRouterCredits";
-import { rankProviderAccounts, selectBindingWindow, selectWindowsForModel, type AccountEvidence, type ModelRef } from "@/lib/usage/select";
-import { resolveModelAvailability } from "@/lib/usage/availability";
-import type { UsageAccount, UsageAccountService, UsageInUseBasis, UsageSnapshot, UsageWindow, UsageWindowState } from "@/lib/usage/types";
-import { brandAccountLabel } from "@/lib/provider-brand";
+import { useOpenRouterAccount } from "@/hooks/useOpenRouterAccount";
 import { ModelIcon, ProviderIcon } from "./ProviderIcon";
-import { translate, useI18n } from "@/lib/i18n";
+import { useI18n } from "@/lib/i18n";
 import { selectableThinkingLevels } from "@/lib/thinking-levels";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { STORAGE_EVENTS } from "@/lib/storage-keys";
@@ -63,6 +57,7 @@ import { useSettingsOpener } from "./settings/shell-context";
 import { formatModelDisplayName } from "@/lib/model-display";
 import type { SessionActiveModel } from "@/lib/session-active-models";
 import { PromptProfileIndicator, type LocalModelProfileBody } from "./LocalModelProfile";
+import { QuotaPopover, buildQuotaView, isPrepaidProvider, usageProviderFor, modelLimitReached, formatResetTime } from "./QuotaPopover";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix (already compressed if it needed to be)
@@ -89,14 +84,19 @@ const NO_ACTIVE_MODELS: readonly SessionActiveModel[] = [];
 /** Stable empty list keeps the preset section memo-friendly when presets
  *  are unsupported or not yet loaded. */
 const NO_PRESETS: ComposerPresetOption[] = [];
+/** Stable empty list keeps the outbox rows memo-friendly before a session's
+ *  first send. */
+const NO_OUTBOX: OutboxEntry[] = [];
 
 interface Props {
   onSend: (message: string, images?: AttachedImage[]) => void;
   onAbort: () => void;
-  onSteer?: (message: string, images?: AttachedImage[]) => void;
-  onFollowUp?: (message: string, images?: AttachedImage[]) => void;
-  onPromptWithStreamingBehavior?: (message: string, behavior: "steer" | "followUp", images?: AttachedImage[]) => void;
   isStreaming: boolean;
+  /** The engine can accept this send while a turn is running (steer or
+   *  queued follow-up, decided by the Settings submit-during-run preference
+   *  inside the session hook) — Enter/Send still go through `onSend`, this
+   *  only gates whether that is allowed to happen while `isStreaming`. */
+  canSendWhileStreaming?: boolean;
   /** The active session accepts a follow-up/steer while it is running. */
   canAttachWhileStreaming?: boolean;
   /** The active session also accepts image payloads while it is running. */
@@ -203,6 +203,15 @@ interface Props {
   onRemoveQueuedMessage?: (text: string) => void;
   /** Relabel the first queued follow-up as a steering message. */
   onPromoteQueuedToSteer?: (text: string) => void;
+  /** Per-session send outbox (lib/outbox.ts): every send not yet confirmed
+   *  delivered, rendered as a chip/row (sending → queued|started →
+   *  delivered, or failed with Retry + Edit). */
+  outbox?: OutboxEntry[];
+  /** Re-arm a failed outbox entry for an immediate retry attempt. */
+  onRetryOutboxEntry?: (id: string) => void;
+  /** Remove a failed outbox entry and hand its text + images back so the
+   *  composer can restore them for editing. */
+  onEditOutboxEntry?: (id: string) => { text: string; images: OutboxEntry["images"] } | null;
   slashCommands?: SlashCommandInfo[];
   slashCommandsLoading?: boolean;
   onLoadSlashCommands?: () => Promise<SlashCommandInfo[]> | SlashCommandInfo[];
@@ -300,1130 +309,6 @@ function compareModelOptions(collator: Intl.Collator, a: ModelOption, b: ModelOp
   return collator.compare(a.name || a.modelId, b.name || b.modelId)
     || collator.compare(a.provider, b.provider)
     || collator.compare(a.modelId, b.modelId);
-}
-
-export interface QuotaWindowView {
-  key: string;
-  label: string;
-  percent: number;
-  color: string;
-  state: UsageWindowState;
-  exhausted: boolean;
-  resetsAt: string | null;
-}
-
-/** A non-selected window that constrains work still active in this session. */
-export interface QuotaInUseWindowView extends QuotaWindowView {
-  provider: string;
-  uses: SessionActiveModel["uses"];
-}
-
-/** One quota window the ring is deliberately NOT gauging — another provider's
- *  subscription, or another model tier on this one. Reported so a spent window
- *  is never a surprise, but kept out of everything that colours the ring. */
-export interface QuotaOtherWindowView {
-  key: string;
-  /** Engine provider id, so the row can draw its brand mark. */
-  provider: string;
-  /** Account label, already branded ("Codex", never "Openai Codex"). */
-  account: string;
-  /** That account's binding window among the ones not shown above. */
-  label: string;
-  percent: number;
-  state: UsageWindowState;
-  exhausted: boolean;
-  resetsAt: string | null;
-}
-
-/** One account among several serving the same provider as the selected
- *  model. omp routes to exactly one at a time (`serving`); every other
- *  reports `standby`, `limited`, or `disabled`. Rendered only when more than
- *  one account can serve the model — a single-account provider never grows
- *  this list. `label` is a position ("Primary", "Secondary", …), never the
- *  account's raw identity, which can be an email address or an org name. */
-export interface QuotaAccountRowView {
-  key: string;
-  label: string;
-  state: UsageAccountService;
-  percent: number;
-  resetsAt: string | null;
-  planType: string | null;
-}
-
-export interface QuotaKnownView {
-  known: true;
-  /** Engine provider id of the binding account, for the header's brand mark. */
-  provider: string;
-  percent: number;
-  color: string;
-  state: UsageWindowState;
-  label: string;
-  resetsAt: string | null;
-  windows: QuotaWindowView[];
-  /** Non-selected models with work in this session, always expanded. */
-  inUse: QuotaInUseWindowView[];
-  /** Everything the section above does not cover, de-emphasised. */
-  others: QuotaOtherWindowView[];
-  /** Every account able to serve the selected model's provider, in use first.
-   *  Empty unless more than one account can serve it. */
-  accounts: QuotaAccountRowView[];
-  /** What the in-use row rests on; null when there are no account rows. */
-  accountsBasis: UsageInUseBasis | null;
-  fetchedAt: string | null;
-  stale: boolean;
-  /** Subscription name only when the engine reported one. */
-  planType: string | null;
-  /** Banked rate-limit resets remain separate from quota windows. */
-  resetCredits: UsageAccount["resetCredits"];
-}
-
-export interface QuotaAbsentView {
-  known: false;
-  color: string;
-  /** i18n key standing in for the headline percentage's meaning. */
-  titleKey: string;
-  /** i18n key for the explanation under the divider, if any. */
-  noteKey: string | null;
-  /** i18n key for the footer's scope line. */
-  scopeKey: string;
-  /** Engine-supplied prose explaining the gap, when it gave one. */
-  reason: string | null;
-  others: QuotaOtherWindowView[];
-  inUse: QuotaInUseWindowView[];
-}
-
-/** What the ring and the popover's quota half should say. A missing signal is
- *  a distinct shape — never a zero-percent reading — so nothing downstream can
- *  accidentally paint "0%" over an engine that simply does not report limits. */
-export type QuotaView = QuotaKnownView | QuotaAbsentView;
-
-/** The engine answered and reported no plan limits at all. Only reachable from
- *  an actual response — nothing else may claim this about an engine. */
-const QUOTA_UNREPORTED: QuotaAbsentView = {
-  known: false,
-  color: "var(--text-muted)",
-  titleKey: "usage.notReported",
-  noteKey: "usage.notReportedNote",
-  scopeKey: "usage.noQuotaSignal",
-  reason: null,
-  inUse: [],
-  others: [],
-};
-
-/** No quota-reporting account serves the selected model's provider at all — a
- *  local runtime, say. Nothing this model spends is metered anywhere. */
-const QUOTA_MODEL_UNMETERED: QuotaAbsentView = {
-  known: false,
-  color: "var(--text-muted)",
-  titleKey: "usage.modelUnmetered",
-  noteKey: "usage.modelUnmeteredNote",
-  scopeKey: "usage.modelUnmeteredScope",
-  reason: null,
-  inUse: [],
-  others: [],
-};
-
-/** The provider meters spend as a PREPAID BALANCE rather than a refilling
- *  window (OpenRouter). Saying "no plan limits" here would be false — money
- *  runs out, and it is the hardest limit there is — so the ring stays blank
- *  (there is no honest percentage of a balance the user can top up) while the
- *  credit section below states the real number. */
-const QUOTA_MODEL_PREPAID: QuotaAbsentView = {
-  known: false,
-  color: "var(--text-muted)",
-  titleKey: "usage.prepaidTitle",
-  noteKey: null,
-  scopeKey: "usage.prepaidScope",
-  reason: null,
-  inUse: [],
-  others: [],
-};
-
-/** Providers that bill a prepaid balance instead of a refilling plan window,
- *  and therefore have a credit balance worth reading. Exported so the composer
- *  gates its OpenRouter poll on the SAME predicate the quota view branches on:
- *  a model that shows the prepaid state must be a model whose balance was
- *  fetched, or the popover says "prepaid" and then shows nothing. */
-export function isPrepaidProvider(provider: string | null | undefined): boolean {
-  return typeof provider === "string" && provider.trim().toLowerCase() === "openrouter";
-}
-
-/** omp's own models already carry the provider id `/api/usage` reports
- *  accounts under ("anthropic", "openai-codex", ...). An ACP engine (Claude
- *  Code, Codex) instead reports every one of ITS models under its own
- *  engine id as `provider` (`lib/harness/acp-session.ts`'s `resolvedModel()`
- *  sets `provider: this.spec.id`), so a bare "claude-opus-4-5" or "gpt-5.1"
- *  needs translating before it means anything to the usage snapshot. */
-const ACP_ENGINE_USAGE_PROVIDER: Record<string, string> = {
-  claude: "anthropic",
-  codex: "openai-codex",
-};
-
-/**
- * The omp usage-provider id that actually meters a model, or null when Cody
- * cannot say so with confidence.
- *
- * Deliberately conservative: only omp itself (whose models already carry the
- * right id) and the two ACP engines above translate, and only when the
- * option's own provider IS that engine's id — never a guess for Pi, Hermes,
- * or any other engine. A wrong guess would mark a healthy model exhausted,
- * or hide a real exhaustion; showing nothing is the safe wrong answer,
- * mismarking is not.
- */
-export function usageProviderFor(engineId: string | null | undefined, modelProvider: string): string | null {
-  if (engineId === OMP_ENGINE_ID) return modelProvider;
-  if (!engineId || modelProvider !== engineId) return null;
-  return ACP_ENGINE_USAGE_PROVIDER[engineId] ?? null;
-}
-
-/**
- * Whether the model picker should mark one option as spent, for ANY engine.
- *
- * `resolveModelAvailability` is already account-aware — a model reads
- * "exhausted" only when every account able to serve it is, so a healthy
- * sibling account never earns a mark here. This only adds the engine→provider
- * translation on top, and only marks on a positive "exhausted" verdict:
- * "unknown" (no mapping, or the snapshot has nothing to say) and "warning"
- * both render nothing extra, same as a model with quota on another account.
- */
-export function modelLimitReached(
-  snapshot: UsageSnapshot | null | undefined,
-  engineId: string | null | undefined,
-  optProvider: string,
-  optModelId: string,
-): { resetsAt: string | null } | null {
-  if (!snapshot?.available) return null;
-  const usageProvider = usageProviderFor(engineId, optProvider);
-  if (!usageProvider) return null;
-  const availability = resolveModelAvailability(snapshot, usageProvider, optModelId);
-  return availability.state === "exhausted" ? { resetsAt: availability.resetsAt ?? null } : null;
-}
-
-/** The provider DOES report quota and none of it constrains this model (every
- *  window it reports is scoped to another model tier). Emphatically not the
- *  same as "no limits reported": the quota exists, it just cannot stop this
- *  model, and saying the former would hide a real limit the next model hits. */
-const QUOTA_MODEL_UNCONSTRAINED: QuotaAbsentView = {
-  known: false,
-  color: "var(--text-muted)",
-  titleKey: "usage.modelUnconstrained",
-  noteKey: "usage.modelUnconstrainedNote",
-  scopeKey: "usage.modelUnconstrainedScope",
-  reason: null,
-  inUse: [],
-  others: [],
-};
-
-/** Cody never got an answer: the first read has not landed, or the last one
- *  failed (server restarting, proxy error page). Says nothing about the
- *  engine's limits, because nothing has established anything about them. */
-const QUOTA_UNAVAILABLE: QuotaAbsentView = {
-  known: false,
-  color: "var(--text-muted)",
-  titleKey: "usage.unavailableTitle",
-  noteKey: "usage.unavailableNote",
-  scopeKey: "usage.unavailableScope",
-  reason: null,
-  inUse: [],
-  others: [],
-};
-
-/** A read is out and nothing has come back yet. */
-const QUOTA_CHECKING: QuotaAbsentView = {
-  known: false,
-  color: "var(--text-muted)",
-  titleKey: "usage.checking",
-  noteKey: null,
-  scopeKey: "usage.checkingScope",
-  reason: null,
-  inUse: [],
-  others: [],
-};
-
-/** Machine reason codes ("engine_unsupported") must not reach the popover;
- *  only a sentence the server actually wrote for a human does. */
-function readableReason(reason: string | null | undefined): string | null {
-  if (typeof reason !== "string") return null;
-  const trimmed = reason.trim();
-  return trimmed.includes(" ") && trimmed.length <= 200 ? trimmed : null;
-}
-
-function clampQuotaPercent(value: number): number {
-  if (!Number.isFinite(value)) return 0;
-  return Math.max(0, Math.min(100, value));
-}
-
-/** Severity ranking for the de-emphasised list: a refused window outranks a
- *  merely-full one, exactly as lib/usage/select ranks the binding one. */
-const OTHER_STATE_RANK: Record<UsageWindowState, number> = { exhausted: 2, warning: 1, ok: 0 };
-
-function accountWindowKey(accountIndex: number, account: UsageAccount, window: Pick<UsageWindow, "id">): string {
-  return accountIndex + ":" + account.provider + ":" + window.id;
-}
-
-/** "Primary" / "Secondary" / "Account {n}" — never the raw identity, which
- *  can be an email address or an organization name the composer must not
- *  print. */
-function accountPositionLabel(position: number): string {
-  if (position === 0) return translate("usage.accountPrimary");
-  if (position === 1) return translate("usage.accountSecondary");
-  return translate("usage.accountNth", { n: position + 1 });
-}
-
-/** Brand name, plus a position discriminator when this account's provider
- *  has more than one — e.g. "Claude · Secondary". Built from the provider id
- *  and ORIGINAL snapshot position only, so it never touches `label`/`identity`. */
-function brandedAccountLabel(accounts: UsageAccount[], account: UsageAccount): string {
-  const brand = brandAccountLabel(account.provider, account.provider);
-  const siblings = accounts.filter((candidate) => candidate.provider === account.provider);
-  return siblings.length > 1 ? `${brand} · ${accountPositionLabel(siblings.indexOf(account))}` : brand;
-}
-
-/** Tone for each per-account state chip — accent for the account in use,
- *  muted for a healthy standby, the shared error tone for anything blocked
- *  (limited or disabled alike). */
-const ACCOUNT_STATE_COLOR: Record<UsageAccountService, string> = {
-  in_use: "var(--accent)",
-  standby: "var(--text-muted)",
-  limited: "var(--status-error)",
-  disabled: "var(--status-error)",
-};
-
-/** i18n key for each per-account state chip's label. */
-const ACCOUNT_STATE_LABEL_KEYS: Record<UsageAccountService, string> = {
-  in_use: "usage.accountInUse",
-  standby: "usage.accountStandby",
-  limited: "usage.accountLimited",
-  disabled: "usage.accountDisabled",
-};
-
-/** The one line under the account list saying what "In use" rests on. */
-const ACCOUNT_BASIS_NOTE_KEYS: Record<UsageInUseBasis, string> = {
-  session: "usage.accountsBasisSession",
-  recent: "usage.accountsBasisRecent",
-  expected: "usage.accountsBasisExpected",
-};
-
-/** What this conversation says about which account serves `provider`: the
- *  account omp recorded for its latest reply, if it has used the provider.
- *  Otherwise nothing — omp routes a conversation's first request by quota
- *  headroom, so another conversation's account is no evidence here. */
-function sessionEvidence(snapshot: UsageSnapshot, provider: string): AccountEvidence {
-  return { inUseAccountId: snapshot.sessionAccounts?.[provider]?.accountId ?? null };
-}
-
-function isSelectedModel(active: SessionActiveModel, selected: ModelRef): boolean {
-  return active.provider.trim().toLocaleLowerCase() === selected.provider.trim().toLocaleLowerCase()
-    && active.modelId.trim() === selected.modelId.trim();
-}
-
-function mergeModelUses(target: SessionActiveModel["uses"], incoming: SessionActiveModel["uses"]): void {
-  for (const use of incoming) {
-    if (!target.some((candidate) => candidate.kind === use.kind && candidate.label === use.label)) {
-      target.push({ kind: use.kind, label: use.label });
-    }
-  }
-}
-
-/**
- * Windows for concrete non-selected models with attributable session work.
- * A shared provider window is rendered once with every reason it is active;
- * tiered windows remain separate, exactly like the selected model's rows.
- */
-function buildInUseWindows(
-  accounts: UsageAccount[],
-  primary: { account: UsageAccount; windows: UsageWindow[] } | null,
-  activeModels: readonly SessionActiveModel[],
-  selectedModel: ModelRef,
-  nameWindow: (account: UsageAccount, windowLabel: string) => string,
-  evidenceFor: (provider: string) => AccountEvidence,
-): QuotaInUseWindowView[] {
-  const primaryAccountIndex = primary ? accounts.indexOf(primary.account) : -1;
-  const primaryKeys = new Set(
-    primary && primaryAccountIndex >= 0
-      ? primary.windows.map((window) => accountWindowKey(primaryAccountIndex, primary.account, window))
-      : [],
-  );
-  const rows = new Map<string, QuotaInUseWindowView>();
-
-  for (const active of activeModels) {
-    if (isSelectedModel(active, selectedModel) || active.uses.length === 0) continue;
-    // Subagents inherit their parent's account affinity (omp copies it at
-    // spawn), so the conversation's evidence applies to their models too.
-    const match = selectWindowsForModel(accounts, active, evidenceFor(active.provider));
-    if (!match) continue;
-    const accountIndex = accounts.indexOf(match.account);
-    if (accountIndex < 0) continue;
-
-    for (const quotaWindow of match.windows) {
-      const key = accountWindowKey(accountIndex, match.account, quotaWindow);
-      if (primaryKeys.has(key)) continue;
-      const existing = rows.get(key);
-      if (existing) {
-        mergeModelUses(existing.uses, active.uses);
-        continue;
-      }
-      const percent = clampQuotaPercent(quotaWindow.utilization);
-      rows.set(key, {
-        key,
-        provider: match.account.provider,
-        label: nameWindow(match.account, quotaWindow.label),
-        percent,
-        color: usageToneColor(percent, quotaWindow.state),
-        state: quotaWindow.state,
-        exhausted: quotaWindow.state === "exhausted",
-        resetsAt: quotaWindow.resetsAt,
-        uses: active.uses.map((use) => ({ kind: use.kind, label: use.label })),
-      });
-    }
-  }
-
-  return [...rows.values()].sort((a, b) => (
-    (OTHER_STATE_RANK[b.state] ?? 0) - (OTHER_STATE_RANK[a.state] ?? 0) || b.percent - a.percent
-  ));
-}
-
-/**
- * Everything the selected model and the active-session rows do not cover,
- * one binding row per account. These limits remain visible, but explicitly
- * cannot stop the selected model.
- */
-function buildOtherWindows(
-  accounts: UsageAccount[],
-  primary: { account: UsageAccount; windows: UsageWindow[] } | null,
-  inUseKeys: ReadonlySet<string>,
-  excludeProvider: string | null = null,
-): QuotaOtherWindowView[] {
-  const primaryAccountIndex = primary ? accounts.indexOf(primary.account) : -1;
-  const primaryKeys = new Set(
-    primary && primaryAccountIndex >= 0
-      ? primary.windows.map((window) => accountWindowKey(primaryAccountIndex, primary.account, window))
-      : [],
-  );
-  const rows: QuotaOtherWindowView[] = [];
-  accounts.forEach((account, index) => {
-    if (!account) return;
-    if (excludeProvider !== null && account.provider === excludeProvider) return;
-    const leftover = (account.windows ?? []).filter((window): window is UsageWindow => (
-      Boolean(window)
-      && !primaryKeys.has(accountWindowKey(index, account, window))
-      && !inUseKeys.has(accountWindowKey(index, account, window))
-    ));
-    // Same comparator as the ring's own pick, so the row a user reads first is
-    // the one that would stop them first on that account.
-    const binding = selectBindingWindow([{ ...account, windows: leftover }]);
-    if (!binding) return;
-    rows.push({
-      key: accountWindowKey(index, account, binding.window),
-      provider: account.provider,
-      account: brandedAccountLabel(accounts, account),
-      label: binding.window.label,
-      percent: clampQuotaPercent(binding.window.utilization),
-      state: binding.window.state,
-      exhausted: binding.window.state === "exhausted",
-      resetsAt: binding.window.resetsAt,
-    });
-  });
-  return rows.sort((a, b) => (
-    (OTHER_STATE_RANK[b.state] ?? 0) - (OTHER_STATE_RANK[a.state] ?? 0) || b.percent - a.percent
-  ));
-}
-/** Turns the usage snapshot into the ring's states. Pure, so the thresholds and
- *  the absence cases are testable without a DOM.
- *
- *  Quota is per provider, so the ring answers for the SELECTED model: an
- *  exhausted week on another provider says nothing about whether this model can
- *  run, and letting it drive the ring makes the gauge scream about a resource
- *  the conversation does not spend. With no model selected there is nothing to
- *  scope to, and the account-wide reading stands.
- *
- *  Absence comes in five flavours and they must not be conflated: still
- *  checking, could-not-read (never loaded, or the last read failed), the engine
- *  having genuinely answered "no limits here", this model's provider reporting
- *  no limits, and this model's provider reporting limits none of which apply to
- *  it. Only an actual answer is entitled to say anything about the engine. */
-export function buildQuotaView(
-  snapshot: UsageSnapshot | null,
-  loading: boolean,
-  failed = false,
-  model?: ModelRef | null,
-  activeModels: readonly SessionActiveModel[] = NO_ACTIVE_MODELS,
-): QuotaView {
-  if (!snapshot) {
-    // A first read still in flight says "checking"; once one has failed, the
-    // retries keep saying "could not read" rather than flipping back to
-    // "checking" every poll. Neither one may speak for the engine.
-    if (loading && !failed) return QUOTA_CHECKING;
-    return QUOTA_UNAVAILABLE;
-  }
-  const accounts = snapshot.accounts ?? [];
-  if (!snapshot.available || accounts.length === 0) {
-    return { ...QUOTA_UNREPORTED, reason: readableReason(snapshot.reason) };
-  }
-  // Every account the engine reports is unlimited (a local runtime, say):
-  // there is no quota to gauge, which is different from having no signal.
-  if (accounts.every((account) => account.unlimited)) {
-    return {
-      known: false,
-      color: "var(--text-muted)",
-      titleKey: "usage.unlimitedTitle",
-      noteKey: "usage.unlimitedNote",
-      scopeKey: "usage.unlimited",
-      reason: readableReason(snapshot.reason),
-      inUse: [],
-      others: [],
-    };
-  }
-
-  // One account needs no disambiguation; several do, so each window carries
-  // the account it belongs to — under its brand name, which is how the owner
-  // knows the subscription ("Claude", not "Anthropic").
-  const multipleAccounts = accounts.length > 1;
-  const nameWindow = (account: UsageAccount, windowLabel: string) => {
-    if (!multipleAccounts) return windowLabel;
-    const accountLabel = brandedAccountLabel(accounts, account);
-    return accountLabel ? `${accountLabel} · ${windowLabel}` : windowLabel;
-  };
-
-  if (model) {
-    const evidenceFor = (provider: string) => sessionEvidence(snapshot, provider);
-    const ranks = rankProviderAccounts(accounts, model.provider, model.modelId, evidenceFor(model.provider));
-    // The ring reads the account in use (ranks[0]); taking it from the same
-    // ranking the list below renders guarantees they name the same account.
-    const match = ranks[0] ? { account: ranks[0].account, windows: ranks[0].windows } : null;
-    // windows[0] is the pick selectBindingWindowForModel makes — taking it here
-    // selects once over the snapshot instead of twice, and guarantees the ring
-    // and the list below it name the same window.
-    const modelBinding = match?.windows[0] ?? null;
-    const inUse = buildInUseWindows(accounts, match, activeModels, model, nameWindow, evidenceFor);
-    // Only worth listing when more than one account can actually serve this
-    // model — a single-account provider has nothing to disambiguate.
-    const providerAccounts = accounts.filter((account) => account.provider === model.provider);
-    const accountRows: QuotaAccountRowView[] = providerAccounts.length > 1
-      ? ranks.map((rank) => ({
-          key: rank.account.id,
-          label: accountPositionLabel(providerAccounts.indexOf(rank.account)),
-          state: rank.state,
-          percent: clampQuotaPercent(rank.binding?.utilization ?? 0),
-          resetsAt: rank.binding?.resetsAt ?? null,
-          planType: rank.account.planType,
-        }))
-      : [];
-    const accountsBasis = accountRows.length > 0 ? (ranks.find((rank) => rank.state === "in_use")?.basis ?? null) : null;
-    const others = buildOtherWindows(
-      accounts,
-      match,
-      new Set(inUse.map((entry) => entry.key)),
-      accountRows.length > 1 ? model.provider : null,
-    );
-    const reason = readableReason(snapshot.reason);
-
-    if (!match || !modelBinding) {
-      // A prepaid gateway is not a silence at all — it meters spend, just not
-      // in windows. It has to be checked BEFORE the unmetered fallback, which
-      // would otherwise claim "nothing it runs counts against a quota" about
-      // an account that is literally spending money per token.
-      if (isPrepaidProvider(model.provider)) return { ...QUOTA_MODEL_PREPAID, inUse, others };
-      // Three different silences, and the copy has to tell them apart: no
-      // account serves this provider / the account is unmetered / the account
-      // reports quota that all belongs to other models.
-      const providerReportsQuota = match !== null
-        && match.account.unlimited !== true
-        && (match.account.windows ?? []).some(Boolean);
-      return providerReportsQuota
-        ? { ...QUOTA_MODEL_UNCONSTRAINED, reason, inUse, others }
-        : { ...QUOTA_MODEL_UNMETERED, reason, inUse, others };
-    }
-
-    const accountIndex = accounts.indexOf(match.account);
-    const modelPercent = clampQuotaPercent(modelBinding.utilization);
-    return {
-      known: true,
-      provider: match.account.provider,
-      percent: modelPercent,
-      color: usageToneColor(modelPercent, modelBinding.state),
-      state: modelBinding.state,
-      label: nameWindow(match.account, modelBinding.label),
-      resetsAt: modelBinding.resetsAt,
-      // Already most-binding-first from the selector, and left in that order:
-      // the row a user reads first is the one that stops them first.
-      windows: match.windows.map((quotaWindow) => {
-        const percent = clampQuotaPercent(quotaWindow.utilization);
-        return {
-          key: `${accountIndex}:${match.account.provider}:${quotaWindow.id}`,
-          label: nameWindow(match.account, quotaWindow.label),
-          percent,
-          color: usageToneColor(percent, quotaWindow.state),
-          state: quotaWindow.state,
-          exhausted: quotaWindow.state === "exhausted",
-          resetsAt: quotaWindow.resetsAt,
-        };
-      }),
-      others,
-      accounts: accountRows,
-      accountsBasis,
-      inUse,
-      fetchedAt: snapshot.fetchedAt ?? null,
-      stale: snapshot.stale === true,
-      planType: match.account.planType,
-      resetCredits: match.account.resetCredits,
-    };
-  }
-
-  const binding = selectBindingWindow(accounts);
-  if (!binding) return { ...QUOTA_UNREPORTED, reason: readableReason(snapshot.reason) };
-
-  const windows: QuotaWindowView[] = accounts
-    // Window ids are unique only WITHIN an account, so two subscriptions on
-    // one provider can report the same id. The row key carries the account's
-    // position too — the list is re-sorted on every refresh, and duplicate
-    // keys freeze the second account's row on stale numbers.
-    .flatMap((account, accountIndex) => (account.windows ?? []).map((quotaWindow) => {
-      const percent = clampQuotaPercent(quotaWindow.utilization);
-      return {
-        key: `${accountIndex}:${account.provider}:${quotaWindow.id}`,
-        label: nameWindow(account, quotaWindow.label),
-        percent,
-        color: usageToneColor(percent, quotaWindow.state),
-        state: quotaWindow.state,
-        exhausted: quotaWindow.state === "exhausted",
-        resetsAt: quotaWindow.resetsAt,
-      };
-    }))
-    .sort((a, b) => b.percent - a.percent);
-
-  const percent = clampQuotaPercent(binding.window.utilization);
-  return {
-    known: true,
-    provider: binding.account.provider,
-    percent,
-    color: usageToneColor(percent, binding.window.state),
-    state: binding.window.state,
-    label: nameWindow(binding.account, binding.window.label),
-    resetsAt: binding.window.resetsAt,
-    windows,
-    // The account-wide list above already shows every window there is.
-    inUse: [],
-    others: [],
-    accounts: [],
-    accountsBasis: null,
-    fetchedAt: snapshot.fetchedAt ?? null,
-    stale: snapshot.stale === true,
-    planType: binding.account.planType,
-    resetCredits: binding.account.resetCredits,
-  };
-}
-
-/** "18:20" for a reset later today, "Sun 09:00" once it crosses a day —
- *  matching how MessageView renders wall-clock times. */
-function formatResetTime(iso: string | null, locale: string, now: number): string | null {
-  if (!iso) return null;
-  const at = new Date(iso);
-  const ts = at.getTime();
-  if (!Number.isFinite(ts)) return null;
-  const sameDay = at.toDateString() === new Date(now).toDateString();
-  return sameDay
-    ? at.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })
-    : at.toLocaleString(locale, { weekday: "short", hour: "2-digit", minute: "2-digit" });
-}
-/** Usage-window labels are presentation text, unlike opaque plan and model
- * identifiers. Give case-aware locales a readable capital to every visible
- * window segment without changing the reported value itself. */
-function formatQuotaLabel(label: string, locale: string): string {
-  return label.replace(/(^|·\s*)(\p{Ll})/gu, (_match, prefix: string, letter: string) => prefix + letter.toLocaleUpperCase(locale));
-}
-
-/** One window row: label / % / bar / reset. The primary list and the "not
- *  counted" list share this exact layout — the de-emphasised rows are the same
- *  design at a quieter volume, never a bar-less footnote. */
-function QuotaWindowRow({
-  icon,
-  label,
-  percent,
-  color,
-  exhausted,
-  resetsAt,
-  now,
-  uses,
-  muted = false,
-}: {
-  icon?: React.ReactNode;
-  label: string;
-  percent: number;
-  /** Bar fill; muted rows pass their quieter tone here, exhausted ones red. */
-  color: string;
-  exhausted: boolean;
-  resetsAt: string | null;
-  now: number;
-  /** Compact attribution for a window used by another live session model. */
-  uses?: readonly string[];
-  muted?: boolean;
-}) {
-  const { t, locale } = useI18n();
-  const reset = formatResetTime(resetsAt, locale, now);
-  const displayLabel = formatQuotaLabel(label, locale);
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-          {icon}
-          <div style={{
-            fontSize: muted ? 11 : 12,
-            fontWeight: 600,
-            color: muted ? "var(--text-muted)" : "var(--text)",
-            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
-          }}>
-            {displayLabel}
-          </div>
-          {exhausted && (
-            <div style={{
-              flexShrink: 0,
-              fontSize: 9, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase",
-              color: "var(--status-error)",
-              border: "1px solid var(--status-error)",
-              borderRadius: 999,
-              padding: "1px 5px",
-              whiteSpace: "nowrap",
-            }}>
-              {t("usage.exhausted")}
-            </div>
-          )}
-        </div>
-        <div style={{
-          flexShrink: 0,
-          fontSize: muted ? 11 : 12,
-          fontWeight: 700,
-          // A muted row's number stays quiet too — unless it is exhausted,
-          // which keeps the error tone at full volume in both places.
-          color: muted && !exhausted ? "var(--text-muted)" : color,
-          fontVariantNumeric: "tabular-nums",
-        }}>
-          {`${Math.round(percent)}%`}
-        </div>
-      </div>
-      <QuotaBar percent={percent} color={color} dimmed={muted && !exhausted} />
-      {uses && uses.length > 0 && (
-        <div style={{ fontSize: 10, lineHeight: 1.35, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {uses.join(", ")}
-        </div>
-      )}
-      {reset && (
-        <div style={{ fontSize: 10, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
-          {t("usage.resetsAt", { time: reset })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** The quota ring's popover keeps the selected model primary while spelling
- *  out every other model with attributable work in this session. Context usage
- *  and token traffic live in the top bar. Exported so SSR tests can render it
- *  open, which the composer's own state never is. */
-export function QuotaPopover({
-  resetCredits,
-  openRouter,
-  quota,
-  activeModels = NO_ACTIVE_MODELS,
-  provider,
-  modelName,
-  now,
-  failed = false,
-  refreshing = false,
-  onRefresh,
-  anchorTop = null,
-  anchorRight = null,
-}: {
-  resetCredits?: ReturnType<typeof useResetCredits>;
-  /** Concrete models with work attributable to this session. */
-  activeModels?: readonly SessionActiveModel[];
-  /** OpenRouter's prepaid balance when it is selected or actively used by this
-   * session. Absent otherwise: subscription providers have no credit balance
-   * and must not grow a gateway section. */
-  openRouter?: UseOpenRouterAccountResult;
-  quota: QuotaView;
-  /** Selected model's provider, naming the header before anything binds. */
-  provider: string | null;
-  modelName: string | null;
-  now: number;
-  /** The last usage read did not land. The numbers on screen are the previous
-   * good ones, and saying "updated 2 min ago" about them would be a claim the
-   * read never supported. */
-  failed?: boolean;
-  /** A read is in flight right now, so the age is about to change. */
-  refreshing?: boolean;
-  /** Re-read usage on demand. The ring is a snapshot of a moving number: the
-   * only honest answer to "is this current?" is a way to ask again. */
-  onRefresh?: () => void;
-  anchorTop?: number | null;
-  anchorRight?: number | null;
-}) {
-  const { t, locale } = useI18n();
-  const formatUse = (use: SessionActiveModel["uses"][number]): string => {
-    if (use.kind === "main") return t("usage.useMain", { label: use.label });
-    if (use.kind === "smart") return t("usage.useSmart", { label: use.label });
-    if (use.kind === "subagent") return t("usage.useSubagent", { label: use.label });
-    return t("usage.useFallback", { label: use.label });
-  };
-  const openRouterUses: SessionActiveModel["uses"] = [];
-  for (const active of activeModels) {
-    if (isPrepaidProvider(active.provider)) mergeModelUses(openRouterUses, active.uses);
-  }
-  const openRouterSessionLabel = !isPrepaidProvider(provider) && openRouterUses.length > 0
-    ? t("usage.openRouterInUse", { uses: openRouterUses.map(formatUse).join(", ") })
-    : null;
-  const hasSessionUsage = quota.inUse.length > 0 || openRouterSessionLabel !== null;
-  const [resetSelection, setResetSelection] = useState<{ accountId: string; creditId: string; account: string } | null>(null);
-  const resetPendingRef = useRef(false);
-  const redeemSelectedReset = useCallback(async () => {
-    if (!resetSelection || !resetCredits || resetPendingRef.current) return;
-    resetPendingRef.current = true;
-    try {
-      const outcome = await resetCredits.redeem(resetSelection.accountId, resetSelection.creditId);
-      if (outcome.outcome === "reset" || outcome.outcome === "already_redeemed") {
-        toast.success(t("usage.resetCreditUsed", { account: resetSelection.account }));
-      } else if (outcome.outcome === "no_credit" || outcome.outcome === "nothing_to_reset") {
-        toast.info(outcome.message ?? t("usage.resetCreditUnavailable"));
-      } else {
-        toast.error(t("usage.resetCreditFailed"), outcome.message ?? t("usage.resetCreditInconclusive"));
-      }
-      setResetSelection(null);
-      resetCredits.refresh();
-    } catch {
-      toast.error(t("usage.resetCreditFailed"), t("usage.resetCreditInconclusive"));
-    } finally {
-      resetPendingRef.current = false;
-    }
-  }, [resetCredits, resetSelection, t]);
-  const resetAccounts = resetCredits?.snapshot?.accounts ?? [];
-  const availableResetCount = resetAccounts.reduce((count, account) => count + account.availableCount, 0);
-  // The total remains visible even at zero. Per-account rows only earn their
-  // space when they can explain a positive balance, an expiry, or a failure.
-  const visibleResetAccounts = resetAccounts.filter((account) =>
-    (account.availableCount > 0 || Boolean(account.error))
-    && (resetAccounts.length > 1 || account.canRedeem || account.credits.length > 0 || Boolean(account.error)),
-  );
-  // Named exactly like the account list above ("Claude · Primary"), never by
-  // the organization/email string omp reports, which the composer must not
-  // print and which truncates to nothing useful anyway.
-  const resetAccountLabel = (account: (typeof resetAccounts)[number]): string => {
-    if (!account.provider || account.position === undefined) return account.label;
-    const siblings = resetAccounts.filter((candidate) => candidate.provider === account.provider).length;
-    const brand = brandAccountLabel(account.provider, account.provider);
-    return siblings > 1 ? `${brand} · ${accountPositionLabel(account.position)}` : brand;
-  };
-  const percentText = quota.known ? t("usage.percentUsed", { percent: Math.round(quota.percent) }) : t("usage.unavailable");
-  const headlineReset = quota.known ? formatResetTime(quota.resetsAt, locale, now) : null;
-  const age = quota.known && quota.fetchedAt ? formatRelativeTime(quota.fetchedAt, locale, now) : null;
-  // Three different things, and the footer must not conflate them: a read
-  // that just landed, a snapshot the server itself flagged as possibly out of
-  // date, and a read that FAILED — where the numbers on screen are the last
-  // good ones and their age is the age of that read, not of an answer.
-  const freshness = refreshing
-    ? t("usage.refreshing")
-    : failed
-      ? (age ? t("usage.refreshFailedAge", { ago: age }) : t("usage.refreshFailed"))
-      : age
-        ? [t("usage.updatedAgo", { ago: age }), quota.known && quota.stale ? t("usage.stale") : null]
-          .filter(Boolean).join(" · ")
-        : null;
-  const anchor = anchorTop != null && anchorRight != null ? { top: anchorTop, right: anchorRight } : null;
-
-  return (
-    <div
-      role="dialog"
-      aria-label={t("usage.title")}
-      className="dropdown-surface"
-      style={anchor ? {
-        // Detach to the viewport: a composer control row can be narrower than
-        // its visual viewport. Keep the trigger alignment where it fits, then
-        // clamp both horizontal edges to the same 8px gutter.
-        position: "fixed",
-        bottom: (window.visualViewport?.height ?? window.innerHeight) - anchor.top + 6,
-        left: `clamp(8px, ${anchor.right - 320}px, calc(100% - 328px))`,
-        zIndex: 500,
-        width: 320,
-        maxWidth: "calc(100% - 16px)",
-        maxHeight: Math.max(0, anchor.top - 6 - 8),
-        overflowY: "auto",
-      } : {
-        position: "absolute",
-        right: 0,
-        bottom: "calc(100% + 8px)",
-        zIndex: 120,
-        width: 320,
-        maxWidth: "calc(100vw - 32px)",
-      }}
-    >
-      <div style={anchor
-        ? { padding: 16 }
-        : { maxHeight: "min(400px, calc(100vh - 120px))", overflowY: "auto", padding: 16 }}>
-        {/* Header — whose quota (brand mark + model) and the binding number. */}
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <ProviderIcon
-            provider={quota.known ? quota.provider : provider}
-            size={14}
-            style={{ flexShrink: 0, color: "var(--text-muted)" }}
-          />
-          <div style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 700, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {modelName ? t("usage.titleForModel", { model: modelName }) : t("usage.title")}
-          </div>
-          <div style={{ flexShrink: 0, fontSize: 14, fontWeight: 700, color: quota.color, fontVariantNumeric: "tabular-nums" }}>
-            {percentText}
-          </div>
-        </div>
-        {/* The headline always names the window it is quoting — a bare
-            percentage would not say what ran out. */}
-        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8, marginTop: 4 }}>
-          <div style={{ minWidth: 0, fontSize: 12, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {quota.known ? formatQuotaLabel(quota.label, locale) : t(quota.titleKey)}
-          </div>
-          {headlineReset && (
-            <div style={{ flexShrink: 0, fontSize: 12, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
-              {t("usage.resetsAt", { time: headlineReset })}
-            </div>
-          )}
-        </div>
-        {/* No bar without a reading: an empty track reads as 0%. */}
-        {quota.known && (
-          <div style={{ marginTop: 8 }}>
-            <QuotaBar percent={quota.percent} color={quota.color} />
-          </div>
-        )}
-        {quota.known && quota.planType && (
-          <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-muted)" }}>
-            {t("usage.reportedPlan", { plan: quota.planType })}
-          </div>
-        )}
-        {/* One compact row per account able to serve this model's provider:
-            the one in use, then standby. The window list above belongs to the
-            account in use only. */}
-        {quota.known && quota.accounts.length > 1 && (
-          <section style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)" }}>
-              {t("usage.accountsHeading", { count: quota.accounts.length })}
-            </div>
-            <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
-              {quota.accounts.map((account) => {
-                const tone = ACCOUNT_STATE_COLOR[account.state];
-                const reset = account.state === "limited" ? formatResetTime(account.resetsAt, locale, now) : null;
-                const stateLabel = reset
-                  ? t("usage.accountLimited", { time: reset })
-                  : t(ACCOUNT_STATE_LABEL_KEYS[account.state]);
-                return (
-                  <div key={account.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                      <div style={{
-                        fontSize: 12, fontWeight: 600, color: "var(--text)",
-                        whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
-                      }}>
-                        {account.label}
-                      </div>
-                      <div style={{
-                        flexShrink: 0,
-                        fontSize: 9, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase",
-                        color: tone,
-                        border: `1px solid ${tone}`,
-                        borderRadius: 999,
-                        padding: "1px 5px",
-                        whiteSpace: "nowrap",
-                      }}>
-                        {stateLabel}
-                      </div>
-                    </div>
-                    <div style={{ flexShrink: 0, fontSize: 12, fontWeight: 700, color: tone, fontVariantNumeric: "tabular-nums" }}>
-                      {`${Math.round(account.percent)}%`}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-            {quota.accountsBasis && (
-              <div style={{ marginTop: 8, fontSize: 11, lineHeight: 1.45, color: "var(--text-dim)" }}>
-                {t(ACCOUNT_BASIS_NOTE_KEYS[quota.accountsBasis])}
-              </div>
-            )}
-          </section>
-        )}
-        {/* The balance sits directly under the headline, before banked resets
-            and other providers' windows: for an OpenRouter model it is THE
-            number that decides whether the next turn runs, so it must not be
-            below the fold of a 320px popover. */}
-        {openRouter && <OpenRouterCredits account={openRouter} usageLabel={openRouterSessionLabel ?? undefined} />}
-        {resetCredits && (
-          <section style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>
-              {t("usage.savedResets", { count: availableResetCount })}
-            </div>
-            <div style={{ marginTop: 4, fontSize: 11, lineHeight: 1.45, color: "var(--text-dim)" }}>
-              {t(availableResetCount === 0 ? "usage.savedResetsEmpty" : "usage.savedResetsNote")}
-            </div>
-            {resetCredits.loading && !resetCredits.snapshot && (
-              <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-muted)" }}>{t("usage.resetCreditChecking")}</div>
-            )}
-            {visibleResetAccounts.map((account) => {
-              const credit = account.credits[0];
-              const expiry = credit ? formatResetTime(credit.expiresAt, locale, now) : null;
-              const confirming = resetSelection?.accountId === account.id;
-              const label = resetAccountLabel(account);
-              const checked = account.stale && account.checkedAt ? formatRelativeTime(account.checkedAt, locale, now) : null;
-              return (
-                <div key={account.id} style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid color-mix(in srgb, var(--border) 60%, transparent)" }}>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                    <span style={{ minWidth: 0, fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
-                    <span style={{ flexShrink: 0, fontSize: 12, fontVariantNumeric: "tabular-nums", color: "var(--text-muted)" }}>
-                      {account.retrying ? "—" : t("usage.resetCount", { count: account.availableCount })}
-                    </span>
-                  </div>
-                  {expiry && <div style={{ marginTop: 2, fontSize: 11, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>{t("usage.expiresAt", { time: expiry })}</div>}
-                  {credit?.title && <div style={{ marginTop: 2, fontSize: 11, color: "var(--text-muted)" }}>{credit.title}</div>}
-                  {checked && <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)" }}>{t("usage.resetCreditAsOf", { time: checked })}</div>}
-                  {account.retrying
-                    ? <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)" }}>{t("usage.resetCreditRetrying")}</div>
-                    : account.error && <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)" }}>{account.error}</div>}
-                  {!account.error && !account.canRedeem && account.reason && <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)" }}>{account.reason}</div>}
-                  {credit && account.canRedeem && !confirming && (
-                    <button type="button" onClick={() => setResetSelection({ accountId: account.id, creditId: credit.id, account: label })} style={{ marginTop: 6, padding: "3px 7px", border: "1px solid var(--border)", borderRadius: 5, background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 10 }}>
-                      {t("usage.useReset")}
-                    </button>
-                  )}
-                  {confirming && (
-                    <div style={{ marginTop: 6, padding: 7, borderRadius: 6, background: "var(--bg-hover)", fontSize: 10, lineHeight: 1.45, color: "var(--text-muted)" }}>
-                      <div>{t("usage.resetCreditConfirm", { account: label })}</div>
-                      <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 6 }}>
-                        <button type="button" onClick={() => setResetSelection(null)} disabled={resetCredits.redeeming} style={{ padding: "3px 7px", border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 10 }}>{t("usage.cancelReset")}</button>
-                        <button type="button" onClick={() => void redeemSelectedReset()} disabled={resetCredits.redeeming} style={{ padding: "3px 7px", border: "none", borderRadius: 5, background: "var(--accent-strong)", color: "var(--on-accent)", cursor: resetCredits.redeeming ? "wait" : "pointer", fontSize: 10 }}>{t("usage.useOneReset")}</button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-            {resetCredits.snapshot && !resetCredits.snapshot.available && (
-              <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-muted)" }}>{resetCredits.snapshot.reason ?? t("usage.resetCreditUnavailable")}</div>
-            )}
-          </section>
-        )}
-
-        {/* Every OTHER window that constrains this model, most binding first —
-            the binding one is already the headline above, and repeating it as
-            the first row read as clutter (owner pass, 2026-08). Matched by
-            label+reset rather than position: the account-wide view sorts its
-            list by fullness, so the headline is not always windows[0]. */}
-        {quota.known && quota.windows.some((entry) => entry.label !== quota.label || entry.resetsAt !== quota.resetsAt) && (
-          <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: 12 }}>
-            {quota.windows.filter((entry) => entry.label !== quota.label || entry.resetsAt !== quota.resetsAt).map((entry) => (
-              <QuotaWindowRow
-                key={entry.key}
-                label={entry.label}
-                percent={entry.percent}
-                color={entry.color}
-                exhausted={entry.exhausted}
-                resetsAt={entry.resetsAt}
-                now={now}
-              />
-            ))}
-          </div>
-        )}
-
-        {!quota.known && (quota.noteKey || quota.reason) && (
-          <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)", fontSize: 11, lineHeight: 1.5, color: "var(--text-muted)" }}>
-            {quota.noteKey ? t(quota.noteKey) : quota.reason}
-            {quota.noteKey && quota.reason && (
-              <div style={{ marginTop: 4, color: "var(--text-dim)" }}>{quota.reason}</div>
-            )}
-          </div>
-        )}
-
-        {/* Non-selected models in this session remain visible without ever
-            changing the selected model's ring. This is a section, not details:
-            routing work is active context, not optional diagnostics. */}
-        {quota.inUse.length > 0 && (
-          <section style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)" }}>
-              {t("usage.alsoInUseSummary", { count: quota.inUse.length })}
-            </div>
-            <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 12 }}>
-              {quota.inUse.map((entry) => (
-                <QuotaWindowRow
-                  key={entry.key}
-                  label={entry.label}
-                  percent={entry.percent}
-                  color={entry.color}
-                  exhausted={entry.exhausted}
-                  resetsAt={entry.resetsAt}
-                  uses={entry.uses.map(formatUse)}
-                  now={now}
-                />
-              ))}
-            </div>
-          </section>
-        )}
-
-        {/* Everything the model above is NOT charged against — other
-            providers' subscriptions and this one's other tiers. Same row
-            design as the list above, dimmed: a spent window here must stay
-            visible, and must never colour the ring. */}
-        {quota.others.length > 0 && (
-          <details style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
-            <summary style={{ cursor: "pointer", fontSize: 11, fontWeight: 700, color: "var(--text-muted)" }}>
-              {t("usage.otherLimitsSummary", { count: quota.others.length })}
-            </summary>
-            <div style={{ marginTop: 8, fontSize: 11, lineHeight: 1.45, color: "var(--text-dim)" }}>
-              {t("usage.notForThisModelNote")}
-            </div>
-            <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 12 }}>
-              {quota.others.map((entry) => (
-                <QuotaWindowRow
-                  key={entry.key}
-                  icon={<ProviderIcon provider={entry.provider} size={11} style={{ flexShrink: 0, color: "var(--text-dim)" }} />}
-                  label={t("usage.notForThisModelRow", { account: entry.account, window: entry.label })}
-                  percent={entry.percent}
-                  color={entry.exhausted ? "var(--status-error)" : "var(--text-dim)"}
-                  exhausted={entry.exhausted}
-                  resetsAt={entry.resetsAt}
-                  now={now}
-                  muted
-                />
-              ))}
-            </div>
-          </details>
-        )}
-
-        {/* Footer — the primary window is all-session; the added section is
-            explicitly scoped to this run, and the age says how old the
-            reading is with a way to take a new one. */}
-        <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)", display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8, fontSize: 11, color: failed ? "var(--status-warning)" : "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
-          <div style={{ minWidth: 0 }}>
-            {[
-              !quota.known ? t(quota.scopeKey) : provider ? t("usage.modelScope") : t("usage.accountWide"),
-              hasSessionUsage ? t("usage.sessionInUseScope") : null,
-              freshness,
-            ].filter(Boolean).join(" · ")}
-          </div>
-          {onRefresh && (
-            <button
-              type="button"
-              data-testid="usage-refresh"
-              onClick={onRefresh}
-              disabled={refreshing}
-              title={t("usage.refresh")}
-              aria-label={t("usage.refresh")}
-              style={{
-                flexShrink: 0, display: "flex", alignItems: "center", gap: 4,
-                background: "none", border: "none", padding: "2px 4px", borderRadius: 5,
-                color: "var(--text-dim)", cursor: refreshing ? "default" : "pointer",
-                fontSize: 11, fontWeight: 400,
-              }}
-            >
-              <RefreshCw size={11} strokeWidth={1.8} className={refreshing ? "icon-spin" : undefined} aria-hidden="true" />
-              {t("usage.refresh")}
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
 }
 
 const THINKING_LEVEL_DESC_KEYS: Record<string, string> = {
@@ -1708,14 +593,16 @@ function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; plan?: A
 }
 
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, canAttachWhileStreaming = false, canAttachImagesWhileStreaming = false, capabilities = ALL_CAPABILITIES, engine = null, model, sessionId, activeModels = NO_ACTIVE_MODELS, isAutoModelSelection, modelNames, modelList, modelError, modelErrorCode, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, localOnly, onSelectLocalOnly, presets = NO_PRESETS, baseDefaultModel = null, activePresetId, pendingPresetPick = null, onPresetChange, autoModelSwitch, modelSwitchPending, modelChangeWhileStreaming = false, fastModeEnabled, fastModeActive, fastModeCapable, fastModeSupported, fastModePending, fastModeUnavailable, onFastModeChange,
+  onSend, onAbort, isStreaming, canSendWhileStreaming = false, canAttachWhileStreaming = false, canAttachImagesWhileStreaming = false, capabilities = ALL_CAPABILITIES, engine = null, model, sessionId, activeModels = NO_ACTIVE_MODELS, isAutoModelSelection, modelNames, modelList, modelError, modelErrorCode, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, localOnly, onSelectLocalOnly, presets = NO_PRESETS, baseDefaultModel = null, activePresetId, pendingPresetPick = null, onPresetChange, autoModelSwitch, modelSwitchPending, modelChangeWhileStreaming = false, fastModeEnabled, fastModeActive, fastModeCapable, fastModeSupported, fastModePending, fastModeUnavailable, onFastModeChange,
   onAbortCompaction, isCompacting, compactResult,
   thinkingLevel, onThinkingLevelChange, thinkingLevelPending, thinkingLevelTarget, availableModes = NO_MODES, currentModeId = null, onModeChange, availableThinkingLevels, modelNameOverride,
   retryInfo, queuedMessages, inputHistory = [], onAbortRetry,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
   onAudioUnlock,
-  onPromptWithStreamingBehavior,
+  outbox = NO_OUTBOX,
+  onRetryOutboxEntry,
+  onEditOutboxEntry,
   onRemoveQueuedMessage,
   onPromoteQueuedToSteer,
   draftKey,
@@ -2206,26 +1093,58 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       setPreparingImageCount((count) => Math.max(0, count - 1));
     }
   }, [attachedImages, budgetError, preparingImageCount, t]);
+  // Re-entrancy guard: a second Enter while the first send's image prep or
+  // builtin command is still awaiting would snapshot the same composer text
+  // again and send it twice. The guard covers only that window; once the
+  // send is dispatched it releases, so queued sends go out in order.
+  const sendInFlightRef = useRef(false);
   const handleSend = useCallback(async () => {
     const msg = value.trim();
     if (!msg && !attachedImages.length && !attachedTextFiles.length) return;
-    if (isStreaming) return;
+    // The engine that cannot take a message mid-run says so through the
+    // waiting strip; Enter must not silently eat the text there.
+    if (isStreaming && !canSendWhileStreaming) return;
     // An image still being prepared is not in the outgoing frame yet.
     if (preparingImageCount > 0) return;
-    onAudioUnlock?.();
-    const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFiles);
-    const outgoingImages = await prepareOutgoingImages(composedMessage);
-    if (outgoingImages === null) return;
-    if (!outgoingImages.length && !attachedTextFiles.length && msg.startsWith("/") && onBuiltinCommand) {
-      const result = await onBuiltinCommand(msg);
-      if (result.handled) {
-        if (!result.error && !result.retainInput) clearInput();
+    if (sendInFlightRef.current) return;
+    sendInFlightRef.current = true;
+    try {
+      onAudioUnlock?.();
+      const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFiles);
+      const outgoingImages = await prepareOutgoingImages(composedMessage);
+      if (outgoingImages === null) return;
+      if (!isStreaming && !outgoingImages.length && !attachedTextFiles.length && msg.startsWith("/") && onBuiltinCommand) {
+        const result = await onBuiltinCommand(msg);
+        if (result.handled) {
+          if (!result.error && !result.retainInput) clearInput();
+          return;
+        }
+      }
+      if (isStreaming && !outgoingImages.length && !attachedTextFiles.length && msg.startsWith("/")) {
+        // Mid-run there is no builtin-command path; a web command expands to
+        // its prompt, a usage error keeps the text for the missing argument,
+        // and anything else goes to the engine verbatim.
+        const expansion = expandWebSlashCommand(msg);
+        if (expansion.kind === "usage-error") {
+          toast.error(t("chatInput.commandUsageTitle"), t("agentSession.commandRequiresArgs", {
+            command: expansion.command,
+            usage: t(expansion.argumentHintKey),
+          }));
+          return;
+        }
+        clearInput();
+        onSend(expansion.kind === "expand" ? expansion.prompt : composedMessage, undefined);
         return;
       }
+      // The composer clears IMMEDIATELY: from here the message lives in the
+      // session outbox (sending → queued|started → delivered, or failed with
+      // Retry/Edit), never in a promise the caller awaits before clearing.
+      clearInput();
+      onSend(composedMessage, outgoingImages.length ? outgoingImages : undefined);
+    } finally {
+      sendInFlightRef.current = false;
     }
-    onSend(composedMessage, outgoingImages.length ? outgoingImages : undefined);
-    clearInput();
-  }, [value, attachedImages, attachedTextFiles, isStreaming, preparingImageCount, prepareOutgoingImages, onBuiltinCommand, onSend, clearInput, onAudioUnlock]);
+  }, [value, attachedImages, attachedTextFiles, isStreaming, canSendWhileStreaming, preparingImageCount, prepareOutgoingImages, onBuiltinCommand, onSend, clearInput, onAudioUnlock, t]);
 
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
@@ -2496,38 +1415,30 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     });
   }, []);
 
-  const queuedSubmitRef = useRef(false);
-  const sendQueued = useCallback(async (mode: "steer" | "followup") => {
-    const deliver = mode === "steer" ? onSteer : onFollowUp;
-    const msg = value.trim();
-    if (!deliver || queuedSubmitRef.current || preparingImageCount > 0) return;
-    if (!msg && !attachedImages.length && !attachedTextFiles.length) return;
-    queuedSubmitRef.current = true;
-    try {
-      const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFiles);
-      const outgoingImages = await prepareOutgoingImages(composedMessage);
-      if (outgoingImages === null) return;
-      onAudioUnlock?.();
-      if (!outgoingImages.length && !attachedTextFiles.length && msg.startsWith("/") && onPromptWithStreamingBehavior) {
-        const expansion = expandWebSlashCommand(msg);
-        if (expansion.kind === "usage-error") {
-          toast.error(t("chatInput.commandUsageTitle"), t("agentSession.commandRequiresArgs", {
-            command: expansion.command,
-            usage: t(expansion.argumentHintKey),
-          }));
-          return;
-        }
-        await onPromptWithStreamingBehavior(expansion.kind === "expand" ? expansion.prompt : msg, mode === "steer" ? "steer" : "followUp");
-      } else {
-        await deliver(composedMessage, outgoingImages.length ? outgoingImages : undefined);
-      }
-      clearInput();
-    } catch {
-      // The session reports its error. Keep the complete draft, including images.
-    } finally {
-      queuedSubmitRef.current = false;
-    }
-  }, [value, attachedImages, attachedTextFiles, preparingImageCount, prepareOutgoingImages, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, t]);
+  // ── Send outbox rows ────────────────────────────────────────────────────
+  // The per-session outbox (lib/outbox.ts) is where every composer send
+  // lives from the moment the composer clears until the engine has it:
+  // sending → queued|started → delivered, or failed with Retry + Edit.
+  const handleOutboxEdit = useCallback((id: string) => {
+    const restored = onEditOutboxEntry?.(id);
+    if (!restored) return;
+    setValue(restored.text);
+    setAttachedImages((prev) => {
+      prev.forEach(revokeImagePreview);
+      return draftImagesToAttachedImages(restored.images);
+    });
+    setAttachError(null);
+    setAtQuery(null);
+    setHistoryMenuOpen(false);
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current;
+      if (!ta) return;
+      ta.focus();
+      ta.setSelectionRange(restored.text.length, restored.text.length);
+      ta.style.height = "auto";
+      ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
+    });
+  }, [onEditOutboxEntry]);
 
   // ── Queued follow-up bar ────────────────────────────────────────────────
   // omp reports only a queued count over RPC; the texts are tracked in a
@@ -2725,18 +1636,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
-        if (isStreaming && (onSteer || onFollowUp)) {
-          // Submit-during-run behavior comes from Settings (Steer current run
-          // by default, or Queue follow-up); no in-composer selector.
-          const behavior = getSubmitDuringRunBehavior();
-          if ((behavior === "steer" || !onFollowUp) && onSteer) void sendQueued("steer");
-          else void sendQueued("followup");
-        } else {
-          handleSend();
-        }
+        // Enter always sends, running or not. What a mid-run send means
+        // (steer vs. queued follow-up) is the Settings submit-during-run
+        // preference, resolved inside the session hook — and whether the
+        // engine accepts one at all is `canSendWhileStreaming`, which
+        // handleSend also checks.
+        void handleSend();
       }
     },
-    [isStreaming, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value]
+    [isStreaming, onAbort, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value]
   );
 
   const handleInput = useCallback(() => {
@@ -3882,6 +2790,80 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             </QueuedActionButton>
           </div>
         )}
+        {/* Send outbox rows — where each composer send lives from the moment
+            the composer clears until the engine has it: sending → queued or
+            started → delivered (briefly), or failed with Retry + Edit.
+            Nothing a user typed is ever silently dropped. */}
+        {outbox.filter((entry) => entry.status !== "delivered").map((entry, index) => {
+          const failed = entry.status === "failed";
+          return (
+            <div
+              key={entry.id}
+              data-testid="outbox-row"
+              data-outbox-status={entry.status}
+              role="status"
+              style={{
+                border: "1px solid var(--border)",
+                borderBottom: "none",
+                borderRadius: index === 0 ? "var(--radius-card) var(--radius-card) 0 0" : 0,
+                background: failed ? "color-mix(in srgb, var(--status-error) 6%, var(--bg-panel))" : "var(--bg-panel)",
+                padding: "5px 8px 5px 12px",
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                minWidth: 0,
+              }}
+            >
+              {failed
+                ? <AlertTriangle size={11} strokeWidth={2.2} style={{ flexShrink: 0, color: "var(--status-error)" }} aria-hidden="true" />
+                : entry.status === "queued"
+                  ? <Clock size={11} strokeWidth={2.2} style={{ flexShrink: 0, color: "var(--text-dim)" }} aria-hidden="true" />
+                  : <Loader2 size={11} strokeWidth={2.2} style={{ flexShrink: 0, animation: "spin 0.8s linear infinite" }} aria-hidden="true" />}
+              <span style={{
+                flexShrink: 0,
+                fontSize: 10,
+                fontWeight: 600,
+                letterSpacing: "0.06em",
+                textTransform: "uppercase",
+                color: failed ? "var(--status-error)" : "var(--text-muted)",
+              }}>
+                {failed ? t("chatInput.outboxFailed")
+                  : entry.status === "queued" ? t("chatInput.outboxQueued")
+                  : entry.status === "started" ? t("chatInput.outboxStarted")
+                  : t("chatInput.outboxSending")}
+              </span>
+              <span
+                title={entry.error ?? entry.text}
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  fontSize: 12,
+                  color: "var(--text-muted)",
+                }}
+              >
+                {entry.text}
+              </span>
+              {failed && (
+                <>
+                  <QueuedActionButton
+                    onClick={() => onRetryOutboxEntry?.(entry.id)}
+                    title={t("chatInput.outboxRetryTitle")}
+                    accent
+                  >
+                    <RefreshCw size={10} strokeWidth={2.2} aria-hidden="true" style={{ marginRight: 3 }} />
+                    {t("chatInput.outboxRetry")}
+                  </QueuedActionButton>
+                  <QueuedActionButton onClick={() => handleOutboxEdit(entry.id)} title={t("chatInput.outboxEditTitle")}>
+                    {t("chatInput.outboxEdit")}
+                  </QueuedActionButton>
+                </>
+              )}
+            </div>
+          );
+        })}
           <div
             className="chat-input-shell"
             style={{

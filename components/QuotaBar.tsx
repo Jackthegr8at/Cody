@@ -24,9 +24,9 @@ export function clampQuotaPercent(value: number): number {
 /** The one bar geometry every quota row shares: 4px track, pill radius. The
  *  de-emphasised rows dim the fill rather than changing shape, so the whole
  *  popover (or panel) reads as one system. */
-export function QuotaBar({ percent, color, dimmed = false }: { percent: number; color: string; dimmed?: boolean }) {
+export function QuotaBar({ percent, color, dimmed = false, height = 4 }: { percent: number; color: string; dimmed?: boolean; height?: number }) {
   return (
-    <div style={{ height: 4, overflow: "hidden", borderRadius: 999, background: "var(--border)" }}>
+    <div style={{ height, overflow: "hidden", borderRadius: 999, background: "var(--border)" }}>
       <div style={{
         width: `${percent}%`,
         height: "100%",

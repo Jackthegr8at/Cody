@@ -7,6 +7,8 @@ import {
   listAllSessionInfos,
   loadSessionFile,
   readSessionHeaderSync,
+  type LoadedSession,
+  type LoadSessionOptions,
   type OmpSessionInfo,
 } from "./omp/session-files";
 import type {
@@ -394,6 +396,82 @@ function loadSessionEntriesCached(filePath: string): SessionEntry[] {
 /** Session entries without blob resolution (fine for reference/thinking scans). */
 export function getSessionEntries(filePath: string): SessionEntry[] {
   return loadSessionEntriesCached(filePath);
+}
+
+/** loadSessionFile() memoized on (path, size, mtimeMs, resolveBlobs,
+ * skipToolResultImages). The main transcript route (GET /api/sessions/[id])
+ * re-reads and re-parses the WHOLE file — including blob resolution — on
+ * every session switch, even when nothing on disk changed since the last
+ * view: measured ~0.4-1.6s per request on a 20+ MB real session, EVERY
+ * time, with no caching. Same (path, size, mtimeMs) convention as
+ * loadSessionEntriesCached above, but a SEPARATE cache: that one never
+ * resolves blobs, and is shared with read-only scans that must not
+ * receive blob-inflated content by accident. The options are part of the
+ * key because deferMedia (skipToolResultImages) changes what gets parsed
+ * into the result, not just how it is rendered afterward.
+ *
+ * Callers must treat the returned LoadedSession as immutable — entries are
+ * SHARED across cache hits. Every caller downstream (buildSessionTree,
+ * buildSessionContext, entryToUiMessage, normalizeToolCalls, …) already
+ * only reads entries and returns new objects, never mutates them in place —
+ * the same assumption loadSessionEntriesCached above already relies on.
+ */
+interface LoadedSessionCacheEntry {
+  size: number;
+  mtimeMs: number;
+  loaded: LoadedSession;
+}
+
+declare global {
+  var __ompLoadedSessionCache: Map<string, LoadedSessionCacheEntry> | undefined;
+}
+
+// Smaller than MAX_SESSION_ENTRIES_CACHE_ENTRIES above: an entry here can
+// hold blob-resolved (base64-inflated) content, so it costs more memory per
+// slot for an image-heavy session.
+const MAX_LOADED_SESSION_CACHE_ENTRIES = 8;
+
+function getLoadedSessionCache(): Map<string, LoadedSessionCacheEntry> {
+  if (!globalThis.__ompLoadedSessionCache) globalThis.__ompLoadedSessionCache = new Map();
+  return globalThis.__ompLoadedSessionCache;
+}
+
+function loadedSessionCacheKey(filePath: string, options: LoadSessionOptions): string {
+  return `${filePath}\u0000${options.resolveBlobs ? "1" : "0"}\u0000${options.skipToolResultImages ? "1" : "0"}`;
+}
+
+export function loadSessionFileCached(filePath: string, options: LoadSessionOptions = {}): LoadedSession {
+  const key = loadedSessionCacheKey(filePath, options);
+  let size: number;
+  let mtimeMs: number;
+  try {
+    const stat = statSync(filePath);
+    size = stat.size;
+    mtimeMs = stat.mtimeMs;
+  } catch {
+    // Missing/unreadable file — mirror loadSessionFile's lenient empty result.
+    return loadSessionFile(filePath, options);
+  }
+  const cache = getLoadedSessionCache();
+  const cached = cache.get(key);
+  if (cached && cached.size === size && cached.mtimeMs === mtimeMs) {
+    cache.delete(key);
+    cache.set(key, cached);
+    return cached.loaded;
+  }
+  const loaded = loadSessionFile(filePath, options);
+  // Only cache a successfully parsed session: a too-large/malformed result is
+  // cheap to reproduce, and pinning it would waste a slot forever if the
+  // underlying condition was transient (e.g. a torn concurrent write).
+  if (loaded.header) {
+    cache.set(key, { size, mtimeMs, loaded });
+    while (cache.size > MAX_LOADED_SESSION_CACHE_ENTRIES) {
+      const oldestKey = cache.keys().next().value;
+      if (oldestKey === undefined) break;
+      cache.delete(oldestKey);
+    }
+  }
+  return loaded;
 }
 
 function parseTodoPhases(value: unknown): TodoPhase[] | null {

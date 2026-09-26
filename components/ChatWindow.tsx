@@ -802,7 +802,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     liveModelMeta, smartPinnedModel, availableModes, currentModeId,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactResult, compactionStatus, displayModel: displayModelValue, sessionStats,
-    slashCommands, slashCommandsLoading, queuedMessages,
+    slashCommands, slashCommandsLoading, queuedMessages, outbox,
     notices, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     permissionRequests, respondToPermission,
     isAutoModelSelection, autoModelSwitch, modelSwitchPending, localOnly, selectLocalOnly,
@@ -811,10 +811,12 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     isNew,
     sessionIdRef, messagesEndRef, scrollContainerRef, followingRef, readerAnchorRef, readerHoldsTail,
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, selectSmartModel,
-    handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
+    handleSteer, handleAbortCompaction,
+    handleRetryOutboxEntry, handleEditOutboxEntry,
     removeQueuedMessage, promoteQueuedToSteer,
     handleBuiltinSlashCommand,
     handleThinkingLevelChange, handleModeChange, handleFastModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
+    retryLoadSession,
   } = useAgentSession({
     session, newSessionCwd, advisorEnabled, subagentsCapable, engineName: engine?.shortName, thinkingDefaultExpanded, onAgentEnd: wrappedOnAgentEnd, onSessionNamed, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
@@ -1203,9 +1205,10 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       ref={chatInputRef}
       onSend={handleSend}
       onAbort={handleAbort}
-      onSteer={steerWhileRunning}
-      onFollowUp={chatExtras && agentRunning ? handleFollowUp : undefined}
-      onPromptWithStreamingBehavior={chatExtras && agentRunning ? handlePromptWithStreamingBehavior : undefined}
+      canSendWhileStreaming={(chatExtras || steeringSupported) && agentRunning}
+      outbox={outbox}
+      onRetryOutboxEntry={handleRetryOutboxEntry}
+      onEditOutboxEntry={handleEditOutboxEntry}
       isStreaming={sessionBusy}
       canAttachWhileStreaming={(chatExtras || steeringSupported) && agentRunning}
       canAttachImagesWhileStreaming={(chatExtras || (steeringSupported && promptCapabilities.imageSupported)) && agentRunning}
@@ -1316,8 +1319,25 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
 
   if (error) {
     return (
-      <div role="alert" className="flex h-full items-center justify-center" style={{ color: "var(--accent-strong)", padding: "0 16px", textAlign: "center", fontSize: 13 }}>
-        {error}
+      <div role="alert" className="flex h-full flex-col items-center justify-center gap-3" style={{ color: "var(--accent-strong)", padding: "0 16px", textAlign: "center", fontSize: 13 }}>
+        <span>{error}</span>
+        <button
+          type="button"
+          onClick={retryLoadSession}
+          className="ui-smooth ui-focus-ring"
+          style={{
+            flexShrink: 0,
+            cursor: "pointer",
+            padding: "3px 8px",
+            borderRadius: "var(--radius-control)",
+            border: "1px solid var(--border)",
+            background: "var(--bg-panel)",
+            color: "var(--text)",
+            fontSize: 11,
+          }}
+        >
+          {t("agentSession.retryLoad")}
+        </button>
       </div>
     );
   }

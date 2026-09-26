@@ -1796,6 +1796,14 @@ re-use a grant across sessions.
   no device, ask the user to use the Devices panel's browser picker. Web Serial
   is unavailable on Android, where the WebUSB serial polyfill is used when
   available; browser/OS/driver support is reported rather than assumed.
+- **A BLE UUID reaches the browser only as a full 128-bit string or an
+  assigned name** (`canonicalBleUuid`, lib/devices/client.ts). Web Bluetooth
+  accepts a 16/32-bit alias only as a NUMBER; the STRING `"0x18f0"` makes
+  `BluetoothUUID.getService` throw, and Android Chrome fails the whole
+  `requestDevice` picker on it ("Invalid Service name"). Every hex alias is
+  expanded onto the Bluetooth base UUID before `requestDevice`,
+  `getPrimaryService` or `getCharacteristic`, whatever form the agent or
+  the user typed. Verified against headless Chromium's own `BluetoothUUID`.
 - **Grants, identity, and leases are strict.** A device is owned by one session;
   raw requests and a high-level operation hold mutually exclusive leases.
   Re-adoption is limited to the same full USB VID/PID/serial identity. A device
@@ -2069,6 +2077,21 @@ handled or safely ignored.
   and an accent sparkle beside the model name read as "auto-picked".
 - **Display names and picker controls stay presentation-only.** `formatModelDisplayName()` in `lib/model-display.ts` is the shared display boundary for the composer, transcript, and usage surfaces; it may improve a catalog label but never changes the routing identifier. Fast remains beside the existing Composer model picker, and its adjacent Manage models gear opens Settings › Models. Only Smart is pinned; the ordinary named-model list has no sticky selection.
 - **Composer quota is model-scoped, but the popup covers the whole session.** The RING gauges the selected/live model: select usage windows for that model; a reported tier explicitly scopes its bucket even when it is also marked shared; only untiered buckets apply to the account as a whole. Render the raw engine-reported plan without inferring a `$tier` convention. Saved resets are a separate single summary that keeps explicit zero visible; only meaningful positive account rows expand it. Under Smart routing, subagents and fallback chains other providers consume quota in the same session, so `lib/session-active-models.ts` derives every model in use this run (live model, Smart resolution, each subagent's `resolvedModel`, fallback `to`, this run's assistant turns) and the popup renders their windows EXPANDED under "Also in use", each attributed to what uses it ("Subagent scout (research)", "Fallback for this conversation"); OpenRouter credits appear the same way when only a subagent rides that gateway. Limits nothing in the session touches stay in the collapsed "Other limits" section that says they cannot stop the selected model.
+- **The popover is a hierarchy, not a report** (`components/QuotaPopover.tsx`).
+  The owner runs several accounts per provider and many models, and the old
+  popover gave every fact equal weight: about 800 px of cards, pills and
+  explanation paragraphs over the transcript. The order is fixed:
+  1. The selected model, with its % used, and one meter for the BINDING
+     window (the tightest one on the serving account). Other windows get
+     one line each.
+  2. Accounts, only when there is more than one: one line each. "Use reset"
+     sits on a limited account's own row when that account holds a credit.
+  3. Also in use, one line each.
+  4. Saved resets and other limits, collapsed.
+  5. A one-line freshness footer.
+
+  Explanations live in tooltips, never inline, and colour marks state only.
+  About 320 px tall collapsed.
 - **The ring says whose quota it is, and how old the reading is.** With more
   than one account on a provider, every window label carries the account's
   POSITION (`brandedAccountLabel` → "Claude · Primary · 5-hour window"), and
@@ -2181,6 +2204,47 @@ handled or safely ignored.
 - The sidebar listens to `/api/agent/running/events`, backed by `subscribeRunningSessions()` in `lib/rpc-manager.ts`, so running badges update without polling.
 - `useAgentSession` still treats per-session SSE as primary for chat events, but while a run is active it periodically calls `GET /api/agent/[id]` and also reconciles on `visibilitychange`/`online`. This fixes missed `agent_end` events from background tabs or half-open connections.
 - Prompt runs use a monotonic run id; late SSE or slow reconciliation responses from an old run must be ignored so they cannot resurrect stale streaming bubbles.
+
+### Sending during a run: one pipeline, an outbox, and no silent drops
+
+Three owner reports shared one root: the composer guessed whether a turn was
+running, and every wrong guess lost a message. Enter during a turn left the
+text in the box, a steer "hung" and then showed up after a refresh, and a
+second Enter was silently ignored while the first was in flight.
+
+- **The engine decides, not the client.** An existing session is sent a
+  `prompt` with `streamingBehavior` ("steer" | "followUp", from the Settings
+  submit-during-run preference). omp starts a run when idle and queues the
+  message when streaming. The wrapper marks `promptRunning` for the idle case
+  exactly as it does for a plain prompt. A plain `prompt` without
+  `streamingBehavior` sent while omp is streaming is ACKED and then fails
+  asynchronously with AgentBusyError on an already-settled id, so the message
+  vanishes. Never send one to an existing session.
+- **Every send carries a `clientMessageId`**, and the wrapper memoizes its
+  outcome (10 min). A repeat id rejoins the first promise and never re-sends
+  to omp, so client retries are safe by construction.
+- **The route waits a bounded time for the ack** and otherwise answers 202
+  `pending` while the command stays in flight; the client re-POSTs the same
+  id to learn the outcome. A steer, follow-up or queued-prompt ack timeout
+  never recycles the child: only the idle plain-prompt no-ack path may,
+  because only there is nothing running to lose.
+- **omp serializes ordinary RPC commands** (`RpcInputDispatcher`), so one
+  slow command delays every later one, get_state included. GET routes
+  therefore bound `get_state` and fall back to the wrapper's last known state
+  plus the live flags it tracks itself, marked `stale`, instead of hanging a
+  session switch behind someone else's command.
+- **Client outbox** (`lib/outbox.ts`, sessionStorage per session). The
+  composer clears immediately; each message moves sending → queued/started →
+  delivered, or ends failed with Retry and Edit (Edit restores text and
+  images). Retries on network error, 202, 409 `session_restarting` and 503
+  back off up to 2 minutes, then stop at failed. Nothing is ever dropped
+  without a visible row, and unfinished entries resume after reload or
+  switching back.
+- **A delivered user message always renders.** `message_end` with role
+  `user` is appended even when the client believes no run is active (the
+  old `agentRunningRef` guard dropped steers that landed after a missed
+  `agent_start`). It is deduped against the transcript and resolves the
+  first matching outbox and queue entry.
 
 ### Composer-attached panels (`components/ComposerPanels.tsx`)
 - The live todo plan (`TodoList`) and the subagent roster live **pinned above
@@ -2418,6 +2482,35 @@ handled or safely ignored.
   side still self-heals separately: `signalWhenSessionFileAppears()` in
   `lib/rpc-manager.ts` polls for the file after `agent_start` and re-signals
   the sidebar once it lands.
+
+### Session switching: paint from cache, never wait on the engine
+
+The owner saw slow switches and sessions that stayed blank, even after a
+refresh, until a turn finished. Three causes, each measured on a real 21 MB
+session:
+
+- **The transcript never waits for engine state.** `loadSession` fetches the
+  transcript and `/state` concurrently and releases the loading gate when the
+  TRANSCRIPT settles. Gating it on the state fetch is what kept a session
+  blank: state rides omp's serialized RPC queue, so it can sit behind a
+  running turn's command for the whole turn.
+- **Server: parse once per file version.** `loadSessionFileCached`
+  (lib/session-reader.ts) memoizes the parse by path, size, mtime and load
+  options. The ownership check runs before any hit. Repeat GETs went from
+  0.9–1.6 s to 0.04–0.19 s.
+- **Client: stale-while-revalidate across switches.**
+  `lib/session-transcript-cache.ts` (12 sessions, 15 min) lives above the
+  per-switch remount, so a revisited session paints before any request
+  (2.4–3.0 s → ~0.45 s) and then refreshes. Deleting a session clears its
+  entry.
+- **A switch aborts the old session's requests** (AbortController per
+  mount), so a slow response from the session you left can never land on the
+  one you opened.
+- **An inconclusive read is not "idle".** A `stale` state without a
+  snapshot never finishes a running turn in `reconcileAgentState`. If the
+  server says running but has no fresh state, the SSE stream still connects,
+  so live frames are not dropped. A failed reload keeps what is painted and
+  posts a notice; a first load that fails shows Retry, never a blank pane.
 
 ### Chat scroll: a follower is pinned to the tail, a reader is pinned to their content
 - Two states, one flag (`completionScrollAllowedRef`, "following"). Following:
