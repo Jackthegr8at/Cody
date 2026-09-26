@@ -1,5 +1,10 @@
 # Cody - Development Notes
 
+> **Jack's maintained fork:** In this checkout, follow
+> [docs/fork-workflow.md](docs/fork-workflow.md) for Git remotes, branch and
+> publishing decisions. The upstream-only Git workflow below does not authorize
+> pushes to nphil's repository or automatic releases from this fork.
+
 > Owner workflow preferences (release discipline, delegation/token strategy,
 > deployment context) live in **CLAUDE.md**; this file is the codebase map.
 

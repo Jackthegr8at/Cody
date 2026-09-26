@@ -1,5 +1,11 @@
 # CLAUDE.md — project preferences for agents working on Cody
 
+> **Maintained-fork override:** This checkout is Jack's fork integration. Use
+> [docs/fork-workflow.md](docs/fork-workflow.md) for remotes, branches, PRs and
+> publishing. The upstream owner's `main`/forge release rules below describe
+> nphil's repositories; they do not authorize pushing there or publishing from
+> this fork's `main` before its workflows are adapted.
+
 Architecture and codebase knowledge live in **AGENTS.md** (read it first) and
 `docs/harnesses.md`. This file is the owner's workflow preferences — the
 rules that govern *how* to work on this repo, regardless of which agent or
