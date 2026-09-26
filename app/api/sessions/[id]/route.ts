@@ -6,7 +6,6 @@ import {
   buildSessionTree,
   deleteSessionFileWithArtifacts,
   getLeafEntryId,
-  loadSessionFile,
   MAX_SESSION_LOAD_BYTES,
   parseTitleSlotLine,
   setSessionTitle,
@@ -19,6 +18,7 @@ import {
   invalidateSessionPathCache,
   invalidateSessionListCache,
   buildSessionContext,
+  loadSessionFileCached,
   readSessionHeader,
 } from "@/lib/session-reader";
 import { apiErrorResponse, resolveEngineSessionOr404, resolveSessionPathOr404 } from "@/lib/api-utils";
@@ -222,7 +222,7 @@ export async function GET(
     const deferToolResultImages = searchParams.has("deferMedia");
     const includeState = searchParams.has("includeState");
 
-    const { header, entries, error: loadError } = loadSessionFile(filePath, {
+    const { header, entries, error: loadError } = loadSessionFileCached(filePath, {
       resolveBlobs: true,
       skipToolResultImages: deferToolResultImages,
     });

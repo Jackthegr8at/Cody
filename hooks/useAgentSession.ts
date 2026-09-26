@@ -20,7 +20,24 @@ import {
 import { extractLoopbackUrls, normalizePreviewUrl } from "@/lib/preview-url";
 import { derivePersistedContextUsage, type ContextUsageValue } from "@/lib/context-usage";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
-import { AgentCommandError, sendAgentCommand } from "@/lib/agent-client";
+import { AgentCommandError, sendAgentCommand, sendPromptDelivery } from "@/lib/agent-client";
+import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
+import {
+  applyOutcome,
+  beginAttempt,
+  classifyDeliveryOutcome,
+  type DeliveryOutcome,
+  createOutboxEntry,
+  mutatePersistedOutbox,
+  normalizeOutboxText,
+  persistOutbox,
+  readPersistedOutbox,
+  resolveDelivered,
+  restoreForEdit,
+  retryEntry,
+  reviveForResume,
+  type OutboxEntry,
+} from "@/lib/outbox";
 import { engineSupports } from "@/lib/engine-capabilities";
 import { translate } from "@/lib/i18n";
 import { describeEngineError, errorDedupeKey, type ErrorKind } from "@/lib/error-text";
@@ -73,6 +90,7 @@ import type { HostToolDefinition, HostUriSchemeDefinition, PlanOverlay, RpcAvail
 import { asCount, asNumber, asString, isRecord } from "@/lib/type-guards";
 import { addUsageTotals, aggregateMessageUsage, emptyUsageTotals, usageTokenTotal, type UsageTotals } from "@/lib/session-usage";
 import { SESSION_STORAGE_PREFIXES } from "@/lib/storage-keys";
+import { getCachedSessionData, setCachedSessionData } from "@/lib/session-transcript-cache";
 import { captureTranscriptAnchor, restoreTranscriptAnchor, type TranscriptAnchor } from "@/lib/transcript-anchor";
 import {
   parseSubagentActivityEvent,
@@ -1024,6 +1042,9 @@ export interface AttachedImage {
   data: string;
   mimeType: string;
   previewUrl: string;
+  /** Original file name, when there was one — carried into the outbox so a
+   *  failed send's Edit restores it, and a budget error can still name it. */
+  name?: string;
 }
 
 type SelectedModel = { provider: string; modelId: string };
@@ -1068,19 +1089,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const reducedMotion = usePrefersReducedMotion();
   const isNew = session === null && newSessionCwd !== null;
-
-  const [data, setData] = useState<SessionData | null>(null);
-  const [loading, setLoading] = useState(!isNew);
+  // Hydrate from the per-session transcript cache on FIRST RENDER: AppShell
+  // remounts this hook on every session switch (key={sessionKey}), so without
+  // this a revisit to an already-viewed session shows "Loading session…" until
+  // the network round-trip completes, even though the exact same transcript
+  // was on screen a moment ago. The cache is stale-while-revalidate: the
+  // mount effect always re-fetches and overwrites these values, so a hit only
+  // removes the blank/loading flash for however long revalidation takes.
+  // getCachedSessionData is a pure lookup (no eviction, no recency bump), so
+  // calling it in the render body is safe.
+  const initialCachedData = session ? getCachedSessionData(session.id) : undefined;
+  const [data, setData] = useState<SessionData | null>(initialCachedData ?? null);
+  const [loading, setLoading] = useState(!isNew && initialCachedData === undefined);
   const [error, setError] = useState<string | null>(null);
-  const [activeLeafId, setActiveLeafId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<AgentMessage[]>([]);
+  const [activeLeafId, setActiveLeafId] = useState<string | null>(initialCachedData?.leafId ?? null);
+  const [messages, setMessages] = useState<AgentMessage[]>(initialCachedData?.context.messages ?? []);
   // Latest committed transcript identity, readable from event callbacks that
   // must not re-create per message (the run-end handlers capture it so the
   // follow logic can tell the terminal reload's commit apart from the state
   // churn that precedes it).
   const messagesRef = useRef<AgentMessage[]>(messages);
   messagesRef.current = messages;
-  const [entryIds, setEntryIds] = useState<string[]>([]);
+  const [entryIds, setEntryIds] = useState<string[]>(initialCachedData?.context.entryIds ?? []);
   const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null });
   const [agentRunning, setAgentRunning] = useState(false);
   const [bashRunning, setBashRunning] = useState(false);
@@ -1232,18 +1262,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [sessionStatsOverride, setSessionStatsOverride] = useState<SessionStatsInfo | null>(null);
   const [extensionDialog, setExtensionDialog] = useState<ExtensionUiDialogRequest | null>(null);
   const [extensionCustomUi, setExtensionCustomUi] = useState<ExtensionUiCustomRequest | null>(null);
+  const [todoPhases, setTodoPhases] = useState<TodoPhase[]>(initialCachedData?.context.todoPhases ?? []);
   // Approvals the agent is blocked on. Plural and ordered: the protocol allows
   // more than one outstanding at a time, and each is answered on its own.
   const [permissionRequests, setPermissionRequests] = useState<AgentPermissionRequest[]>([]);
   const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatusItem[]>([]);
   const [extensionWidgets, setExtensionWidgets] = useState<ExtensionWidgetItem[]>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
+  // Per-session send outbox (lib/outbox.ts): every composer send from the
+  // moment it clears the composer until the engine has confirmed delivery.
+  // Only the CURRENT session's entries live in React state; a background
+  // session's in-flight retry keeps running against sessionStorage directly
+  // (see mutateOutboxStorage) and resumes into state on switch-back.
+  const [outbox, setOutbox] = useState<OutboxEntry[]>(() => (
+    session ? readPersistedOutbox(session.id) : []
+  ));
   const [subagents, setSubagents] = useState<SubagentInfo[]>([]);
   const subagentsRef = useRef<SubagentInfo[]>(subagents);
   subagentsRef.current = subagents;
   const [subagentEvents, setSubagentEvents] = useState<Record<string, SubagentActivityEvent[]>>({});
   const [subagentTranscriptVersions, setSubagentTranscriptVersions] = useState<Record<string, number>>({});
-  const [todoPhases, setTodoPhases] = useState<TodoPhase[]>([]);
   const [planOverlay, setPlanOverlay] = useState<PlanOverlay | null>(null);
   const [activeGoal, setActiveGoal] = useState<ActiveGoal | null>(null);
   const [activePlan, setActivePlan] = useState<ActivePlan | null>(null);
@@ -1282,7 +1320,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const thinkingLevelPendingRequestRef = useRef(0);
   const fastModeActiveRef = useRef<boolean | undefined>(undefined);
   const fastModeInactiveNoticeScopeRef = useRef<string | null>(null);
-  const addNoticeRef = useRef<(notice: { id?: string; message: string; type?: NoticeType }) => void>(() => {});
+  const addNoticeRef = useRef<(notice: { id?: string; message: string; type?: NoticeType; dedupeKey?: string; errorKind?: ErrorKind }) => void>(() => {});
   const modelSwitchDispatchingSessionRef = useRef<string | null>(null);
   const dispatchPendingModelSwitchRef = useRef<(() => void) | null>(null);
   const modelSwitchPendingRef = useRef<PendingModelSwitchRequest | null>(null);
@@ -1432,6 +1470,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // invalidated on terminal.
   const subagentRosterGenerationRef = useRef(0);
   const optimisticUserMessageKeyRef = useRef<string | null>(null);
+  // Timers for scheduled outbox retries, keyed by clientMessageId, so a
+  // manual Retry or a session switch can cancel a stale one.
+  const outboxTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  // The run id a wasIdle send believed it started, keyed by the outbox entry
+  // it came from — the only thing a later delivery failure needs to decide
+  // whether THIS entry's optimistic bubble/run state is still the current
+  // one to roll back (a stale entry must never undo a newer run).
+  const outboxOptimisticRunIdRef = useRef<Map<string, number>>(new Map());
   // True once this mount has persisted a non-empty queue: gates removal so a
   // just-mounted empty state cannot wipe a stored queue before restore runs.
   const queuePersistDirtyRef = useRef(false);
@@ -1907,22 +1953,46 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const engineNameRef = useRef(opts.engineName ?? "Cody");
   engineNameRef.current = opts.engineName ?? "Cody";
 
-  const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false, fenceRunId?: number) => {
-    let messagesLoaded = false;
+  const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false, fenceRunId?: number, signal?: AbortSignal) => {
     if (sessionIdRef.current === sid) setLiveContextUsage(null);
+    if (showLoading) setLoading(true);
+    const params = new URLSearchParams({ deferMedia: "1" });
+    // Thinking text is deferred only when blocks start collapsed. With the
+    // show-thinking preference on, a deferred block mounts expanded but
+    // EMPTY: the load's pin-to-bottom lands first and per-block fetches
+    // then regrow the transcript above the viewport — the visible bounce
+    // when a run ends (the terminal reload takes this exact path), plus one
+    // HTTP request per thinking block. Ship the text inline instead.
+    if (!thinkingDefaultExpandedRef.current) params.set("deferThinking", "1");
+    // Transcript and state are independent — fire both now. Sequentially
+    // awaiting the transcript before even starting the state fetch cost a
+    // full extra round trip on every session switch for no reason, and a
+    // slow (or, before the server bounded it, unbounded) get_state must
+    // never delay the transcript's own paint — see the loading release below.
+    const transcriptFetch = fetch(`/api/sessions/${encodeURIComponent(sid)}?${params}`, signal ? { signal } : undefined);
+    const stateFetch = includeState
+      ? fetch(`/api/sessions/${encodeURIComponent(sid)}/state`, signal ? { signal } : undefined)
+      : null;
+    // Created eagerly above (to fire alongside the transcript fetch) but only
+    // awaited below if the transcript stage actually reaches that point — an
+    // early return (404, error, or an abort) must not leave this rejecting
+    // into the void as an unhandled promise rejection. Attaching a no-op
+    // catch here does not consume the rejection: the real await below still
+    // observes and handles it independently.
+    stateFetch?.catch(() => {});
+
     try {
-      if (showLoading) setLoading(true);
-      const params = new URLSearchParams({ deferMedia: "1" });
-      // Thinking text is deferred only when blocks start collapsed. With the
-      // show-thinking preference on, a deferred block mounts expanded but
-      // EMPTY: the load's pin-to-bottom lands first and per-block fetches
-      // then regrow the transcript above the viewport — the visible bounce
-      // when a run ends (the terminal reload takes this exact path), plus one
-      // HTTP request per thinking block. Ship the text inline instead.
-      if (!thinkingDefaultExpandedRef.current) params.set("deferThinking", "1");
-      const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}?${params}`);
+      const res = await transcriptFetch;
       if (res.status === 404) {
-        if (showLoading) {
+        // A 404 on a session this instance has already painted (a cache hit
+        // on mount, or an earlier load this same mount) is a transient
+        // hiccup, not proof the conversation is gone — keep showing it
+        // rather than blanking to "no messages". A session that has
+        // genuinely never painted (brand new, file not flushed yet) still
+        // gets the original empty state.
+        if (messagesRef.current.length > 0) {
+          addNoticeRef.current({ type: "error", message: translate("agentSession.reloadFailed"), dedupeKey: `reload-failed:${sid}` });
+        } else if (showLoading) {
           setData(null);
           setActiveLeafId(null);
           setMessages([]);
@@ -1950,79 +2020,84 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (d.context.thinkingLevel && d.context.thinkingLevel !== "off") {
         setThinkingLevel(d.context.thinkingLevel as ThinkingLevelOption);
       }
-
-      messagesLoaded = true;
-      if (!includeState) {
-        if (showLoading) setLoading(false);
-        return null;
-      }
-
-      try {
-        // Capture the sequence token BEFORE the fetch: a response snapshotted
-        // earlier must not mint a fresh token on arrival and clobber a newer
-        // sync that started while this request was in flight.
-        const token = beginAuthoritativeModelSync();
-        const modeSeq = modeSyncSeqRef.current;
-        const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
-        if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
-        const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse };
-        if (sessionIdRef.current !== sid) {
-          if (showLoading) setLoading(false);
-          return null;
-        }
-        if (fenceRunId !== undefined && promptRunIdRef.current !== fenceRunId) {
-          if (showLoading) setLoading(false);
-          return null;
-        }
-
-        const liveState = agentState.state;
-                dispatchCompactionStatus({ type: "reconcile", sessionId: sid, active: liveState?.isCompacting === true, now: Date.now() });
-        adoptSessionModels(liveState);
-        adoptSessionModes(liveState, sid, modeSeq);
-        adoptSessionPromptCapabilities(liveState);
-        const modelApplied = applyAuthoritativeModel(toThinkingModelMeta(liveState?.model), token);
-        if (liveState) {
-          if (liveState.contextUsage !== undefined) setLiveContextUsage(readLiveContextUsage(liveState.contextUsage));
-          if (liveState.systemPrompt !== undefined) setSystemPrompt(liveState.systemPrompt || null);
-          if (modelApplied && liveState.thinkingLevel !== undefined) adoptThinkingLevel(liveState.thinkingLevel);
-          if (modelApplied) adoptFastModeState(liveState, sid);
-          if (liveState.autoRetryEnabled !== undefined) setAutoRetryEnabled(liveState.autoRetryEnabled);
-          if (liveState.interruptMode !== undefined) setInterruptMode(liveState.interruptMode);
-          if (liveState.autoCompactionEnabled !== undefined) setAutoCompactionEnabled(liveState.autoCompactionEnabled);
-          if (liveState.steeringMode !== undefined) setSteeringMode(liveState.steeringMode);
-          if (liveState.followUpMode !== undefined) setFollowUpMode(liveState.followUpMode);
-          if (liveState.extensionStatuses !== undefined) setExtensionStatuses(liveState.extensionStatuses ?? []);
-          if (liveState.extensionWidgets !== undefined) setExtensionWidgets(liveState.extensionWidgets ?? []);
-          // THE reload path. A page load never sees the permission_request
-          // event that fired before it, so without adopting state here a tab
-          // reopened on a blocked turn shows a session that waits forever with
-          // nothing to click. Engines with no approval channel omit the field
-          // entirely, and undefined must not be read as "none pending".
-          if (liveState.pendingPermissions !== undefined) adoptPermissionRequests(liveState.pendingPermissions);
-          if (liveState.todoPhases !== undefined) setTodoPhases(liveState.todoPhases ?? []);
-          if (liveState.planOverlay !== undefined) setPlanOverlay(readPlanOverlay(liveState.planOverlay) ?? null);
-          if (liveState.queuedMessageCount === 0 && Date.now() - queueMutatedAtRef.current >= 5000) setQueuedMessages(EMPTY_QUEUE);
-        } else {
-          // No live engine at all, so nothing can be blocked on an approval.
-          // A card carried over from the previous session would be
-          // unanswerable — the request it names died with its process.
-          adoptPermissionRequests(undefined);
-          if (!agentState.running && Date.now() - queueMutatedAtRef.current >= 5000) {
-            setQueuedMessages(EMPTY_QUEUE);
-          }
-        }
-        if (showLoading) setLoading(false);
-        return agentState;
-      } catch (e) {
-        console.error("Failed to load agent state:", e);
-        if (showLoading) setLoading(false);
-        return null;
-      }
+      setCachedSessionData(sid, d);
     } catch (e) {
-      setError(String(e));
+      if (signal?.aborted) return null;
+      // Never blank a transcript the user is already looking at (a cache hit
+      // on mount, or an earlier load this mount) — keep it and say the
+      // refresh failed, instead of replacing real messages with a bare
+      // error screen.
+      if (messagesRef.current.length > 0) {
+        addNoticeRef.current({ type: "error", message: translate("agentSession.reloadFailed"), dedupeKey: `reload-failed:${sid}` });
+      } else {
+        setError(String(e));
+      }
       return null;
     } finally {
-      if (showLoading && !messagesLoaded) setLoading(false);
+      // Release the transcript gate HERE, at the transcript's own settle —
+      // never at the end of the state sync below. A slow get_state must not
+      // hold the whole transcript hostage behind "Loading session…" when the
+      // messages are already in hand.
+      if (showLoading) setLoading(false);
+    }
+    if (!stateFetch) return null;
+
+    try {
+      // Capture the sequence token BEFORE the fetch: a response snapshotted
+      // earlier must not mint a fresh token on arrival and clobber a newer
+      // sync that started while this request was in flight.
+      const token = beginAuthoritativeModelSync();
+      const modeSeq = modeSyncSeqRef.current;
+      const stateRes = await stateFetch;
+      if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
+      const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse; stale?: boolean };
+      if (sessionIdRef.current !== sid) return null;
+      if (fenceRunId !== undefined && promptRunIdRef.current !== fenceRunId) return null;
+
+      const liveState = agentState.state;
+      dispatchCompactionStatus({ type: "reconcile", sessionId: sid, active: liveState?.isCompacting === true, now: Date.now() });
+      adoptSessionModels(liveState);
+      adoptSessionModes(liveState, sid, modeSeq);
+      adoptSessionPromptCapabilities(liveState);
+      const modelApplied = applyAuthoritativeModel(toThinkingModelMeta(liveState?.model), token);
+      if (liveState) {
+        if (liveState.contextUsage !== undefined) setLiveContextUsage(readLiveContextUsage(liveState.contextUsage));
+        if (liveState.systemPrompt !== undefined) setSystemPrompt(liveState.systemPrompt || null);
+        if (modelApplied && liveState.thinkingLevel !== undefined) adoptThinkingLevel(liveState.thinkingLevel);
+        if (modelApplied) adoptFastModeState(liveState, sid);
+        if (liveState.autoRetryEnabled !== undefined) setAutoRetryEnabled(liveState.autoRetryEnabled);
+        if (liveState.interruptMode !== undefined) setInterruptMode(liveState.interruptMode);
+        if (liveState.autoCompactionEnabled !== undefined) setAutoCompactionEnabled(liveState.autoCompactionEnabled);
+        if (liveState.steeringMode !== undefined) setSteeringMode(liveState.steeringMode);
+        if (liveState.followUpMode !== undefined) setFollowUpMode(liveState.followUpMode);
+        if (liveState.extensionStatuses !== undefined) setExtensionStatuses(liveState.extensionStatuses ?? []);
+        if (liveState.extensionWidgets !== undefined) setExtensionWidgets(liveState.extensionWidgets ?? []);
+        // THE reload path. A page load never sees the permission_request
+        // event that fired before it, so without adopting state here a tab
+        // reopened on a blocked turn shows a session that waits forever with
+        // nothing to click. Engines with no approval channel omit the field
+        // entirely, and undefined must not be read as "none pending".
+        if (liveState.pendingPermissions !== undefined) adoptPermissionRequests(liveState.pendingPermissions);
+        if (liveState.todoPhases !== undefined) setTodoPhases(liveState.todoPhases ?? []);
+        if (liveState.planOverlay !== undefined) setPlanOverlay(readPlanOverlay(liveState.planOverlay) ?? null);
+        if (liveState.queuedMessageCount === 0 && Date.now() - queueMutatedAtRef.current >= 5000) setQueuedMessages(EMPTY_QUEUE);
+      } else if (!agentState.running) {
+        // No live engine at all (confirmed — not merely a stale/timed-out
+        // read), so nothing can be blocked on an approval. A card carried
+        // over from the previous session would be unanswerable — the
+        // request it names died with its process. A `running: true` but
+        // `state: null` read proves nothing either way (the bounded
+        // get_state timed out, or a brand-new child has no snapshot yet
+        // to report) — leave whatever is on screen alone until a
+        // definitive read arrives.
+        adoptPermissionRequests(undefined);
+        if (Date.now() - queueMutatedAtRef.current >= 5000) setQueuedMessages(EMPTY_QUEUE);
+      }
+      return agentState;
+    } catch (e) {
+      if (signal?.aborted) return null;
+      console.error("Failed to load agent state:", e);
+      return null;
     }
   }, [refreshSubagentUsage, adoptFastModeState, adoptThinkingLevel, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptPermissionRequests, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities]);
 
@@ -2045,6 +2120,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       console.error("Failed to load context:", e);
     }
   }, []);
+
+  /** Manual retry for the full-page "Loading session failed" error view —
+   * the one case where loadSession had nothing on screen to keep, so it fell
+   * back to `error` instead of a background notice. */
+  const retryLoadSession = useCallback(() => {
+    const sid = sessionIdRef.current;
+    if (sid) void loadSession(sid, true, true);
+  }, [loadSession]);
 
   const promoteNewSession = useCallback((messageCount = 0, firstMessage?: string) => {
     firstMessage ??= translate("agentSession.noMessages");
@@ -2952,11 +3035,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
       if (!res.ok) return;
-      const data = await res.json() as { running?: boolean; state?: AgentStateResponse };
+      const data = await res.json() as { running?: boolean; state?: AgentStateResponse; stale?: boolean };
       // A slow response can straddle a run boundary (previous run finished
       // and the user already started the next one while this request was in
       // flight) — everything in it is stale, drop it.
       if (promptRunIdRef.current !== runId) return;
+      // A stale response with NO state snapshot proves nothing (a brand-new
+      // child, or a bounded get_state that has never once completed):
+      // treating it as idle would finish a turn that has not actually
+      // ended, exactly like a missed agent_end. Wait for a read that
+      // actually has something to say. A stale response that DOES carry a
+      // state object is fine to use below — its isStreaming/isPromptRunning/
+      // isBashRunning are the wrapper's own live bookkeeping, not a stale
+      // cache, even when `stale` is set.
+      if (data.stale && !data.state) return;
       const state = data.state;
       adoptSessionPromptCapabilities(state);
       // Mirror compaction state unconditionally: a missed compaction_end
@@ -3136,11 +3228,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [agentRunning]);
 
   const consumeQueuedMessage = useCallback((text: string) => {
-    if (!text) return;
+    const normalized = normalizeOutboxText(text);
+    if (!normalized) return;
     setQueuedMessages((prev) => {
-      const si = prev.steering.indexOf(text);
+      const si = prev.steering.indexOf(normalized);
       if (si !== -1) return { ...prev, steering: prev.steering.filter((_, i) => i !== si) };
-      const fi = prev.followUp.indexOf(text);
+      const fi = prev.followUp.indexOf(normalized);
       if (fi !== -1) return { ...prev, followUp: prev.followUp.filter((_, i) => i !== fi) };
       return prev;
     });
@@ -3188,6 +3281,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     queuePersistDirtyRef.current = !empty;
     persistQueue(sid, queuedMessages);
   }, [queuedMessages]);
+
+  /** A delivered user message (message_end) resolves the FIRST still-open
+   *  outbox entry with matching normalized text — the same first-match
+   *  contract as consumeQueuedMessage, extended to the outbox's own chips so
+   *  a "sending"/"queued"/"started" (or even already-"failed", on hard proof
+   *  of delivery) row settles to "delivered" instead of lingering forever. */
+  const resolveOutboxDelivery = useCallback((text: string) => {
+    const sid = sessionIdRef.current;
+    if (!sid || !text) return;
+    const { entries, resolvedId } = resolveDelivered(readPersistedOutbox(sid), text);
+    if (!resolvedId) return;
+    persistOutbox(sid, entries);
+    if (sessionIdRef.current === sid) setOutbox(entries);
+    const timer = outboxTimersRef.current.get(resolvedId);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      outboxTimersRef.current.delete(resolvedId);
+    }
+    outboxOptimisticRunIdRef.current.delete(resolvedId);
+  }, []);
 
   const handleAgentEvent = useCallback((event: AgentEvent) => {
     switch (event.type) {
@@ -3304,8 +3417,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               if (d.state?.todoPhases !== undefined) setTodoPhases(d.state.todoPhases ?? []);
               if (d.state?.planOverlay !== undefined) setPlanOverlay(readPlanOverlay(d.state.planOverlay) ?? null);
               // omp reports only a queued count; an empty (or dead) session
-              // means the client-tracked queue texts are stale.
-              if ((!d.state || d.state.queuedMessageCount === 0) && Date.now() - queueMutatedAtRef.current >= 5000) setQueuedMessages(EMPTY_QUEUE);
+              // means the client-tracked queue texts are stale. This fetch
+              // only runs after agent_end already fired, so the run is
+              // authoritatively over and a fresh queuedMessageCount:0 here
+              // needs no staleness buffer (contrast the mid-run reconcile
+              // paths, which still debounce against a snapshot racing a
+              // just-written queue mutation).
+              if (!d.state || d.state.queuedMessageCount === 0) setQueuedMessages(EMPTY_QUEUE);
             })
             .catch(() => {});
         }
@@ -3509,10 +3627,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "message_end": {
-        // Same late-event guard: after reconcile finished this run,
-        // loadSession already loaded this message from the session file —
-        // appending it again would duplicate it.
-        if (!agentRunningRef.current) break;
         const completed = event.message as AgentMessage | undefined;
         const messageError = readAgentError(completed);
         if (messageError) lastRunErrorRef.current = messageError;
@@ -3527,16 +3641,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setLiveToolResult(completed.toolCallId, null);
         }
         if (completed && completed.role === "user") {
-          // Delivered steering/follow-up messages surface here as user
-          // messages. The run's initial prompt also emits one, but handleSend
-          // already appended it optimistically. Consume only the still-adjacent
-          // optimistic bubble; later same-text queue deliveries must render.
+          // Delivered steering/follow-up/outbox messages surface here as user
+          // messages, and must render even when this client already believes
+          // the run ended — a late SSE frame after reconcile, or a race where
+          // agentRunningRef flipped false first, must never silently drop a
+          // message the server actually delivered. The run's initial prompt
+          // also emits one, but handleSend already appended it optimistically:
+          // consume only the still-adjacent optimistic bubble, dedupe an exact
+          // repeat against whatever is already last, and let anything else append.
           const delivered = normalizeToolCalls(completed);
           const deliveredKey = userMessageKey(delivered);
           const optimisticKey = optimisticUserMessageKeyRef.current;
           optimisticUserMessageKeyRef.current = null;
-          // Delivered steering/follow-up texts leave the client-tracked queue.
-          consumeQueuedMessage(extractMessageText(delivered));
+          const deliveredText = extractMessageText(delivered);
+          // Delivered steering/follow-up texts leave the client-tracked queue
+          // mirror, and resolve the matching outbox entry (if this is one of
+          // ours) so its chip settles to delivered instead of lingering.
+          consumeQueuedMessage(deliveredText);
+          resolveOutboxDelivery(deliveredText);
           setMessages((prev) => {
             const last = prev[prev.length - 1];
             if (optimisticKey && last?.role === "user" && userMessageKey(last) === optimisticKey) {
@@ -3544,35 +3666,45 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
                 ? prev
                 : [...prev.slice(0, -1), delivered];
             }
+            if (last?.role === "user" && userMessageKey(last) === deliveredKey) return prev;
             return [...prev, delivered];
           });
-        } else if (completed?.role === "custom" && (completed as CustomMessage).customType === "xdev-mount-notice") {
-          toast.info("MCP tools updated", describeMcpMountNotice(completed as CustomMessage), { clamp: true });
-        } else if (completed?.role === "assistant" && completed.stopReason === "error") {
-          // The engine could not produce a reply at all — no credentials, an
-          // invalid key, a provider outage. Both rpc-dialect engines report it
-          // exactly like this: an assistant message with no content and the
-          // provider's own error text. Appending that as a bubble showed the
-          // user nothing, silently; the failure belongs in a notice, in the
-          // provider's words, so they know what to fix.
-          const detail = typeof completed.errorMessage === "string" && completed.errorMessage.trim()
-            ? completed.errorMessage.trim()
-            : translate("agentSession.commandFailed");
-          // describeEngineError tells a refusal from an auth failure from an
-          // outdated-engine error from a plain outage, and cleans out the
-          // JSON/request-id/URL junk a provider body carries; the auth branch
-          // still gets the one hint that actually fixes it, the keys panel.
-          addEngineErrorNotice(detail, engineNameRef.current);
-          const hasContent = Array.isArray(completed.content) ? completed.content.length > 0 : Boolean(completed.content);
-          if (hasContent) setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
-        } else if (completed) {
-          setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
-          if (completed.role === "assistant" && onPreviewUrlsSeen) {
-            // Loopback URLs in a live assistant reply are candidates for
-            // auto-opening the Preview panel; the shell probes reachability
-            // before acting, so mere mentions of a dead port stay quiet.
-            const urls = extractLoopbackUrls(extractMessageText(completed));
-            if (urls.length > 0) onPreviewUrlsSeen(urls, sessionIdRef.current ?? undefined);
+          // Nothing else here tracks a currently-active run; skip the
+          // run-bookkeeping below when this client already believes idle.
+          if (!agentRunningRef.current) break;
+        } else {
+          // Same late-event guard: after reconcile finished this run,
+          // loadSession already loaded this message from the session file —
+          // appending it again would duplicate it.
+          if (!agentRunningRef.current) break;
+          if (completed?.role === "custom" && (completed as CustomMessage).customType === "xdev-mount-notice") {
+            toast.info("MCP tools updated", describeMcpMountNotice(completed as CustomMessage), { clamp: true });
+          } else if (completed?.role === "assistant" && completed.stopReason === "error") {
+            // The engine could not produce a reply at all — no credentials, an
+            // invalid key, a provider outage. Both rpc-dialect engines report it
+            // exactly like this: an assistant message with no content and the
+            // provider's own error text. Appending that as a bubble showed the
+            // user nothing, silently; the failure belongs in a notice, in the
+            // provider's words, so they know what to fix.
+            const detail = typeof completed.errorMessage === "string" && completed.errorMessage.trim()
+              ? completed.errorMessage.trim()
+              : translate("agentSession.commandFailed");
+            // describeEngineError tells a refusal from an auth failure from an
+            // outdated-engine error from a plain outage, and cleans out the
+            // JSON/request-id/URL junk a provider body carries; the auth branch
+            // still gets the one hint that actually fixes it, the keys panel.
+            addEngineErrorNotice(detail, engineNameRef.current);
+            const hasContent = Array.isArray(completed.content) ? completed.content.length > 0 : Boolean(completed.content);
+            if (hasContent) setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
+          } else if (completed) {
+            setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
+            if (completed.role === "assistant" && onPreviewUrlsSeen) {
+              // Loopback URLs in a live assistant reply are candidates for
+              // auto-opening the Preview panel; the shell probes reachability
+              // before acting, so mere mentions of a dead port stay quiet.
+              const urls = extractLoopbackUrls(extractMessageText(completed));
+              if (urls.length > 0) onPreviewUrlsSeen(urls, sessionIdRef.current ?? undefined);
+            }
           }
         }
         dispatch({ type: "reset" });
@@ -3954,13 +4086,133 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, addEngineErrorNotice, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, beginAuthoritativeModelSync, clearLiveToolResults, consumeQueuedMessage, dispatchPendingModelSwitch, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, holdTailForReader, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, refreshTodoState, resetSubagentActivityState, setLiveToolResult]);
+  }, [addNotice, addEngineErrorNotice, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, beginAuthoritativeModelSync, clearLiveToolResults, consumeQueuedMessage, dispatchPendingModelSwitch, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, holdTailForReader, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, refreshTodoState, resetSubagentActivityState, resolveOutboxDelivery, setLiveToolResult]);
   handleAgentEventRef.current = handleAgentEvent;
+
+  /** Shared recovery for a send that never actually started a run: undo the
+   *  optimistic bubble, drop back to idle, and raise the persistent
+   *  send-failed banner (a toast fades before anyone reads why). Used by a
+   *  brand-new session's spawn failure, an existing session's stream-connect
+   *  failure, and an outbox entry that exhausted its retries — all three mean
+   *  "this turn never started", never "silently repeat a mutating
+   *  instruction the user cannot see". */
+  const rollBackFailedSend = useCallback((typedMessage: string, detail: string, streamErrorMessage?: string) => {
+    const optimisticKey = optimisticUserMessageKeyRef.current;
+    if (optimisticKey) {
+      setMessages((prev) => {
+        const last = prev[prev.length - 1];
+        return last?.role === "user" && userMessageKey(last) === optimisticKey
+          ? prev.slice(0, -1)
+          : prev;
+      });
+    }
+    addNotice({
+      type: "error",
+      message: streamErrorMessage ?? translate("agentSession.sendFailed", { detail }),
+    });
+    // A toast fades; the wedge this replaces did not. The banner stays until
+    // dismissed so a prompt that never started can never read as one still
+    // running — whatever the failure was (refused frame, timeout, network).
+    setStreamAlert({ kind: "send_failed", detail });
+    // Restore the user's text into the input instead of losing it. Mirrors the
+    // shell-command recovery in executeBash; insertIfEmpty avoids clobbering
+    // anything typed since.
+    if (typedMessage) opts.chatInputRef?.current?.insertIfEmpty(typedMessage);
+    optimisticUserMessageKeyRef.current = null;
+    agentRunningRef.current = false;
+    assistantProviderCallRef.current = false;
+    lastRunErrorRef.current = null;
+    slashCommandRunRef.current = false;
+    setAgentRunning(false);
+    setAgentPhase(null);
+    clearLiveToolResults();
+    dispatch({ type: "end" });
+  }, [addNotice, clearLiveToolResults, opts.chatInputRef]);
+
+  /**
+   * Drives one outbox entry (lib/outbox.ts) to a settled state: attempt,
+   * classify per the send contract (local://send-contract.md), retry with
+   * backoff, or resolve as queued/started/failed. Reads/writes storage
+   * directly (not just React state) so a background session's entry keeps
+   * retrying even while a DIFFERENT session is on screen — only the live
+   * `outbox` state, and an optimistic-bubble rollback, are gated on this
+   * still being the current session.
+   */
+  const deliverOutboxEntry = useCallback(async (sid: string, entryId: string) => {
+    outboxTimersRef.current.delete(entryId);
+    const started = mutatePersistedOutbox(sid, (current) => beginAttempt(current, entryId));
+    if (sessionIdRef.current === sid) setOutbox(started);
+    const entry = started.find((candidate) => candidate.id === entryId);
+    if (!entry) return;
+
+    const settle = (outcome: DeliveryOutcome) => {
+      if (outcome.kind === "success") {
+        // Mirrors the pre-outbox handleSteer/handleFollowUp bookkeeping: the
+        // queued-bar mirror only ever reflects a server-CONFIRMED queue.
+        queueMutatedAtRef.current = Date.now();
+        const normalized = normalizeOutboxText(entry.text);
+        setQueuedMessages((prev) => (outcome.delivery === "queued"
+          ? (entry.behavior === "steer"
+            ? { ...prev, steering: [...prev.steering, normalized] }
+            : { ...prev, followUp: [...prev.followUp, normalized] })
+          : prev));
+      }
+      const settled = mutatePersistedOutbox(sid, (current) => applyOutcome(current, entryId, outcome));
+      if (sessionIdRef.current === sid) setOutbox(settled);
+      const resolved = settled.find((candidate) => candidate.id === entryId);
+      if (!resolved) return;
+      if (resolved.status === "sending" && resolved.nextRetryAt !== null) {
+        const delay = Math.max(0, resolved.nextRetryAt - Date.now());
+        outboxTimersRef.current.set(entryId, setTimeout(() => { void deliverOutboxEntry(sid, entryId); }, delay));
+        return;
+      }
+      if (resolved.status !== "failed") return;
+      const optimisticRunId = outboxOptimisticRunIdRef.current.get(entryId);
+      outboxOptimisticRunIdRef.current.delete(entryId);
+      if (
+        optimisticRunId !== undefined
+        && sessionIdRef.current === sid
+        && agentRunningRef.current
+        && promptRunIdRef.current === optimisticRunId
+      ) {
+        // This entry believed it was starting a fresh run and never actually
+        // did — the same "this turn never started" recovery a definitive
+        // send failure takes today, just reached from the outbox's own
+        // retry-exhaustion instead of an inline catch.
+        const detail = describeEngineError(resolved.error ?? translate("agentSession.commandFailed")).detail;
+        rollBackFailedSend(entry.text, detail);
+      }
+    };
+
+    // A wasIdle send optimistically opened the stream in handleSend; only
+    // when that never actually connected does a retry attempt here need to
+    // try again — a "believed running" send never touches the connection.
+    if (outboxOptimisticRunIdRef.current.has(entryId) && sessionIdRef.current === sid && !eventSourceRef.current) {
+      try {
+        await ensureEventsConnected(sid);
+      } catch (e) {
+        settle(classifyDeliveryOutcome({ status: null, error: e instanceof Error ? e.message : String(e) }));
+        return;
+      }
+    }
+
+    const piImages = entry.images.length
+      ? entry.images.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }))
+      : undefined;
+    const response = await sendPromptDelivery(sid, {
+      type: "prompt",
+      message: entry.text,
+      ...(piImages ? { images: piImages } : {}),
+      streamingBehavior: entry.behavior,
+      clientMessageId: entry.id,
+    }, { timeoutMs: PROMPT_SEND_TIMEOUT_MS });
+    settle(classifyDeliveryOutcome(response));
+  }, [ensureEventsConnected, rollBackFailedSend]);
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {
     const trimmedMessage = message.trim();
     if (!trimmedMessage && !images?.length) return false;
-    if (agentRunningRef.current || bashRunningRef.current) return false;
+    if (bashRunningRef.current) return false;
     const isSlashCommandPrompt = !images?.length && trimmedMessage.startsWith("/");
 
     // Shell mode belongs to the rpc-dialect engines. An ACP session accepts no
@@ -3972,6 +4224,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const isBashCommand = !images?.length && trimmedMessage.startsWith("!")
       && await engineSupports("chatExtras");
     if (isBashCommand) {
+      // Shelling out mid-turn would race the active turn for the same child;
+      // a send to a RUNNING session belongs to the outbox path below.
+      if (agentRunningRef.current) return false;
       const isExcluded = trimmedMessage.startsWith("!!");
       const bashCmd = (isExcluded ? trimmedMessage.slice(2) : trimmedMessage.slice(1)).trim();
       if (!bashCmd) return false;
@@ -3979,41 +4234,42 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return true;
     }
 
-    const promptRunId = promptRunIdRef.current + 1;
+    // A brand-new (unspawned) chat spawns through /api/agent/new — unrelated
+    // to the outbox pipeline below, which only ever targets an EXISTING
+    // session (one that may already be idle or running).
+    if (isNew && newSessionCwd) {
+      const promptRunId = promptRunIdRef.current + 1;
+      const imageBlocks = images?.map((img) => ({ type: "image" as const, source: { type: "base64" as const, media_type: img.mimeType, data: img.data } }));
+      const userMsg: AgentMessage = {
+        role: "user",
+        content: imageBlocks?.length
+          ? [...(message.trim() ? [{ type: "text" as const, text: message }] : []), ...imageBlocks]
+          : message,
+        timestamp: Date.now(),
+      };
+      setMessages((prev) => [...prev, userMsg]);
+      optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
+      promptRunIdRef.current = promptRunId;
+      slashCommandRunRef.current = isSlashCommandPrompt;
+      agentRunningRef.current = true;
+      assistantProviderCallRef.current = true;
+      // Optimistic: the stream is opened and the prompt posted below, so the
+      // server has not acknowledged this run yet (see runConfirmedRef).
+      runConfirmedRef.current = false;
+      clearLiveToolResults();
+      setStreamAlert(null);
+      setAgentRunning(true);
+      setAgentPhase(isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" });
+      dispatch({ type: "start" });
+      pendingScrollToUserRef.current = true;
+      completionScrollAllowedRef.current = true;
+      // The send click bubbles through the global pointer listener below. It is
+      // not a request to stop following the response that this prompt starts.
+      userScrollIntentUntilRef.current = 0;
+      const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
 
-    const imageBlocks = images?.map((img) => ({ type: "image" as const, source: { type: "base64" as const, media_type: img.mimeType, data: img.data } }));
-    const userMsg: AgentMessage = {
-      role: "user",
-      content: imageBlocks?.length
-        ? [...(message.trim() ? [{ type: "text" as const, text: message }] : []), ...imageBlocks]
-        : message,
-      timestamp: Date.now(),
-    };
-    setMessages((prev) => [...prev, userMsg]);
-    optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
-    promptRunIdRef.current = promptRunId;
-    slashCommandRunRef.current = isSlashCommandPrompt;
-    agentRunningRef.current = true;
-    assistantProviderCallRef.current = true;
-    // Optimistic: the stream is opened and the prompt posted below, so the
-    // server has not acknowledged this run yet (see runConfirmedRef).
-    runConfirmedRef.current = false;
-    clearLiveToolResults();
-    setStreamAlert(null);
-    setAgentRunning(true);
-    setAgentPhase(isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" });
-    dispatch({ type: "start" });
-    pendingScrollToUserRef.current = true;
-    completionScrollAllowedRef.current = true;
-    // The send click bubbles through the global pointer listener below. It is
-    // not a request to stop following the response that this prompt starts.
-    userScrollIntentUntilRef.current = 0;
-
-    const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
-
-    try {
-      let sentSessionId: string | null = null;
-      if (isNew && newSessionCwd) {
+      try {
+        let sentSessionId: string | null = null;
         const selectedModel = newSessionModel;
         const existingSid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
         const sid = existingSid ?? await ensureNewSession();
@@ -4049,63 +4305,73 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             ...(piImages?.length ? { images: piImages } : {}),
           }, { timeoutMs: PROMPT_SEND_TIMEOUT_MS });
         }
-      } else if (session) {
-        sentSessionId = session.id;
-        await ensureEventsConnected(session.id);
-        void refreshSubagentRoster(session.id);
-        void registerHostTools(session.id);
-        void registerHostUriSchemes(session.id);
-        await sendAgentCommand(session.id, {
-          type: "prompt",
-          message,
-          ...(piImages?.length ? { images: piImages } : {}),
-        }, { timeoutMs: PROMPT_SEND_TIMEOUT_MS });
+        if (isSlashCommandPrompt && sentSessionId) {
+          void waitForPromptSettlement(sentSessionId, promptRunId);
+        }
+        return true;
+      } catch (e) {
+        console.error("Failed to send message:", e);
+        // Every failure here (stream connect, ensure_session, set_model, the
+        // prompt POST itself) means the prompt never started.
+        const detail = describeEngineError(e instanceof Error ? e.message : String(e)).detail;
+        rollBackFailedSend(message, detail, e instanceof EventStreamConnectionError ? e.message : undefined);
+        return false;
       }
-      if (isSlashCommandPrompt && sentSessionId) {
-        void waitForPromptSettlement(sentSessionId, promptRunId);
-      }
-      return true;
-    } catch (e) {
-      console.error("Failed to send message:", e);
-      // Every failure here (stream connect, ensure_session, set_model, the
-      // prompt POST itself) means the prompt never started, so roll the
-      // optimistic bubble back instead of leaving a ghost message.
-      const optimisticKey = optimisticUserMessageKeyRef.current;
-      if (optimisticKey) {
-        setMessages((prev) => {
-          const last = prev[prev.length - 1];
-          return last?.role === "user" && userMessageKey(last) === optimisticKey
-            ? prev.slice(0, -1)
-            : prev;
-        });
-      }
-      const detail = describeEngineError(e instanceof Error ? e.message : String(e)).detail;
-      addNotice({
-        type: "error",
-        message: e instanceof EventStreamConnectionError
-          ? e.message
-          : translate("agentSession.sendFailed", { detail }),
-      });
-      // A toast fades; the wedge this replaces did not. The banner stays until
-      // dismissed so a prompt that never started can never read as one still
-      // running — whatever the failure was (refused frame, timeout, network).
-      setStreamAlert({ kind: "send_failed", detail });
-      // Restore the user's text into the input instead of losing it. Mirrors the
-      // shell-command recovery in executeBash; insertIfEmpty avoids clobbering
-      // anything typed since.
-      if (message) opts.chatInputRef?.current?.insertIfEmpty(message);
-      optimisticUserMessageKeyRef.current = null;
-      agentRunningRef.current = false;
-      assistantProviderCallRef.current = false;
-      lastRunErrorRef.current = null;
-      slashCommandRunRef.current = false;
-      setAgentRunning(false);
-      setAgentPhase(null);
-      clearLiveToolResults();
-      dispatch({ type: "end" });
-      return false;
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, thinkingLevel, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef, refreshSubagentRoster, registerHostTools, registerHostUriSchemes, clearLiveToolResults]);
+
+    // An existing session: the ONE send pipeline (local://send-contract.md).
+    // Enter (or the send button), running or not, always attaches
+    // streamingBehavior (the Settings submit-during-run preference) and a
+    // fresh clientMessageId, and the message lives in the outbox — sending →
+    // queued|started → delivered, or failed with a Retry/Edit chip — from the
+    // moment it clears the composer.
+    if (!session) return false;
+    const sid = session.id;
+    const behavior: OutboxEntry["behavior"] = getSubmitDuringRunBehavior() === "queue" ? "followUp" : "steer";
+    const outboxImages = images?.map((img) => ({ data: img.data, mimeType: img.mimeType, ...(img.name ? { name: img.name } : {}) })) ?? [];
+    const entry = createOutboxEntry({ sessionId: sid, text: trimmedMessage, images: outboxImages, behavior });
+
+    const wasIdle = !agentRunningRef.current;
+    if (wasIdle) {
+      // Keep the optimistic first-prompt bubble behaviour for a new run:
+      // shown before the network call, exactly like the isNew branch above.
+      const imageBlocks = images?.map((img) => ({ type: "image" as const, source: { type: "base64" as const, media_type: img.mimeType, data: img.data } }));
+      const userMsg: AgentMessage = {
+        role: "user",
+        content: imageBlocks?.length
+          ? [...(message.trim() ? [{ type: "text" as const, text: message }] : []), ...imageBlocks]
+          : message,
+        timestamp: Date.now(),
+      };
+      setMessages((prev) => [...prev, userMsg]);
+      optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
+      const optimisticRunId = promptRunIdRef.current + 1;
+      promptRunIdRef.current = optimisticRunId;
+      outboxOptimisticRunIdRef.current.set(entry.id, optimisticRunId);
+      agentRunningRef.current = true;
+      assistantProviderCallRef.current = true;
+      runConfirmedRef.current = false;
+      slashCommandRunRef.current = isSlashCommandPrompt;
+      clearLiveToolResults();
+      setStreamAlert(null);
+      setAgentRunning(true);
+      setAgentPhase(isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" });
+      dispatch({ type: "start" });
+      pendingScrollToUserRef.current = true;
+      completionScrollAllowedRef.current = true;
+      userScrollIntentUntilRef.current = 0;
+      if (isSlashCommandPrompt) void waitForPromptSettlement(sid, optimisticRunId);
+    } else {
+      void refreshSubagentRoster(sid);
+      void registerHostTools(sid);
+      void registerHostUriSchemes(sid);
+    }
+
+    const nextOutbox = mutatePersistedOutbox(sid, (entries) => [...entries, entry]);
+    if (sessionIdRef.current === sid) setOutbox(nextOutbox);
+    void deliverOutboxEntry(sid, entry.id);
+    return true;
+  }, [isNew, newSessionCwd, newSessionModel, session, thinkingLevel, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, rollBackFailedSend, refreshSubagentRoster, registerHostTools, registerHostUriSchemes, deliverOutboxEntry, clearLiveToolResults]);
 
   /** Abort the running agent and send the message as a fresh prompt
    * (abort_and_prompt). Only valid mid-run; the old turn's agent_end is
@@ -4772,60 +5038,39 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     }, [addNotice]);
 
-  const handlePromptWithStreamingBehavior = useCallback(async (
-      message: string,
-      behavior: "steer" | "followUp",
-      images?: AttachedImage[],
-    ) => {
-      const sid = sessionIdRef.current;
-      if (!sid) {
-        const error = new Error("No active session.");
-        addNotice({ type: "error", message: error.message });
-        throw error;
-      }
-      const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
-      try {
-        await sendAgentCommand(sid, {
-          type: "prompt",
-          message,
-          streamingBehavior: behavior,
-          ...(piImages?.length ? { images: piImages } : {}),
-        });
-        queueMutatedAtRef.current = Date.now();
-        setQueuedMessages((prev) => behavior === "steer"
-          ? { ...prev, steering: [...prev.steering, message] }
-          : { ...prev, followUp: [...prev.followUp, message] });
-      } catch (error) {
-        console.error("Failed to queue prompt:", error);
-        const described = noticeFromCaughtError(error);
-        if (described) addNotice({ type: described.type, message: described.message, dedupeKey: described.dedupeKey, errorKind: described.kind });
-        throw error;
-      }
-    }, [addNotice]);
+  /** Re-arm a failed outbox entry for an immediate retry attempt, keeping the
+   *  same clientMessageId (the server's idempotency depends on it). */
+  const handleRetryOutboxEntry = useCallback((id: string) => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    const timer = outboxTimersRef.current.get(id);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      outboxTimersRef.current.delete(id);
+    }
+    const entries = mutatePersistedOutbox(sid, (current) => retryEntry(current, id));
+    setOutbox(entries);
+    void deliverOutboxEntry(sid, id);
+  }, [deliverOutboxEntry]);
 
-  const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[]) => {
-      const sid = sessionIdRef.current;
-      if (!sid) {
-        const error = new Error("No active session.");
-        addNotice({ type: "error", message: error.message });
-        throw error;
-      }
-      const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
-      try {
-        await sendAgentCommand(sid, {
-          type: "follow_up",
-          message,
-          ...(piImages?.length ? { images: piImages } : {}),
-        });
-        queueMutatedAtRef.current = Date.now();
-        setQueuedMessages((prev) => ({ ...prev, followUp: [...prev.followUp, message] }));
-      } catch (error) {
-        console.error("Failed to follow up:", error);
-        const described = noticeFromCaughtError(error);
-        if (described) addNotice({ type: described.type, message: described.message, dedupeKey: described.dedupeKey, errorKind: described.kind });
-        throw error;
-      }
-    }, [addNotice]);
+  /** Remove a failed outbox entry and hand its text + images back to the
+   *  composer for editing — the next Enter creates a fresh entry and
+   *  clientMessageId, exactly like any other send. */
+  const handleEditOutboxEntry = useCallback((id: string): { text: string; images: OutboxEntry["images"] } | null => {
+    const sid = sessionIdRef.current;
+    if (!sid) return null;
+    const timer = outboxTimersRef.current.get(id);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      outboxTimersRef.current.delete(id);
+    }
+    outboxOptimisticRunIdRef.current.delete(id);
+    const { entry, entries } = restoreForEdit(readPersistedOutbox(sid), id);
+    if (!entry) return null;
+    persistOutbox(sid, entries);
+    setOutbox(entries);
+    return { text: entry.text, images: entry.images };
+  }, []);
 
   const handleAbortCompaction = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -5011,6 +5256,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   // Load session on mount
   useEffect(() => {
+    let controller: AbortController | null = null;
     if (session) {
       sessionIdRef.current = session.id;
       // A session opens at its bottom, whatever the previous one was scrolled to.
@@ -5021,17 +5267,40 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       ++compactionGenerationRef.current;
       dispatchCompactionStatus({ type: "reset", sessionId: session.id });
       updateSessionControlScope(session.id, null);
-      loadSession(session.id, true, true).then((agentState) => {
+      // Aborted in this effect's cleanup below: a session switched away from
+      // and back to quickly must not let the OLD mount's still-in-flight
+      // fetch land after the new one's and clobber fresh data with stale —
+      // this is also what stops a page-load's StrictMode double-invoke from
+      // paying for two full loads.
+      controller = new AbortController();
+      // A cache hit already painted this session synchronously on first
+      // render (see initialCachedData above) — do not flash the spinner
+      // back on top of it just to revalidate in the background.
+      loadSession(session.id, !initialCachedData, true, undefined, controller.signal).then((agentState) => {
         if (agentState?.running) {
-          if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
+          const knownActive = agentState.state?.isStreaming === true || agentState.state?.isPromptRunning === true;
+          // A stale/unconfirmed read (the wrapper's bounded get_state timed
+          // out behind a slow serial command, or a brand-new child has no
+          // snapshot yet) proves nothing either way, but the child IS
+          // alive. Treating it as idle would leave the stream unconnected
+          // and silently drop every live frame from a genuinely active
+          // turn until the next 15s reconcile poll — connecting
+          // defensively costs nothing when the guess is wrong (the
+          // reconcile-while-running effect below settles it on the next
+          // read, and now safely no-ops on a stale one instead of
+          // finishing a turn that never actually ended).
+          const maybeActive = knownActive || (agentState.stale === true && !agentState.state);
+          if (maybeActive) {
             agentRunningRef.current = true;
-            assistantProviderCallRef.current = agentState.state.isStreaming === true;
-            // The server itself reported this run in flight, so it counts as
-            // acknowledged: if the engine dies later, the reconnect's
-            // `connected` frame is allowed to declare the turn lost.
-            runConfirmedRef.current = true;
+            assistantProviderCallRef.current = agentState.state?.isStreaming === true;
+            if (knownActive) {
+              // The server itself reported this run in flight, so it counts
+              // as acknowledged: if the engine dies later, the reconnect's
+              // `connected` frame is allowed to declare the turn lost.
+              runConfirmedRef.current = true;
+            }
             setAgentRunning(true);
-            setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
+            setAgentPhase(agentState.state?.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
             dispatch({ type: "start" });
             void connectEvents(session.id);
             // Register the host-tool + URI bridges so the agent can call
@@ -5051,7 +5320,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               if (sessionIdRef.current !== rosterTimerSid) return;
               void refreshSubagentRoster(rosterTimerSid);
             }, 600);
-            if (!agentState.state.isStreaming && agentState.state.isPromptRunning) {
+            if (knownActive && !agentState.state?.isStreaming && agentState.state?.isPromptRunning) {
               void waitForPromptSettlement(session.id);
             }
           }
@@ -5092,6 +5361,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       updateSessionControlScope(null, null);
     }
     return () => {
+      controller?.abort();
       bashRecoveryIdRef.current += 1;
       eventCoalescerRef.current?.reset();
       eventSourceRef.current?.close();
@@ -5112,6 +5382,43 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshSubagentRoster, registerHostTools, registerHostUriSchemes, updateSessionControlScope]);
+
+  // Resume the outbox for whichever session is now displayed. A reload
+  // leaves no in-memory timer at all; reviving is always safe even for an
+  // entry a STILL-RUNNING timer from this same tab session already owns
+  // (revival only resets its bookkeeping — the timer re-reads fresh
+  // persisted state when it fires, so it settles correctly either way) —
+  // only kick off a fresh attempt for an entry with no live timer, so a
+  // genuinely in-flight send is never redundantly duplicated.
+  useEffect(() => {
+    const sid = session?.id;
+    if (!sid) {
+      setOutbox([]);
+      return;
+    }
+    const revived = mutatePersistedOutbox(sid, (entries) => reviveForResume(entries));
+    setOutbox(revived);
+    for (const entry of revived) {
+      if (entry.status === "sending" && !outboxTimersRef.current.has(entry.id)) {
+        void deliverOutboxEntry(sid, entry.id);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.id]);
+
+  // A resumed (or freshly loaded) transcript may already contain a message
+  // this session's outbox believes is still "queued"/"started" — delivered
+  // before this reload/switch-back ever started listening, so no live
+  // message_end will ever arrive to resolve it. Reconcile against the
+  // loaded transcript instead of leaving those chips stuck forever; a no-op
+  // scan once nothing is left pending.
+  useEffect(() => {
+    if (!outbox.some((entry) => entry.status === "queued" || entry.status === "started")) return;
+    for (const message of messages) {
+      if (message.role !== "user") continue;
+      resolveOutboxDelivery(extractMessageText(message));
+    }
+  }, [messages, outbox, resolveOutboxDelivery]);
 
   useEffect(() => {
     onSystemPromptChange?.(systemPrompt);
@@ -5357,7 +5664,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     currentModeId: sessionModes.forSession === (session?.id ?? sessionIdRef.current) ? sessionModes.current : null,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, compactionStatus, currentModel, displayModel, sessionStats,
-    slashCommands, slashCommandsLoading, queuedMessages,
+    slashCommands, slashCommandsLoading, queuedMessages, outbox,
     notices: noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     permissionRequests, respondToPermission,
     // Smart is on for an unpinned new session, and stays on after the pin —
@@ -5396,10 +5703,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     followingRef: completionScrollAllowedRef, readerAnchorRef, readerHoldsTail,
     // Actions
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, selectSmartModel, selectLocalOnly, handleFastModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply,
-    handleCompact, handleHandoff, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
+    handleCompact, handleHandoff, handleSteer, handleAbortCompaction,
+    handleRetryOutboxEntry, handleEditOutboxEntry,
     removeQueuedMessage, promoteQueuedToSteer,
     handleBuiltinSlashCommand,
     handleThinkingLevelChange, handleModeChange, loadSlashCommands, setActiveLeafId, setData, setMessages,
+    retryLoadSession,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
     liveToolResults,

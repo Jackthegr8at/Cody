@@ -434,16 +434,30 @@ export const DEFAULT_BLE_OPTIONAL_SERVICES = [
   "0xffe0",
 ] as const;
 
+const BLUETOOTH_BASE_UUID_SUFFIX = "-0000-1000-8000-00805f9b34fb";
+
+/**
+ * One UUID in the only string forms Web Bluetooth accepts. A 16/32-bit alias
+ * is valid only as a NUMBER; the STRING "0x18f0" is rejected outright by
+ * `BluetoothUUID.getService` (Android Chrome fails the whole picker on it).
+ * So every hex alias is expanded onto the Bluetooth base UUID here, while
+ * assigned names ("battery_service") pass through untouched.
+ */
+export function canonicalBleUuid(raw: string): string {
+  const value = raw.trim().toLowerCase();
+  if (/^[a-z][a-z0-9_.]*$/.test(value) && !/^[0-9a-f]+$/.test(value)) return value;
+  const hex = value.startsWith("0x") ? value.slice(2) : value;
+  if (/^[0-9a-f]{4}$/.test(hex)) return "0000" + hex + BLUETOOTH_BASE_UUID_SUFFIX;
+  if (/^[0-9a-f]{8}$/.test(hex)) return hex + BLUETOOTH_BASE_UUID_SUFFIX;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(hex)) return hex;
+  throw new Error("Invalid BLE UUID: " + raw + ". Use a 16-bit, 32-bit, or canonical 128-bit UUID, or an assigned name.");
+}
+
 function normalizedOptionalServices(extra: readonly string[]): string[] {
-  const values = new Set<string>(DEFAULT_BLE_OPTIONAL_SERVICES);
+  const values = new Set<string>(DEFAULT_BLE_OPTIONAL_SERVICES.map(canonicalBleUuid));
   for (const raw of extra) {
-    const value = raw.trim().toLowerCase();
-    if (!value) continue;
-    const uuid = value.startsWith("0x") ? value.slice(2) : value;
-    if (!/^(?:[0-9a-f]{4}|[0-9a-f]{8}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.test(uuid)) {
-      throw new Error("Invalid BLE service UUID: " + raw + ". Use a 16-bit, 32-bit, or canonical 128-bit UUID.");
-    }
-    values.add(uuid.length === 4 || uuid.length === 8 ? "0x" + uuid : uuid);
+    if (!raw.trim()) continue;
+    values.add(canonicalBleUuid(raw));
   }
   return [...values];
 }
@@ -940,8 +954,12 @@ async function discoverGatt(entry: BleEntry): Promise<BleServiceInfo[]> {
   return gatt;
 }
 
-async function resolveCharacteristic(entry: BleEntry, serviceUuid: string, characteristicUuid: string): Promise<BluetoothRemoteGATTCharacteristic> {
+async function resolveCharacteristic(entry: BleEntry, rawServiceUuid: string, rawCharacteristicUuid: string): Promise<BluetoothRemoteGATTCharacteristic> {
   if (!entry.server) throw new Error("Not connected. Call ble.connect first.");
+  // The agent writes "fff1" / "0xFFF1" as often as the full form; the browser
+  // takes neither string, so both are canonicalized before any GATT call.
+  const serviceUuid = canonicalBleUuid(rawServiceUuid);
+  const characteristicUuid = canonicalBleUuid(rawCharacteristicUuid);
   const cacheKey = serviceUuid + ":" + characteristicUuid;
   const cached = entry.characteristics.get(cacheKey);
   if (cached) return cached;

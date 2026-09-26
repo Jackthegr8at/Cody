@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getRpcSession } from "@/lib/rpc-manager";
-import { apiErrorResponse, resolveEngineSessionOr404, resolveSessionPathOr404 } from "@/lib/api-utils";
+import { agentCommandErrorResponse, getStateBounded, resolveEngineSessionOr404, resolveSessionPathOr404 } from "@/lib/api-utils";
 import { getHarness } from "@/lib/harness";
 
 export async function GET(
@@ -14,8 +14,7 @@ export async function GET(
     // below would 404 a brand-new running session.
     const rpc = getRpcSession(id);
     if (rpc?.isAlive()) {
-      const state = await rpc.send({ type: "get_state" });
-      return NextResponse.json({ running: true, state });
+      return NextResponse.json(await getStateBounded(rpc));
     }
 
     // A non-omp engine has no session file to fall back on: its index row is
@@ -31,6 +30,6 @@ export async function GET(
     if ("response" in resolved) return resolved.response;
     return NextResponse.json({ running: false });
   } catch (error) {
-    return apiErrorResponse(error);
+    return agentCommandErrorResponse(error);
   }
 }

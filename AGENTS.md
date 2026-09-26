@@ -1756,6 +1756,156 @@ paged).
   `capability.sid` alone — a body may name any session id, but it must match
   the token, and the caller's identity is derived server-side from it.
 
+### Browser-hosted hardware (`lib/devices/`)
+
+The hardware is connected to the machine running Cody in the browser, not to the
+server. The page owns the real `SerialPort`, `USBDevice`, or BLE
+characteristic; the server only relays frames within that Cody session. Browser
+grants are user-selected, secure-context capabilities. Do not claim, widen, or
+re-use a grant across sessions.
+
+- **Discover first.** `device_list` reports the current browser's secure-context
+  and Serial/USB/Bluetooth capabilities plus its granted device IDs. If it has
+  no device, ask the user to use the Devices panel's browser picker. Web Serial
+  is unavailable on Android, where the WebUSB serial polyfill is used when
+  available; browser/OS/driver support is reported rather than assumed.
+- **A BLE UUID reaches the browser only as a full 128-bit string or an
+  assigned name** (`canonicalBleUuid`, lib/devices/client.ts). Web Bluetooth
+  accepts a 16/32-bit alias only as a NUMBER; the STRING `"0x18f0"` makes
+  `BluetoothUUID.getService` throw, and Android Chrome fails the whole
+  `requestDevice` picker on it ("Invalid Service name"). Every hex alias is
+  expanded onto the Bluetooth base UUID before `requestDevice`,
+  `getPrimaryService` or `getCharacteristic`, whatever form the agent or
+  the user typed. Verified against headless Chromium's own `BluetoothUUID`.
+- **Grants, identity, and leases are strict.** A device is owned by one session;
+  raw requests and a high-level operation hold mutually exclusive leases.
+  Re-adoption is limited to the same full USB VID/PID/serial identity. A device
+  which re-enumerates into another identity or mode needs a fresh user grant,
+  then a new operation and confirmation. Do not retry or replay a write across
+  disconnect, cancellation, or mode change. Raw USB IN/control-IN calls are
+  bounded (five seconds by default); an expired connection is invalidated.
+- **Use the raw tools only for discovery or a protocol Cody does not implement.**
+  `device_open`, `device_read`, `device_write`, `device_close`,
+  `usb_transfer`, and `ble_gatt` are available after a grant. Opening USB
+  reports claimed interfaces, descriptors, and endpoints; a requested
+  unclaimable interface fails rather than becoming a partial success. On
+  Windows an interface held by another driver cannot be claimed; this is a host
+  driver issue, not a retryable device error. Do not hand-roll packet loops in
+  `eval` for an implemented protocol (ESP, ADB, fastboot, DFU, Gecko, STM32,
+  or STK500).
+
+#### Operations, artifacts, and progress
+
+Use high-level operation tools for supported work:
+`device_detect`, `device_dump`, `device_flash`, `device_exec`,
+`device_push`, `device_pull`, `device_monitor`,
+`device_monitor_send`, `device_operation_status`, and
+`device_operation_cancel`. Start requests name the exact browser `device`,
+`protocol`, and where relevant target, offset, interface, and artifact
+`fileId` with its displayed SHA-256. The operation runs independently in the
+page. Read progress/status or cancel it; never translate approval into a tool
+argument. Phase/state/confirmation/terminal events are immediate; live
+progress and output are coalesced at 200 ms. Status deliberately retains only
+128 terminal records, each bounded to 256 events, 512 output lines, and 64 KiB
+of output.
+
+Input uploads (picker, drop, or an authorized local-path import) and device
+outputs are browser-owned session artifacts. `DeviceArtifactStore` hashes each
+Blob and waits for its IndexedDB commit in `cody-device-artifacts`; hydrate
+restores that session's escrow after reload. Artifacts never become server files
+or cross another session. Use the Devices panel's explicit download to retain an
+important backup outside browser storage. An output backup is selectable as a new input without download/re-upload; selecting it does not itself restore anything, and there is no generic or automatic restore. The panel displays artifact hashes, output,
+progress, cancellation, and the exact confirmation footprint.
+
+#### Verified flashing is intrinsic, never caller-designed
+
+A caller cannot supply a layout, geometry, protections, or approval in
+`options`. The selected protocol must first detect the device and produce its
+own intrinsic plan. Unknown geometry, a mismatched target/offset/chip, missing
+exact readback, or a partial/unknown destructive footprint refuses before a
+write. For an accepted flash, Cody hashes the original payload, expands to the
+complete erase/program footprint, backs up that complete footprint to committed
+artifact escrow, presents exactly one direct browser confirmation, writes once,
+and exact-reads the complete footprint back for SHA-256 verification. The
+confirmation distinguishes the payload digest/range from the actual program
+digest/erase range and names an exact protected-region override when one is
+allowed. ACKs, progress, CRCs, or a successful command are not verification.
+
+Protected region matching is classifier-enforced; only the exact named override
+for the matched protected class is accepted. A lost acknowledgement is unknown
+completion, never permission to retry. This applies to every supported flashing
+protocol and is intentionally stricter than vendor command-line behavior.
+
+#### Supported protocol boundaries
+
+- **ESP serial/SPI:** `detect`, `dump`, and verified `flash` are supported
+  through esptool. Detected ESP targets accept exact caller offsets within detected capacity and
+  `firmware`, `flash`, `factory`, or `spi-boot` targets; a 4 KiB
+  leading/trailing read-modify-write plan preserves the whole erase footprint.
+  ESP32 factory spans the intrinsic prefix/spi-boot/firmware range, and the
+  ESP8266 offset-zero `0..0x10000` range is conservatively spi-boot
+  protected; either needs exact `allow-spi-boot` when intersected. The flasher writes
+  once, uses esptool device MD5, then reads the full footprint back and
+  SHA-256-verifies it. Erase and eFuse actions are refused; detect does not
+  promise secure-boot or encryption discovery.
+- **Fastboot:** `detect`, `dump`, `flash`, and narrowly bounded `exec`
+  are supported. Flash has no inferred eMMC topology: it accepts only a whole
+  named partition at offset zero after exact partition/fetch size discovery,
+  full fetched backup, and full fetch readback hash verification. Every
+  partition is conservatively protected and needs the exact shown override.
+  Erase and partial/unknown-readback flashes refuse. `exec` supports volatile
+  `download` (unverified), readback-verified `set_active`, and reboot/reboot-
+  bootloader (unverified); it is not vendor CLI parity.
+- **USB DFU:** `detect`, `dump`, verified `flash`, and confirmed
+  `abort`/`clear_status` maintenance are descriptor-bound. Flash is allowed
+  only for bcdDFU `0x011a` on the actual selected `@Internal Flash` DfuSe
+  map, with contiguous readable/erasable/writable g-sectors inside the STM32
+  program range; it requires target `internal-flash`, an explicit absolute
+  offset, and raw binary (not a `.dfu` container). All internal flash is
+  conservatively protected and needs exact `allow-bootloader`. Cody escrows,
+  merges, writes, and exact-reads every touched sector without manifestation or
+  reset before proof. Generic bcdDFU `0x0110` remains detect/dump/exec only;
+  flash rejects. No caller descriptor option creates a capability.
+- **ADB:** `detect`, `push`, `pull`/`dump`, typed reboot, and a narrow
+  `exec` surface are authenticated with Cody's persistent browser IndexedDB
+  RSA credential. CNXN validates framing; only a bounded legacy existing-stream
+  OPEN/OKAY/CLSE probe is the fallback, not modern feature negotiation. Push
+  hashes and escrows the old target, confirms the exact target/digest, transfers
+  content-addressed 4 MiB staged chunks, validates its prefix after reconnect,
+  verifies the stage, and atomically replaces only then; a final disconnect
+  hashes the target before any rebuild/move. Exec permits literal `id`,
+  `uname -a`, `df -h`, and `getprop ro.*`; TWRP ORS queues only literal
+  backup/print lines in confirmation details and never executes them. New ADB
+  authorization or a different USB mode needs user re-grant; raw partition,
+  fuse, mount, and shell bypasses refuse.
+- **Serial bootloaders:** Gecko provides detection/XMODEM framing only until a
+  verified readback-capable flash profile exists. STM32 flash is limited to ROM
+  PID `0x0410` (STM32F103 medium-density), factory-size discovery, and 1 KiB
+  page-aligned backup/program/readback; unknown geometry refuses and every
+  program-flash write needs exact `allow-bootloader`. STK500 is limited to
+  ATmega328P signature `1e950f`, 32 KiB flash, 128-byte pages, application
+  `[0,0x7000)`, and its protected top 4 KiB bootloader; bootloader writes need
+  `allow-bootloader`. Both retain full physical-footprint escrow/readback.
+- **CMSIS-DAP/DAPLink and generic UF2 are not shipped.** WebUSB transport is
+  assessed feasible for a future target-specific CMSIS-DAP profile, but there
+  is no DAP dependency, generic memory-write/flash operation, or host helper
+  here. Generic UF2 copy does not prove programming or retention and has no
+  flash capability.
+
+#### Evidence and the optional helper
+
+Browser and fake-transport tests exercise the software guards only. No real browser
+grants or physical hardware operations were performed; hardware behavior is **unverified on real hardware**. Follow
+`docs/hardware-checklist.md` for the manual, recoverable-device evidence
+before treating any protocol as field-verified; it authorizes no destructive
+operation and each real action still needs an exact point-of-risk approval.
+
+`docs/hardware-host-helper.md` is a design, not a shipped component. A future
+optional local helper would be per-user and local-only, signed and bound to one
+origin/session/device/protocol, use typed allowlisted vendor invocations (never
+shell/PATH passthrough), require native point-of-risk confirmation and
+revocation, and enforce the same backup/readback rule. It supplies no current
+vendor CLI parity, elevated capability, CMSIS-DAP, or generic UF2 flashing.
 ### Disk exhaustion is a first-class failure (`lib/disk-space.ts`)
 - The instance data dir is finite and often quota-capped (a ZFS dataset on
   Unraid appdata). When it fills, npm dies with `errno -122` — EDQUOT, which
@@ -1900,6 +2050,21 @@ handled or safely ignored.
   and an accent sparkle beside the model name read as "auto-picked".
 - **Display names and picker controls stay presentation-only.** `formatModelDisplayName()` in `lib/model-display.ts` is the shared display boundary for the composer, transcript, and usage surfaces; it may improve a catalog label but never changes the routing identifier. Fast remains beside the existing Composer model picker, and its adjacent Manage models gear opens Settings › Models. Only Smart is pinned; the ordinary named-model list has no sticky selection.
 - **Composer quota is model-scoped, but the popup covers the whole session.** The RING gauges the selected/live model: select usage windows for that model; a reported tier explicitly scopes its bucket even when it is also marked shared; only untiered buckets apply to the account as a whole. Render the raw engine-reported plan without inferring a `$tier` convention. Saved resets are a separate single summary that keeps explicit zero visible; only meaningful positive account rows expand it. Under Smart routing, subagents and fallback chains other providers consume quota in the same session, so `lib/session-active-models.ts` derives every model in use this run (live model, Smart resolution, each subagent's `resolvedModel`, fallback `to`, this run's assistant turns) and the popup renders their windows EXPANDED under "Also in use", each attributed to what uses it ("Subagent scout (research)", "Fallback for this conversation"); OpenRouter credits appear the same way when only a subagent rides that gateway. Limits nothing in the session touches stay in the collapsed "Other limits" section that says they cannot stop the selected model.
+- **The popover is a hierarchy, not a report** (`components/QuotaPopover.tsx`).
+  The owner runs several accounts per provider and many models, and the old
+  popover gave every fact equal weight: about 800 px of cards, pills and
+  explanation paragraphs over the transcript. The order is fixed:
+  1. The selected model, with its % used, and one meter for the BINDING
+     window (the tightest one on the serving account). Other windows get
+     one line each.
+  2. Accounts, only when there is more than one: one line each. "Use reset"
+     sits on a limited account's own row when that account holds a credit.
+  3. Also in use, one line each.
+  4. Saved resets and other limits, collapsed.
+  5. A one-line freshness footer.
+
+  Explanations live in tooltips, never inline, and colour marks state only.
+  About 320 px tall collapsed.
 - **The ring says whose quota it is, and how old the reading is.** With more
   than one account on a provider, every window label carries the account's
   POSITION (`brandedAccountLabel` → "Claude · Primary · 5-hour window"), and
@@ -2012,6 +2177,47 @@ handled or safely ignored.
 - The sidebar listens to `/api/agent/running/events`, backed by `subscribeRunningSessions()` in `lib/rpc-manager.ts`, so running badges update without polling.
 - `useAgentSession` still treats per-session SSE as primary for chat events, but while a run is active it periodically calls `GET /api/agent/[id]` and also reconciles on `visibilitychange`/`online`. This fixes missed `agent_end` events from background tabs or half-open connections.
 - Prompt runs use a monotonic run id; late SSE or slow reconciliation responses from an old run must be ignored so they cannot resurrect stale streaming bubbles.
+
+### Sending during a run: one pipeline, an outbox, and no silent drops
+
+Three owner reports shared one root: the composer guessed whether a turn was
+running, and every wrong guess lost a message. Enter during a turn left the
+text in the box, a steer "hung" and then showed up after a refresh, and a
+second Enter was silently ignored while the first was in flight.
+
+- **The engine decides, not the client.** An existing session is sent a
+  `prompt` with `streamingBehavior` ("steer" | "followUp", from the Settings
+  submit-during-run preference). omp starts a run when idle and queues the
+  message when streaming. The wrapper marks `promptRunning` for the idle case
+  exactly as it does for a plain prompt. A plain `prompt` without
+  `streamingBehavior` sent while omp is streaming is ACKED and then fails
+  asynchronously with AgentBusyError on an already-settled id, so the message
+  vanishes. Never send one to an existing session.
+- **Every send carries a `clientMessageId`**, and the wrapper memoizes its
+  outcome (10 min). A repeat id rejoins the first promise and never re-sends
+  to omp, so client retries are safe by construction.
+- **The route waits a bounded time for the ack** and otherwise answers 202
+  `pending` while the command stays in flight; the client re-POSTs the same
+  id to learn the outcome. A steer, follow-up or queued-prompt ack timeout
+  never recycles the child: only the idle plain-prompt no-ack path may,
+  because only there is nothing running to lose.
+- **omp serializes ordinary RPC commands** (`RpcInputDispatcher`), so one
+  slow command delays every later one, get_state included. GET routes
+  therefore bound `get_state` and fall back to the wrapper's last known state
+  plus the live flags it tracks itself, marked `stale`, instead of hanging a
+  session switch behind someone else's command.
+- **Client outbox** (`lib/outbox.ts`, sessionStorage per session). The
+  composer clears immediately; each message moves sending → queued/started →
+  delivered, or ends failed with Retry and Edit (Edit restores text and
+  images). Retries on network error, 202, 409 `session_restarting` and 503
+  back off up to 2 minutes, then stop at failed. Nothing is ever dropped
+  without a visible row, and unfinished entries resume after reload or
+  switching back.
+- **A delivered user message always renders.** `message_end` with role
+  `user` is appended even when the client believes no run is active (the
+  old `agentRunningRef` guard dropped steers that landed after a missed
+  `agent_start`). It is deduped against the transcript and resolves the
+  first matching outbox and queue entry.
 
 ### Composer-attached panels (`components/ComposerPanels.tsx`)
 - The live todo plan (`TodoList`) and the subagent roster live **pinned above
@@ -2249,6 +2455,35 @@ handled or safely ignored.
   side still self-heals separately: `signalWhenSessionFileAppears()` in
   `lib/rpc-manager.ts` polls for the file after `agent_start` and re-signals
   the sidebar once it lands.
+
+### Session switching: paint from cache, never wait on the engine
+
+The owner saw slow switches and sessions that stayed blank, even after a
+refresh, until a turn finished. Three causes, each measured on a real 21 MB
+session:
+
+- **The transcript never waits for engine state.** `loadSession` fetches the
+  transcript and `/state` concurrently and releases the loading gate when the
+  TRANSCRIPT settles. Gating it on the state fetch is what kept a session
+  blank: state rides omp's serialized RPC queue, so it can sit behind a
+  running turn's command for the whole turn.
+- **Server: parse once per file version.** `loadSessionFileCached`
+  (lib/session-reader.ts) memoizes the parse by path, size, mtime and load
+  options. The ownership check runs before any hit. Repeat GETs went from
+  0.9–1.6 s to 0.04–0.19 s.
+- **Client: stale-while-revalidate across switches.**
+  `lib/session-transcript-cache.ts` (12 sessions, 15 min) lives above the
+  per-switch remount, so a revisited session paints before any request
+  (2.4–3.0 s → ~0.45 s) and then refreshes. Deleting a session clears its
+  entry.
+- **A switch aborts the old session's requests** (AbortController per
+  mount), so a slow response from the session you left can never land on the
+  one you opened.
+- **An inconclusive read is not "idle".** A `stale` state without a
+  snapshot never finishes a running turn in `reconcileAgentState`. If the
+  server says running but has no fresh state, the SSE stream still connects,
+  so live frames are not dropped. A failed reload keeps what is painted and
+  posts a notice; a first load that fails shows Retry, never a blank pane.
 
 ### Chat scroll: a follower is pinned to the tail, a reader is pinned to their content
 - Two states, one flag (`completionScrollAllowedRef`, "following"). Following:
