@@ -35,17 +35,16 @@ name: Cody Desktop
 # Container releases live at tags vX.Y.Z (docker.yml); desktop publishes to a
 # separate, clearly-prefixed namespace. Every release run moves two releases:
 #   - `desktop-vX.Y.Z` (immutable, one per version): the human-facing history.
-#     An ORDINARY, VISIBLE release -- prerelease:false, so it appears in the
-#     Releases list like any other -- created with `--latest=false` so it can
-#     never take the repo's single /releases/latest slot. That slot belongs to
+#     Visible once a container release exists; before the fork's first
+#     container release it stays a prerelease, because GitHub can assign the
+#     first ordinary release /releases/latest despite `--latest=false`.
+#     That slot belongs to
 #     the container train: the ShipLog plugin on Unraid reads this repo's
 #     releases as the container's changelog, and a desktop build answering
-#     /releases/latest would misreport the server version. GitHub moves that
-#     pointer only for a release published with make_latest true/legacy, so an
-#     explicit `--latest=false` IS the isolation mechanism. (prerelease:true
-#     used to be that mechanism, at the cost of burying every desktop release
-#     below every container release.) The release job asserts the outcome
-#     afterwards and re-hides the release if the assertion ever fails.
+#     /releases/latest would misreport the server version. Once a container
+#     release exists, `--latest=false` keeps visible desktop history out of
+#     that slot. The release job asserts the outcome and re-hides any desktop
+#     release that nevertheless takes it.
 #   - `desktop-latest` (rolling release, force-moved tag): the machine-facing
 #     update-check target, and the one release that stays prerelease:true -- it
 #     is a pointer, not a changelog entry, so keeping it out of the human list
@@ -881,18 +880,31 @@ jobs:
           } > "${RUNNER_TEMP}/release-notes.md"
           cat "${RUNNER_TEMP}/release-notes.md"
 
-      # Immutable per-version release: desktop's own history/changelog, and an
-      # ordinary visible release. `--latest=false` is the load-bearing flag --
-      # see the top-of-file comment: without it GitHub would hand this release
-      # the repo's /releases/latest slot, which the container train owns. No
-      # --prerelease, deliberately: these are stable builds and burying them
-      # was the old workaround for exactly the problem --latest=false solves.
-      # `gh` rather than an action so the flags are the API's own vocabulary.
+      # A new fork has no container GitHub Release yet. GitHub may still make
+      # its FIRST ordinary release /releases/latest even with --latest=false.
+      # Keep desktop history prerelease until a v* container release owns that
+      # slot; backfill visibility on a later desktop run after that happens.
+      - name: Detect container release
+        id: container-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          latest=$(gh api "repos/${REPO}/releases/latest" --jq '.tag_name' 2>/dev/null || true)
+          case "$latest" in
+            v*) echo 'exists=true' >> "$GITHUB_OUTPUT" ;;
+            *) echo 'exists=false' >> "$GITHUB_OUTPUT" ;;
+          esac
+          echo "container latest: ${latest:-<none>}"
+
+      # Immutable per-version release: desktop's own history/changelog.
       - name: Publish desktop-vX.Y.Z (history)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.version.outputs.version }}
           REUSE_ROOTFS: ${{ needs.version.outputs.reuse_rootfs }}
+          CONTAINER_RELEASE_EXISTS: ${{ steps.container-release.outputs.exists }}
         run: |
           set -euo pipefail
 
@@ -911,11 +923,15 @@ jobs:
             )
           fi
 
+          release_flags=(--latest=false)
+          if [ "$CONTAINER_RELEASE_EXISTS" != true ]; then
+            release_flags+=(--prerelease)
+          fi
           gh release create "desktop-v${VERSION}" \
             --title "Cody Desktop ${VERSION}" \
             --notes-file "${RUNNER_TEMP}/release-notes.md" \
             --target "${GITHUB_SHA}" \
-            --latest=false \
+            "${release_flags[@]}" \
             "${assets[@]}" \
             dist/desktop-manifest.json
 
@@ -927,6 +943,7 @@ jobs:
       # passed explicitly because PATCHing a release without it defaults to
       # true, which is exactly the slot-grab this whole design prevents.
       - name: Make older desktop releases visible
+        if: steps.container-release.outputs.exists == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -952,11 +969,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           VERSION: ${{ needs.version.outputs.version }}
+          CONTAINER_RELEASE_EXISTS: ${{ steps.container-release.outputs.exists }}
         run: |
           set -euo pipefail
           pre=$(gh api "repos/${REPO}/releases/tags/desktop-v${VERSION}" --jq '.prerelease')
-          [ "$pre" = "false" ] || {
-            echo "::error::desktop-v${VERSION} published as a prerelease; it will be buried in the Releases list."
+          expected_pre=false
+          if [ "$CONTAINER_RELEASE_EXISTS" != true ]; then expected_pre=true; fi
+          [ "$pre" = "$expected_pre" ] || {
+            echo "::error::desktop-v${VERSION} prerelease=${pre}; expected ${expected_pre}."
             exit 1
           }
 
@@ -971,7 +991,7 @@ jobs:
               exit 1
               ;;
           esac
-          echo "desktop-v${VERSION} is visible and the container still owns /releases/latest"
+          echo "desktop-v${VERSION} visibility is correct and /releases/latest is not a desktop release"
 
       # Rolling pointer: this is the ONLY thing the desktop app's Rust
       # updater ever polls -- by fixed tag + fixed asset name, never
