@@ -18,6 +18,9 @@ const nextConfig = (phase: string): NextConfig => {
     // root, Next can choose a parent lockfile on Windows and traverse protected
     // user-profile junctions while compiling.
     outputFileTracingRoot: process.cwd(),
+    // CI and Windows hosts may report dozens of logical CPUs while having
+    // enough memory for only a few page-data workers.
+    experimental: { cpus: 2 },
     // jiti transpiles OMP's settings schema at request time and resolves its
     // own runtime files by path; bundling it breaks those lookups.
     serverExternalPackages: ["node-pty", "undici", "ws", "jiti", "puppeteer-core", "http-proxy"],

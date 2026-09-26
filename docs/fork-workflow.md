@@ -10,15 +10,16 @@ not the source of truth for the version used here.
 - `upstream` is `nphil/Cody`, fetch-only in this checkout. Do not push to it.
 - `codex/maintained` is the maintained integration branch. It is separate from
   PR #20's branch, so routine work does not silently expand that pull request.
-- Keep fork `main` unchanged until its inherited Docker and Windows publishing
-  workflows have been adapted and validated for the fork. A push to `main`
-  triggers release jobs; the current Windows workflow still references nphil's
-  container image and release manifest.
+- Fork `main` is the public release branch. Its Docker and Windows workflows
+  publish to this fork's GHCR package and release channel; pushing it can
+  publish artifacts. Promote only a verified `codex/maintained` commit and
+  inspect both workflow results after promotion.
 
 ## Working and upstream updates
 
 1. Commit and test local changes on `codex/maintained`. Push that branch to
-   `origin`, and deploy only an explicitly verified commit.
+   `origin`. Promote it to fork `main` only after release checks pass, and
+   deploy only an explicitly verified commit.
 2. Fetch `upstream`. Record and review each unseen upstream/OMPweb commit in
    an integration ledger before advancing the integration baseline.
 3. Integrate new upstream commits in a separate temporary branch or worktree

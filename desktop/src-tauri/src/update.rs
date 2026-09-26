@@ -13,7 +13,7 @@ pub const MANIFEST_URL: &str = match option_env!("CODY_DESKTOP_MANIFEST_URL") {
     Some(url) => url,
     // The rolling desktop-latest tag, never /releases/latest — desktop
     // releases are prereleases, so "latest" belongs to the container train.
-    None => "https://github.com/nphil/Cody/releases/download/desktop-latest/desktop-manifest.json",
+    None => "https://github.com/Jackthegr8at/Cody/releases/download/desktop-latest/desktop-manifest.json",
 };
 
 pub const SHELL_VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -56,6 +56,12 @@ jobs:
           [ -n "$v" ] || v=$(node -p "require('./package.json').version")
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
+      - name: Normalize GHCR image owner
+        id: image
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "repo=ghcr.io/$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')/cody" >> "$GITHUB_OUTPUT"
+
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -266,9 +272,9 @@ jobs:
           # released X.Y.Z at newer content just because package.json still
           # carries that version.
           tags: |
-            ${{ github.ref == 'refs/heads/main' && format('ghcr.io/{0}/cody:latest', github.repository_owner) || '' }}
-            ${{ (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')) && format('ghcr.io/{0}/cody:{1}', github.repository_owner, steps.meta.outputs.version) || '' }}
-            ghcr.io/${{ github.repository_owner }}/cody:sha-${{ github.sha }}
+            ${{ github.ref == 'refs/heads/main' && format('{0}:latest', steps.image.outputs.repo) || '' }}
+            ${{ (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')) && format('{0}:{1}', steps.image.outputs.repo, steps.meta.outputs.version) || '' }}
+            ${{ steps.image.outputs.repo }}:sha-${{ github.sha }}
           # Update-tracking tools (and Unraid itself) read the version label.
           labels: |
             org.opencontainers.image.title=Cody

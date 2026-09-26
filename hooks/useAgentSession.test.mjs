@@ -12,7 +12,7 @@ import test from "node:test";
  * never silently wait forever again.
  */
 
-const hook = await readFile(new URL("./useAgentSession.ts", import.meta.url), "utf8");
+const hook = (await readFile(new URL("./useAgentSession.ts", import.meta.url), "utf8")).replace(/\r\n/g, "\n");
 const chatWindow = await readFile(new URL("../components/ChatWindow.tsx", import.meta.url), "utf8");
 
 const locales = Object.fromEntries(

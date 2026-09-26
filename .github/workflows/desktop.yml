@@ -74,8 +74,8 @@ name: Cody Desktop
 # of upload, and a full re-download for every installed client -- to produce a
 # byte-identical runtime. So the `version` job resolves, cheaply, whether the
 # image actually moved, and `rootfs-build` is skipped when it did not:
-#   - current digest of ghcr.io/nphil/cody:latest, from the registry v2 API
-#     with an anonymous pull token (the package is public). Two seconds and
+#   - current digest of this repository owner's cody image, from the registry v2 API
+#     with a read-scoped pull token. Two seconds and
 #     zero bytes of image data -- see the step for why this beats the docker
 #     CLI here.
 #   - the digest the LIVE manifest records (desktop-latest's
@@ -133,9 +133,10 @@ jobs:
   # patched into the binary, the tag, and the manifest can never disagree.
   version:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 40
     permissions:
       contents: read
+      packages: read
     outputs:
       version: ${{ steps.compute.outputs.version }}
       prev_tag: ${{ steps.compute.outputs.prev_tag }}
@@ -149,6 +150,7 @@ jobs:
       runtime_sha256: ${{ steps.runtime.outputs.runtime_sha256 }}
       runtime_size: ${{ steps.runtime.outputs.runtime_size }}
       runtime_image_digest: ${{ steps.runtime.outputs.runtime_image_digest }}
+      image_tag: ${{ steps.image.outputs.tag }}
     steps:
       # Full history, because the changelog walks commits back to the
       # previous desktop tag; the default depth-1 checkout has nothing to
@@ -280,18 +282,60 @@ jobs:
       # `false` costs ten minutes; a wrong `true` publishes a manifest whose
       # runtime URL is dead or whose digest lies about what is inside the
       # tarball. The asymmetry is the whole design of this step.
+      # On a mixed desktop/server push, Docker and Desktop start together.
+      # Wait for this exact commit's image instead of snapshotting a stale
+      # :latest. A desktop-only push has no Docker run and uses :latest.
+      - name: Select and await runtime image
+        id: image
+        env:
+          BEFORE: ${{ github.event.before }}
+          OWNER: ${{ github.repository_owner }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=latest
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            if ! changed=$(git diff --name-only "$BEFORE" "$GITHUB_SHA" 2>/dev/null); then
+              tag="sha-${GITHUB_SHA}"
+            elif printf '%s\n' "$changed" | grep -Ev '^(desktop/|docs/windows\.md$|\.github/workflows/desktop\.yml$)' | grep -q .; then
+              tag="sha-${GITHUB_SHA}"
+            fi
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          [ "$tag" != latest ] || exit 0
+
+          repo="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')/cody"
+          token=$(curl -fsS -u "$GITHUB_ACTOR:$GH_TOKEN" \
+            "https://ghcr.io/token?scope=repository:${repo}:pull&service=ghcr.io" | jq -r '.token // empty')
+          [ -n "$token" ] || { echo '::error::GHCR did not issue a pull token'; exit 1; }
+          for attempt in $(seq 1 100); do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' -I \
+              -H "Authorization: Bearer ${token}" \
+              -H 'Accept: application/vnd.oci.image.index.v1+json' \
+              "https://ghcr.io/v2/${repo}/manifests/${tag}" || true)
+            if [ "$code" = 200 ]; then
+              echo "Runtime image ${repo}:${tag} is published"
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::error::The Docker workflow did not publish ${repo}:${tag} within 34 minutes"
+          exit 1
+
       - name: Decide whether the runtime needs rebuilding
         id: runtime
         env:
           # Must name the SAME image rootfs-build snapshots; they are written
           # separately because this step talks to the registry API (which
           # wants repo and tag apart) and that one talks to the docker CLI.
-          IMAGE_REPO: nphil/cody
-          IMAGE_TAG: latest
+          IMAGE_OWNER: ${{ github.repository_owner }}
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
           FORCE_ROOTFS: ${{ inputs.force_rootfs }}
           REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          IMAGE_REPO="$(printf '%s' "$IMAGE_OWNER" | tr '[:upper:]' '[:lower:]')/cody"
 
           # Answers "why did/didn't it rebuild?" in one grep-able line, always
           # written, whichever way the decision goes.
@@ -322,7 +366,7 @@ jobs:
           # be exactly what `docker inspect .RepoDigests` (rootfs-build's
           # source for imageDigest) records after pulling the tag, which is
           # what makes the comparison below meaningful at all.
-          token=$(curl -fsS --retry 3 --retry-delay 2 -m 30 \
+          token=$(curl -fsS -u "$GITHUB_ACTOR:$GH_TOKEN" --retry 3 --retry-delay 2 -m 30 \
             "https://ghcr.io/token?scope=repository:${IMAGE_REPO}:pull&service=ghcr.io" \
             | jq -r '.token // empty') || token=""
           if [ -z "$token" ]; then
@@ -517,7 +561,7 @@ jobs:
           # rolling channel, not a per-version URL). The Rust shell reads it
           # via option_env! at compile time; exact consumption is reconciled
           # at integration.
-          CODY_DESKTOP_MANIFEST_URL: https://github.com/nphil/Cody/releases/download/desktop-latest/desktop-manifest.json
+          CODY_DESKTOP_MANIFEST_URL: https://github.com/${{ github.repository }}/releases/download/desktop-latest/desktop-manifest.json
         run: npx tauri build
 
       # NOTE -- not wired in yet: once desktop/ ships a `--self-test` flag
@@ -578,6 +622,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      packages: read
     outputs:
       cody_version: ${{ steps.snapshot.outputs.cody_version }}
       image_digest: ${{ steps.snapshot.outputs.image_digest }}
@@ -586,19 +631,29 @@ jobs:
       # container image, never repo files -- the rootfs artifact name is
       # keyed by the CONTAINER's own version label (cody_version below),
       # not the desktop app's version.
-      - name: Snapshot ghcr.io/nphil/cody:latest
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Snapshot this fork's Cody image
         id: snapshot
+        env:
+          IMAGE_OWNER: ${{ github.repository_owner }}
+          IMAGE_TAG: ${{ needs.version.outputs.image_tag }}
         run: |
           set -euo pipefail
-          docker pull ghcr.io/nphil/cody:latest
+          image="ghcr.io/$(printf '%s' "$IMAGE_OWNER" | tr '[:upper:]' '[:lower:]')/cody:${IMAGE_TAG}"
+          docker pull "$image"
 
-          cody_version=$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' ghcr.io/nphil/cody:latest)
-          image_digest=$(docker inspect --format '{{ index .RepoDigests 0 }}' ghcr.io/nphil/cody:latest)
+          cody_version=$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$image")
+          image_digest=$(docker inspect --format '{{ index .RepoDigests 0 }}' "$image")
           echo "cody_version=$cody_version" >> "$GITHUB_OUTPUT"
           echo "image_digest=$image_digest" >> "$GITHUB_OUTPUT"
           echo "source image: $image_digest (cody $cody_version)"
 
-          cid=$(docker create ghcr.io/nphil/cody:latest)
+          cid=$(docker create "$image")
           mkdir -p rootfs dist
 
           # docker create (not run) so the snapshot is exactly the image's
@@ -717,6 +772,8 @@ jobs:
           PREV_RUNTIME_SIZE: ${{ needs.version.outputs.runtime_size }}
           PREV_RUNTIME_DIGEST: ${{ needs.version.outputs.runtime_image_digest }}
           REPO: ${{ github.repository }}
+          IMAGE_OWNER: ${{ github.repository_owner }}
+          IMAGE_TAG: ${{ needs.version.outputs.image_tag }}
         run: |
           set -euo pipefail
           installer="cody-desktop-${VERSION}-x64-setup.exe"
@@ -817,9 +874,9 @@ jobs:
             # release that actually hosts the tarball, so this release's
             # shorter asset list is never mistaken for a broken build.
             if [ "$REUSE_ROOTFS" = "true" ]; then
-              echo "Runtime: **unchanged** (Cody ${cody_version}, \`${image_digest}\`) — reused from the [\`desktop-latest\`](https://github.com/${REPO}/releases/tag/desktop-latest) release, which hosts \`${rootfs}\`. \`ghcr.io/nphil/cody:latest\` has not moved since that snapshot, so this release ships the shell only and installed runtimes need no update."
+              echo "Runtime: **unchanged** (Cody ${cody_version}, \`${image_digest}\`) — reused from the [\`desktop-latest\`](https://github.com/${REPO}/releases/tag/desktop-latest) release, which hosts \`${rootfs}\`. The Cody image has not moved since that snapshot, so this release ships the shell only and installed runtimes need no update."
             else
-              echo "Runtime: **rebuilt**. Rootfs flattened from \`ghcr.io/nphil/cody:latest\` at \`${image_digest}\` (Cody ${cody_version})."
+              echo "Runtime: **rebuilt**. Rootfs flattened from \`ghcr.io/${IMAGE_OWNER,,}/cody:${IMAGE_TAG}\` at \`${image_digest}\` (Cody ${cody_version})."
             fi
           } > "${RUNNER_TEMP}/release-notes.md"
           cat "${RUNNER_TEMP}/release-notes.md"

@@ -16,7 +16,7 @@ import { Tooltip, Collapsible, CollapsibleTrigger, CollapsiblePanel } from "./ui
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { StreamingMarkdown } from "./StreamingMarkdown";
 
-import { requestDistill, retryDistill, useDistillChatSettings, useDistillState, useSeenOnScreen, type DistillRequest, type DistillState } from "@/hooks/useDistill";
+import { requestDistill, retryDistill, useDistillChatSettings, useDistillState, useSeenOnScreen, type DistillState } from "@/hooks/useDistill";
 import { SubagentStatusIcon } from "./SubagentStatusIcon";
 import { formatCost, formatDuration, formatTokens, shortModel } from "@/lib/subagent-format";
 import { formatModelDisplayName } from "@/lib/model-display";
@@ -527,26 +527,26 @@ function AssistantMessageView({
   const distill = useDistillChatSettings();
   const firstSeenEntryIdRef = useRef(entryId);
   const finalizedHere = firstSeenEntryIdRef.current === undefined && entryId !== undefined;
-  const replyRequest = useMemo<DistillRequest | null>(() => {
-    if (!distill.supported || distill.replies === "off") return null;
-    if (isStreaming === true || !finalizedHere) return null;
-    if (sessionId === undefined || entryId === undefined) return null;
-    if (textContent.length < REPLY_DISTILL_MIN_CHARS) return null;
-    return {
-      key: `${sessionId}:${entryId}:reply:${distill.replies}`,
+  const replyRequestKey = distill.supported && distill.replies !== "off"
+    && !isStreaming && finalizedHere
+    && sessionId !== undefined && entryId !== undefined
+    && textContent.length >= REPLY_DISTILL_MIN_CHARS
+    ? `${sessionId}:${entryId}:reply:${distill.replies}`
+    : null;
+  const replyState = useDistillState(replyRequestKey);
+  const [showFullReply, setShowFullReply] = useState(false);
+  useEffect(() => {
+    if (replyRequestKey === null || sessionId === undefined || entryId === undefined || distill.replies === "off") return;
+    requestDistill({
+      key: replyRequestKey,
       sessionId,
       entryId,
       kind: "reply",
       text: textContent,
       verbosity: distill.replies,
       final: true,
-    };
-  }, [distill.supported, distill.replies, isStreaming, finalizedHere, sessionId, entryId, textContent]);
-  const replyState = useDistillState(replyRequest?.key ?? null);
-  const [showFullReply, setShowFullReply] = useState(false);
-  useEffect(() => {
-    if (replyRequest !== null) requestDistill(replyRequest);
-  }, [replyRequest]);
+    });
+  }, [replyRequestKey, sessionId, entryId, distill.replies, textContent]);
   const distillShown = replyState.text;
   const distilledReply = !showFullReply && distillShown !== "" && replyState.errorCode === null ? distillShown : null;
   // The thinking summary needs nothing per-block beyond this flag; sessionId,
@@ -761,10 +761,10 @@ function AssistantMessageView({
       <div style={{
         display: "flex", alignItems: "center", gap: 8, marginTop: 4,
       }}>
-        {replyRequest !== null && (
+        {replyRequestKey !== null && (
           <ReplyDistillFooter
             state={replyState}
-            distillKey={replyRequest.key}
+            distillKey={replyRequestKey}
             showFull={showFullReply}
             onToggle={() => setShowFullReply((prev) => !prev)}
           />

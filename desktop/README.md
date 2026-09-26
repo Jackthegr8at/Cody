@@ -101,7 +101,7 @@ bootstrapper).
 The release-manifest URL is baked at build time:
 
 ```powershell
-$env:CODY_DESKTOP_MANIFEST_URL = "https://github.com/nphil/cody/releases/latest/download/desktop-manifest.json"
+$env:CODY_DESKTOP_MANIFEST_URL = "https://github.com/Jackthegr8at/Cody/releases/download/desktop-latest/desktop-manifest.json"
 ```
 
 Unset, it falls back to that same URL. The manifest carries two
