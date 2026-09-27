@@ -16,7 +16,7 @@ import { Tooltip, Collapsible, CollapsibleTrigger, CollapsiblePanel } from "./ui
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { StreamingMarkdown } from "./StreamingMarkdown";
 
-import { requestDistill, retryDistill, useDistillChatSettings, useDistillState, useSeenOnScreen, type DistillState } from "@/hooks/useDistill";
+import { requestDistill, retryDistill, thinkingSummaryKeys, useDistillChatSettings, useDistillState, useOnScreen, type DistillState } from "@/hooks/useDistill";
 import { SubagentStatusIcon } from "./SubagentStatusIcon";
 import { formatCost, formatDuration, formatTokens, shortModel } from "@/lib/subagent-format";
 import { formatModelDisplayName } from "@/lib/model-display";
@@ -531,7 +531,7 @@ function AssistantMessageView({
     && !isStreaming && finalizedHere
     && sessionId !== undefined && entryId !== undefined
     && textContent.length >= REPLY_DISTILL_MIN_CHARS
-    ? `${sessionId}:${entryId}:reply:${distill.replies}`
+    ? `${sessionId}:${entryId}:reply:${distill.replies}:${distill.plainLanguage ? "plain" : "normal"}`
     : null;
   const replyState = useDistillState(replyRequestKey);
   const [showFullReply, setShowFullReply] = useState(false);
@@ -544,14 +544,16 @@ function AssistantMessageView({
       kind: "reply",
       text: textContent,
       verbosity: distill.replies,
+      plain: distill.plainLanguage,
       final: true,
     });
-  }, [replyRequestKey, sessionId, entryId, distill.replies, textContent]);
+  }, [replyRequestKey, sessionId, entryId, distill.replies, distill.plainLanguage, textContent]);
   const distillShown = replyState.text;
   const distilledReply = !showFullReply && distillShown !== "" && replyState.errorCode === null ? distillShown : null;
   // The thinking summary needs nothing per-block beyond this flag; sessionId,
   // entryId and the block index are already on their way down.
   const distillThinking = distill.supported && distill.thinking;
+  const distillPlainLanguage = distill.plainLanguage;
   useEffect(() => {
     if (!isStreaming) {
       // Finalise any un-finished thinking block durations on stream end
@@ -709,7 +711,7 @@ function AssistantMessageView({
           }
           return (
             <div key={`${entryId ?? "stream"}-${originalIndex}`} data-block-index={originalIndex}>
-              <BlockView block={block} toolResults={toolResults} isStreaming={isStreaming} isActiveStreamBlock={originalIndex === activeStreamIndex} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} distillThinking={distillThinking} />
+              <BlockView block={block} toolResults={toolResults} isStreaming={isStreaming} isActiveStreamBlock={originalIndex === activeStreamIndex} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} distillThinking={distillThinking} distillPlainLanguage={distillPlainLanguage} />
             </div>
           );
         })}
@@ -820,12 +822,12 @@ function AssistantMessageView({
   );
 }
 
-function BlockView({ block, toolResults, isStreaming, isActiveStreamBlock, streamingDuration, toolCallDurations, cwd, onOpenFile, sessionId, entryId, blockIndex, thinkingDefaultExpanded, activityDisplayMode, distillThinking }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; isActiveStreamBlock?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number; thinkingDefaultExpanded: boolean; activityDisplayMode: ActivityDisplayMode; distillThinking: boolean }) {
+function BlockView({ block, toolResults, isStreaming, isActiveStreamBlock, streamingDuration, toolCallDurations, cwd, onOpenFile, sessionId, entryId, blockIndex, thinkingDefaultExpanded, activityDisplayMode, distillThinking, distillPlainLanguage }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; isActiveStreamBlock?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number; thinkingDefaultExpanded: boolean; activityDisplayMode: ActivityDisplayMode; distillThinking: boolean; distillPlainLanguage: boolean }) {
   if (block.type === "text") {
     return <TextBlock block={block as TextContent} isStreaming={isStreaming} isActiveStreamBlock={isActiveStreamBlock} cwd={cwd} onOpenFile={onOpenFile} />;
   }
   if (block.type === "thinking") {
-    return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} sessionId={sessionId} entryId={entryId} blockIndex={blockIndex} defaultExpanded={thinkingDefaultExpanded} isStreaming={isStreaming} isActiveStreamBlock={isActiveStreamBlock} distillThinking={distillThinking} />;
+    return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} sessionId={sessionId} entryId={entryId} blockIndex={blockIndex} defaultExpanded={thinkingDefaultExpanded} isStreaming={isStreaming} isActiveStreamBlock={isActiveStreamBlock} distillThinking={distillThinking} distillPlainLanguage={distillPlainLanguage} />;
   }
   if (block.type === "toolCall") {
     const tc = block as ToolCallContent;
@@ -939,14 +941,26 @@ function useCollapseMotion() {
  * live one written while the block was still growing, and nothing at all.
  * A block whose summary never arrives renders exactly as it does today.
  *
- * While the reasoning streams, a new summary is asked for once the block has
- * grown THINKING_DISTILL_GROWTH_CHARS since the last request and at least
- * THINKING_DISTILL_INTERVAL_MS has passed; each supersedes the one before.
- * Settled blocks wait until they are actually scrolled to, so opening a long
- * session distills nothing.
+ * While the reasoning streams AND the box is collapsed, a new running summary
+ * is asked for once the block has grown THINKING_DISTILL_GROWTH_CHARS since
+ * the last request and at least THINKING_DISTILL_INTERVAL_MS has passed —
+ * there is nothing to show a running summary for while the box is open, so
+ * nothing is asked for then either. The FINAL summary is asked for once the
+ * block settles regardless of whether it happens to be expanded right then,
+ * so it is already there — or already in flight — the moment the reader
+ * later collapses it; settled HISTORY blocks still wait until actually
+ * scrolled to, so opening a long session distills nothing up front.
  */
-function useThinkingSummary({ enabled, sessionId, entryId, blockIndex, thinking, deferred, isStreaming, isActiveStreamBlock }: {
-  enabled: boolean;
+function useThinkingSummary({ distillOn, collapsed, plain, sessionId, entryId, blockIndex, thinking, deferred, isStreaming, isActiveStreamBlock }: {
+  /** Distill is on AND this instance can serve it. Gates BOTH keys — with
+   *  it off, nothing is ever asked for. */
+  distillOn: boolean;
+  /** Whether the box is closed right now. Gates ONLY the live (streaming)
+   *  key: the final (settled) request is asked regardless, so it is ready
+   *  the moment the reader collapses the block later — see
+   *  thinkingSummaryKeys in hooks/useDistill.ts. */
+  collapsed: boolean;
+  plain: boolean;
   sessionId?: string;
   entryId?: string;
   blockIndex: number;
@@ -955,8 +969,7 @@ function useThinkingSummary({ enabled, sessionId, entryId, blockIndex, thinking,
   isStreaming: boolean;
   isActiveStreamBlock: boolean;
 }): { text: string; working: boolean; ref: (node: HTMLElement | null) => void } {
-  const liveKey = enabled && sessionId !== undefined ? `${sessionId}:live:${blockIndex}` : null;
-  const finalKey = enabled && sessionId !== undefined && entryId !== undefined ? `${sessionId}:${entryId}:${blockIndex}` : null;
+  const { liveKey, finalKey } = thinkingSummaryKeys({ distillOn, collapsed, plain, sessionId, entryId, blockIndex });
   const liveState = useDistillState(liveKey);
   const finalState = useDistillState(finalKey);
 
@@ -978,17 +991,17 @@ function useThinkingSummary({ enabled, sessionId, entryId, blockIndex, thinking,
       const text = latestRef.current;
       askedLenRef.current = text.length;
       askedAtRef.current = Date.now();
-      requestDistill({ key: liveKey, sessionId, blockIndex, kind: "thinking", text, final: false });
+      requestDistill({ key: liveKey, sessionId, blockIndex, kind: "thinking", text, plain, final: false });
     }, wait);
-  }, [growing, liveKey, sessionId, blockIndex, thinking]);
+  }, [growing, liveKey, sessionId, blockIndex, thinking, plain]);
   useEffect(() => () => {
     if (timerRef.current !== null) window.clearTimeout(timerRef.current);
   }, []);
 
-  const [attach, seen] = useSeenOnScreen(finalKey !== null && !isStreaming);
+  const [attach, onScreen] = useOnScreen(finalKey !== null && !isStreaming);
   const [historyText, setHistoryText] = useState<string | null>(null);
   useEffect(() => {
-    if (!seen || finalKey === null || sessionId === undefined || entryId === undefined) return;
+    if (!onScreen || finalKey === null || sessionId === undefined || entryId === undefined) return;
     const text = deferred ? historyText : thinking;
     if (text === null) {
       // Deferred history keeps the reasoning behind a route. The loader is
@@ -1001,8 +1014,8 @@ function useThinkingSummary({ enabled, sessionId, entryId, blockIndex, thinking,
       return () => { alive = false; };
     }
     if (text === "") return;
-    requestDistill({ key: finalKey, sessionId, entryId, blockIndex, kind: "thinking", text, final: true });
-  }, [seen, finalKey, sessionId, entryId, blockIndex, deferred, thinking, historyText]);
+    requestDistill({ key: finalKey, sessionId, entryId, blockIndex, kind: "thinking", text, plain, final: true });
+  }, [onScreen, finalKey, sessionId, entryId, blockIndex, deferred, thinking, historyText, plain]);
 
   const text = useMemo(() => {
     if (finalState.text !== "") return finalState.text;
@@ -1020,7 +1033,7 @@ function useThinkingSummary({ enabled, sessionId, entryId, blockIndex, thinking,
   };
 }
 
-const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex, defaultExpanded, isStreaming, isActiveStreamBlock, distillThinking }: {
+const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex, defaultExpanded, isStreaming, isActiveStreamBlock, distillThinking, distillPlainLanguage }: {
   block: ThinkingContent;
   duration?: number;
   sessionId?: string;
@@ -1034,6 +1047,9 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
   isActiveStreamBlock?: boolean;
   /** Distill is on AND this instance can serve it: summarize while collapsed. */
   distillThinking: boolean;
+  /** Everyday language instead of developer shorthand; see
+   *  lib/distill-preferences.ts's `plainLanguage`. */
+  distillPlainLanguage: boolean;
 }) {
   const { t } = useI18n();
   const [userExpanded, setUserExpanded] = useState<boolean | null>(null);
@@ -1048,7 +1064,9 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
   // when the preference changes. One request per block, ever.
   const requestedRef = useRef(false);
   const summary = useThinkingSummary({
-    enabled: distillThinking && !expanded,
+    distillOn: distillThinking,
+    collapsed: !expanded,
+    plain: distillPlainLanguage,
     sessionId,
     entryId,
     blockIndex,
@@ -1195,6 +1213,7 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
   && prev.isStreaming === next.isStreaming
   && prev.isActiveStreamBlock === next.isActiveStreamBlock
   && prev.distillThinking === next.distillThinking
+  && prev.distillPlainLanguage === next.distillPlainLanguage
 ));
 
 

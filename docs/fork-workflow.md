@@ -20,8 +20,9 @@ not the source of truth for the version used here.
 1. Commit and test local changes on `codex/maintained`. Push that branch to
    `origin`. Promote it to fork `main` only after release checks pass, and
    deploy only an explicitly verified commit.
-2. Fetch `upstream`. Record and review each unseen upstream/OMPweb commit in
-   an integration ledger before advancing the integration baseline.
+2. Fetch `upstream`. Record and review each unseen Cody commit in
+   `docs/cody-upstream-ledger.md`; review OMPweb commits separately in the
+   OMPweb port ledger before advancing either integration baseline.
 3. Integrate new upstream commits in a separate temporary branch or worktree
    based on `codex/maintained`. Resolve overlaps without replacing native
    Windows, taskbar, notifications, models, pagination, provider account

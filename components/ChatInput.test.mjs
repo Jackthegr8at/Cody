@@ -74,28 +74,34 @@ test("renders goal, planning, and advisor indicators at the composer", () => {
   assert.match(html, /(Advisor enabled|chatInput\.advisorEnabled)/);
 });
 
-test("labels the queued bar by its first kind and only offers Steer for follow-ups", () => {
-  const renderQueued = (queuedMessages) => renderToStaticMarkup(
+test("labels each held outbox entry by behavior and only offers Steer for follow-ups", () => {
+  const renderQueued = (behavior) => renderToStaticMarkup(
     React.createElement(ChatInput, {
       onSend() {},
       onAbort() {},
       onPromoteQueuedToSteer() {},
       isStreaming: true,
-      queuedMessages,
+      outbox: [{
+        id: `queued-${behavior}`,
+        sessionId: "test-session",
+        text: behavior === "followUp" ? "Follow-up task" : "Already prioritized task",
+        images: [],
+        behavior,
+        status: "queued",
+        attempt: 1,
+        nextRetryAt: null,
+        retryingSince: 0,
+        createdAt: 0,
+        held: true,
+      }],
     }),
   );
 
-  const followUpHtml = renderQueued({
-    followUp: ["Follow-up task"],
-    steering: [],
-  });
+  const followUpHtml = renderQueued("followUp");
   assert.match(followUpHtml, />(Queued follow-up|chatInput\.queuedFollowUp)</);
   assert.match(followUpHtml, />(Steer|chatInput\.queuedSteerAction)</);
 
-  const steerHtml = renderQueued({
-    followUp: [],
-    steering: ["Already prioritized task"],
-  });
+  const steerHtml = renderQueued("steer");
   assert.match(steerHtml, />(Queued steer|chatInput\.queuedSteer)</);
   assert.doesNotMatch(steerHtml, />(Steer|chatInput\.queuedSteerAction)</);
 });
@@ -166,10 +172,10 @@ const composerSource = await readFile(new URL("./ChatInput.tsx", import.meta.url
 test("queued message deletion requires the shared accessible confirmation", () => {
   const deleteHandler = composerSource.slice(
     composerSource.indexOf("const handleQueuedDelete"),
-    composerSource.indexOf("const handleQueuedSteer"),
+    composerSource.indexOf("const handlePreparationEdit"),
   );
-  assert.match(deleteHandler, /setQueuedDeleteTarget\(\{ text: firstQueued\.text, draftKey, queue: queuedMessages \}\)/);
-  assert.doesNotMatch(deleteHandler, /onRemoveQueuedMessage\?\.\(firstQueued\.text\)/);
+  assert.match(deleteHandler, /setQueuedDeleteTarget\(\{ id, text, draftKey \}\)/);
+  assert.doesNotMatch(deleteHandler, /onRemoveQueuedMessage\?\.\(text\)/);
 
   const dialog = composerSource.slice(
     composerSource.indexOf("<ConfirmDialog"),
@@ -179,7 +185,7 @@ test("queued message deletion requires the shared accessible confirmation", () =
   assert.match(dialog, /chatInput\.queuedDeleteConfirmBody/);
   assert.match(dialog, /cancelLabel=\{t\("chatInput\.cancel"\)\}/);
   assert.match(dialog, /danger/);
-  assert.match(dialog, /onRemoveQueuedMessage\?\.\(activeDeleteTarget\.text\)/);
+  assert.match(dialog, /onRemoveQueuedMessage\?\.\(activeDeleteTarget\.id\)/);
 });
 
 test("every attached image goes through the compressor, and failures are named", () => {

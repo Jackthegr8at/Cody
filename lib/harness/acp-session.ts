@@ -529,6 +529,7 @@ export class AcpEngineSession implements EngineSession {
   private listeners: Array<(event: EngineEvent) => void> = [];
   private messages: AcpMessage[] = [];
   private onDestroyCallback: (() => void) | null = null;
+  private closeListeners = new Set<() => void>();
   private onIdentityChangeCallback: ((oldId: string, newId: string) => void) | null = null;
   private readyPromise: Promise<void> | null = null;
   /**
@@ -594,6 +595,10 @@ export class AcpEngineSession implements EngineSession {
     return this._alive && this.turn !== null;
   }
 
+  hasPendingInput(): boolean {
+    return this.pendingPermissions.size > 0;
+  }
+
   start(): void {
     void this.ensureReady();
   }
@@ -612,6 +617,24 @@ export class AcpEngineSession implements EngineSession {
 
   onDestroy(cb: () => void): void {
     this.onDestroyCallback = cb;
+  }
+
+  onClose(listener: () => void): () => void {
+    if (this.destroyPromise) {
+      listener();
+      return () => {};
+    }
+    this.closeListeners.add(listener);
+    return () => { this.closeListeners.delete(listener); };
+  }
+
+  /** Once, whichever way the session ended: destroy or the agent exiting. */
+  private notifyClosed(): void {
+    const listeners = [...this.closeListeners];
+    this.closeListeners.clear();
+    for (const listener of listeners) {
+      try { listener(); } catch { /* one stream's cleanup must not stop another's */ }
+    }
   }
 
   onIdentityChange(cb: (oldId: string, newId: string) => void): void {
@@ -672,6 +695,7 @@ export class AcpEngineSession implements EngineSession {
       this.killTimer = setTimeout(() => this.child?.kill("SIGKILL"), KILL_GRACE_MS);
     }
     this.onDestroyCallback?.();
+    this.notifyClosed();
     await pending;
   }
 
@@ -738,6 +762,7 @@ export class AcpEngineSession implements EngineSession {
         if (this.killTimer) clearTimeout(this.killTimer);
         this.killTimer = null;
         this._alive = false;
+        this.notifyClosed();
         resolve();
       });
     });

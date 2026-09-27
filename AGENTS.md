@@ -1,19 +1,18 @@
 # Cody - Development Notes
 
-> **Jack's maintained fork:** In this checkout, follow
-> [docs/fork-workflow.md](docs/fork-workflow.md) for Git remotes, branch and
-> publishing decisions. The upstream-only Git workflow below does not authorize
-> pushes to nphil's repository or automatic releases from this fork.
+> **Jack's maintained fork:** [docs/fork-workflow.md](docs/fork-workflow.md) is
+> authoritative for Git remotes, branches, upstream integration, publishing,
+> and deployment. Upstream workflow conventions do not override it.
 
 > Owner workflow preferences (release discipline, delegation/token strategy,
 > deployment context) live in **CLAUDE.md**; this file is the codebase map.
 
-## Git Workflow (project rule)
+## Git Workflow (maintained fork)
 
-`main` is the only long-lived branch and is always the latest, up-to-date state.
-Commit and push directly to `main` — do not open feature branches, and delete any
-that appear once their work is merged. Keep the branch list clean: `main` locally,
-`origin/main` remotely, nothing else.
+Follow [docs/fork-workflow.md](docs/fork-workflow.md) for the fork's integration
+and release process. In particular, upstream changes are reviewed commit by
+commit on an isolated branch, `upstream` is fetch-only, and this file does not
+authorize commits, pushes, releases, or deployments.
 
 ## Quick Start
 
@@ -197,7 +196,10 @@ app/api/
 lib/
   omp/                 shared omp foundations (paths, CLI probe, RpcProcess,
                         marketplace.ts pure-Node catalog reader, plugin-cli.ts
-                        shared `omp plugin` execFile/JSON helpers)
+                        shared `omp plugin` execFile/JSON helpers,
+                        isolated-agent-dir.ts's shared empty-mcp.json symlink
+                        dance for sidebar chat, Distill, the session namer
+                        and the web-research planner)
   agent-client.ts      typed fetch helper for /api/agent commands
   draft-store.ts       composer drafts: in-memory per session key, with the TEXT
                         mirrored to sessionStorage (`cody:draft:<key>`, 64 K cap)
@@ -249,7 +251,8 @@ lib/
     runner.ts          engine support (same rule as session-namer), the fallback
                        chain and the 2-at-a-time queue
   distill-preferences.ts  browser-local Distill preferences (`cody:distill`):
-                       reply verbosity + collapsed-thinking summaries, normalizer
+                       reply verbosity, collapsed-thinking summaries, plain
+                       language, normalizer
   harness/             pluggable engine seam: adapters (omp/pi/claude/codex),
                        runtime selection state, three transports (rpc-ui, ACP,
                        per-turn), session index, binary probe + on-demand install
@@ -435,8 +438,10 @@ components/
   InfoPanel.tsx       right-panel Info tool: versions + workspace diagnostics
   ChatMinimap.tsx     scroll minimap alongside the message list
   MarkdownBody.tsx    markdown renderer
-  PermissionRequestCard.tsx one approval an ACP engine is blocked on, rendered
-                      inline at the live tail of the transcript (never a modal)
+  InputDock.tsx       non-modal composer panel for extension, permission, and
+                      refusal questions; keeps the transcript visible
+  PermissionRequestCard.tsx one approval an ACP engine is blocked on, shown
+                      inside InputDock with the transcript still in view
   ProviderIcon.tsx    vendored brand marks (models.dev logo set + simple-icons for
                       the few it stubs); ProviderIcon = a provider, ModelIcon = a
                       model's vendor. Never hotlinked — see the note below
@@ -549,8 +554,10 @@ hooks/
   useDisplayRequests.ts    display-request SSE → snapshot/live request state
   useDistill.ts            the client store over POST /api/distill: SSE framing,
                            per-key in-memory cache, FIFO queue capped at two
-                           concurrent streams, supersede-by-abort, and the
-                           process-wide dormancy latch (unsupported/401/403)
+                           concurrent streams (a queued request for a key is
+                           replaced by a newer one, a DISPATCHED one is left
+                           to finish), the permanent `unsupported` latch and
+                           the separate temporary 401/403 backoff
   useIsMobile.ts           responsive breakpoint hook
   usePrefersReducedMotion.ts OS reduce-motion preference (SMIL-safe)
   useTheme.ts              theme state: saved per account (/api/accounts/me) and mirrored in localStorage "cody:theme"; first visit follows prefers-color-scheme
@@ -1018,25 +1025,24 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   (`lib/harness/engine-bin.ts`), and an install drops every argv's answer for
   every binary, because a cache HIT never expires and the companion CLI's bin
   name is not something the installer models.
-- **`HarnessAdapter.verifiedVersion`** is the exact engine version this Cody
-  build was last audited against — every adapter carries one (omp: 18.1.21,
+- **HarnessAdapter.verifiedVersion** is the exact engine version this Cody
+  build was last audited against — every adapter carries one (omp: 18.3.2,
   claude-agent-acp: 0.73.0, codex-acp: 1.8.0, pi: 0.73.1).
   It is shown verbatim on the System hub's engine roster card (Settings ›
-  System › Engines) ("Built to vX.Y.Z", served through `/api/engines`), and
-  its MAJOR drives the warnings: `checkEngineUpdates` compares it to the
-  latest/installed versions (`latestBeyondVerified` /
-  `installedBeyondVerified`) and the System hub's engine roster warns
-  before — and marks after — a jump past it: core surfaces keep working
-  (settings are schema-driven, unknown RPC frames are
-  tolerated), but brand-new engine features may not appear in Cody until
-  Cody updates. Bump the marker in the same commit as each compatibility
-  audit. It is always a version of the package `installSpec` names, so for a
-  two-package engine it is the ADAPTER's — which is why the notice names
-  `engineCli.adapterLabel` rather than the engine's brand ("Claude Code ACP
-  adapter v1.0.0", never "Claude Code v1.0.0" while Claude Code is on
-  2.1.x). The CLI half crossing a major raises no notice today: Cody speaks
-  to the adapter, and an ACP engine's Cody surfaces are capability-gated
-  almost entirely off.
+  System › Engines) ("Built to vX.Y.Z", served through /api/engines), and
+  the full semver drives warnings: checkEngineUpdates compares patch, minor,
+  and major releases to the verified version (latestBeyondVerified /
+  installedBeyondVerified). The System hub warns before an update and marks
+  an installed version past that exact marker: core surfaces keep working
+  (settings are schema-driven, unknown RPC frames are tolerated), but brand-new
+  engine features may not appear in Cody until Cody updates. Bump the marker
+  in the same commit as each compatibility audit. It is always a version of
+  the package installSpec names, so for a two-package engine it is the
+  ADAPTER's — which is why the notice names engineCli.adapterLabel rather than
+  the engine's brand ("Claude Code ACP adapter v1.0.0", never "Claude Code
+  v1.0.0" while Claude Code is on 2.1.x). The CLI half becoming newer still
+  raises no notice: Cody speaks to the adapter, and an ACP engine's Cody
+  surfaces are capability-gated almost entirely off.
 - **The seam is CI-enforced** (`lib/architecture.test.mjs`): outside
   `lib/omp/` and `lib/harness/`, importing `lib/omp/*` fails the test unless
   the file is on the in-test allowlist with a written reason, stale allowlist
@@ -1298,6 +1304,9 @@ that do work, each measured in isolation:
   endpoints) and image blobs still work. Safe because SQLite puts `-wal`/`-shm`
   beside the symlink TARGET (verified), and omp already opens that database
   from concurrent processes. A missing target is skipped, not linked dangling.
+  The symlink logic itself is `lib/omp/isolated-agent-dir.ts`, shared with
+  Distill, the session namer and the web-research planner (see "Distill" and
+  "Model presets" below) — only the directory location is sidebar-specific.
 - **Every tool result is budgeted** (`lib/sidebar-context-budget.ts`). An
   unknown context window is assumed to be the SMALLEST supported, never
   unlimited: guessing large is how a 4B model receives a result it cannot fit,
@@ -1406,8 +1415,9 @@ must name the panel that fixes it.
 ### RPC session lifecycle (`lib/rpc-manager.ts`)
 - One wrapper per session id, keyed in a `globalThis` registry.
 - `globalThis` survives Next.js hot-reload; plain module-level Map does not.
-- Idle sessions are disposed after a timeout; concurrent `startRpcSession()`
-  calls must share a single start promise.
+- Idle sessions are disposed after a timeout — never while an event stream is
+  attached (see "A viewed session stays warm" below); concurrent
+  `startRpcSession()` calls must share a single start promise.
 - **Every ack the wrapper awaits is bounded** (`PROMPT_ACK_TIMEOUT_MS`, 30 s):
   `RpcProcess.sendCommand` never times out unless told to, and a child that
   accepts a `prompt` (or the `/mcp list` prompt) but never acks it used to
@@ -2104,9 +2114,10 @@ handled or safely ignored.
   `{from, to, role}`, so the JOB is derived from `role`: a built-in role
   (`default` = this conversation, `tiny` = session naming, `task`, `advisor`,
   ...) or `subagent:<id>`, and a CHILD subagent's fallback never arrives as
-  a top-level frame at all: it comes wrapped in `subagent_event
-  {payload:{id, event}}`, attributed to that subagent by roster name, and
-  never repaints the composer's model marker (`announceFallbackApplied`,
+  a top-level frame at all: it is read off that child's progress frames
+  (`resolvedModel` changing with `resolvedModelIsFallback` set,
+  `activityFromProgressChange`), attributed to that subagent by roster name,
+  and never repaints the composer's model marker (`announceFallbackApplied`,
   `hooks/session-control-scope.ts` `fallbackAttributionFor*`). The provider
   error is remembered PER JOB from `auto_retry_start`, because usage-aware
   fallback fires before any request with no retry at all: such a switch says
@@ -2193,31 +2204,118 @@ second Enter was silently ignored while the first was in flight.
   `streamingBehavior` sent while omp is streaming is ACKED and then fails
   asynchronously with AgentBusyError on an already-settled id, so the message
   vanishes. Never send one to an existing session.
-- **Every send carries a `clientMessageId`**, and the wrapper memoizes its
-  outcome (10 min). A repeat id rejoins the first promise and never re-sends
-  to omp, so client retries are safe by construction.
-- **The route waits a bounded time for the ack** and otherwise answers 202
-  `pending` while the command stays in flight; the client re-POSTs the same
-  id to learn the outcome. A steer, follow-up or queued-prompt ack timeout
-  never recycles the child: only the idle plain-prompt no-ack path may,
-  because only there is nothing running to lose.
-- **omp serializes ordinary RPC commands** (`RpcInputDispatcher`), so one
-  slow command delays every later one, get_state included. GET routes
-  therefore bound `get_state` and fall back to the wrapper's last known state
-  plus the live flags it tracks itself, marked `stale`, instead of hanging a
-  session switch behind someone else's command.
-- **Client outbox** (`lib/outbox.ts`, sessionStorage per session). The
-  composer clears immediately; each message moves sending → queued/started →
-  delivered, or ends failed with Retry and Edit (Edit restores text and
-  images). Retries on network error, 202, 409 `session_restarting` and 503
-  back off up to 2 minutes, then stop at failed. Nothing is ever dropped
-  without a visible row, and unfinished entries resume after reload or
-  switching back.
-- **A delivered user message always renders.** `message_end` with role
-  `user` is appended even when the client believes no run is active (the
-  old `agentRunningRef` guard dropped steers that landed after a missed
-  `agent_start`). It is deduped against the transcript and resolves the
-  first matching outbox and queue entry.
+- **Every send carries a `clientMessageId`**, and the session wrapper keeps a
+  bounded delivery ledger for at least 30 minutes. Status moves monotonically
+  through `queued`/`started` to `delivered` or `failed`; repeat POSTs with the
+  same ID join the original delivery instead of sending a duplicate.
+  An ack is `{ delivery: "queued" | "started", clientMessageId, status?: "delivered" }`;
+  the optional status prevents a late ack from re-adding a delivered message.
+- **Resume checks the server before retrying.** The browser asks
+  `GET /api/agent/<sessionId>?clientMessageId=<id>` for each unfinished outbox
+  entry. The response is `{ deliveries: [...] }`; known entries adopt their
+  ledger status. Only unknown IDs are checked against the loaded transcript
+  (timestamp, text, and image count); a match settles the entry, otherwise the
+  browser retries with the same ID. A failed ledger lookup never triggers a
+  blind resend.
+- **Manual Retry checks before resending.** A known queued/started/delivered
+   result is adopted. A known server failure or an unknown ID absent from the
+   loaded transcript starts a new delivery with a fresh ID; an unknown ID that
+   matches the transcript is already delivered. Resume retries absent entries
+   with their original ID. A client timeout is only a guess; server failure is
+   final unless later delivery is proven.
+- **Delivery changes arrive by ID.** The wrapper emits `cody_delivery` SSE
+  frames with `clientMessageId` and status. A user `message_end` still renders
+  the message, but it does not settle an outbox row by text.
+- **OMP 18.3 prompt_result is correlated by RPC ID.** Structured failures are
+   surfaced once and deduped against the transcript; an aborted queued prompt
+   fails rather than claiming it was read. A terminal `agent_end` settles a
+   started send as delivered; engine loss settles started as delivered and
+   queued as failed. A joined all-mode user message and an image-only user
+   message can both prove delivery from the transcript.
+- **The route waits a bounded time for the ack** and answers 202
+   `pending` while the command stays in flight. Automatic transport and resume
+   retries keep the ID; manual Retry follows the ledger-first check above. A
+   steer, follow-up or queued-prompt ack timeout never recycles the child: only
+   the idle plain-prompt no-ack path may, because nothing was running to lose.
+- **omp serializes ordinary RPC commands** (`RpcInputDispatcher`), so one slow
+  command delays every later one, `get_state` included. GET routes therefore
+  bound `get_state` and fall back to the wrapper's last known state plus the live
+  flags it tracks itself, marked `stale`, instead of hanging a session switch
+  behind someone else's command.
+- **Client outbox** (`lib/outbox.ts`, sessionStorage per session). The composer
+  clears immediately; each message moves sending → queued/started → delivered,
+  or ends failed with Retry and Edit (Edit restores text and images). Retries on
+  network error, 202, 409 `session_restarting` and 503 back off up to 2 minutes,
+  then stop at failed. Nothing is ever dropped without a visible row; unfinished
+  entries resume only after the ledger-first check above.
+- Brand-new-session prompts and SidebarChatPanel sends also enter the same
+   outbox. Queue rows are derived from outbox state. The composer snapshots and
+   clears text, images and files before preparation; preparation failure restores
+   the snapshot if the composer is still empty, or keeps it in a failed Edit row
+   alongside any newer draft.
+- **A delivered user message always renders.** `message_end` with role `user`
+  is appended even when the client believes no run is active (the old
+  `agentRunningRef` guard dropped steers that landed after a missed
+  `agent_start`). The transcript is deduped against the loaded messages;
+  `cody_delivery` independently settles the matching outbox entry by client ID.
+- **Steers go to the engine at once; only follow-ups are held.** A follow-up
+  sent mid-run (or behind follow-ups still held) waits in the wrapper's
+  `heldQueue` — editable, deletable, handed back on Stop — and goes out when
+  the run ends, with a 1 s guard that re-checks until the hold is empty. A
+  steer is never held: omp delivers it into the reply it is streaming (live
+  steering), cuts a tool batch short, or reads it at the next step. The 0.41
+  hold kept a steer typed while the model was only WRITING until the whole
+  reply finished, and then sent it as a brand-new prompt. Promote ("Steer")
+  on a held follow-up hands it over immediately.
+- **A missed frame cannot strand a row.** While any outbox row is `queued`
+  or `started`, the client re-reads the ledger every 3 s
+  (`OUTBOX_LEDGER_POLL_MS`, a map lookup on the server, never an engine round
+  trip). The ledger client accepts `withdrawn` and `held`: rejecting
+  `withdrawn` used to fail the WHOLE lookup, silently.
+- **A run the page did not start gets its own run id.** A held follow-up
+  handed over at `agent_end` starts a run server-side; `agent_start` with no
+  run believed active bumps `promptRunIdRef`, so the previous run's terminal
+  reload cannot land on top of the new one.
+
+### A viewed session stays warm, and a closed one never leaves a deaf stream
+- **Idle disposal skips a session with an attached event stream**
+  (`resetIdleTimer`). A cold child costs a spawn (~2.7 s) plus omp's first-
+  prompt preparation (~4 s, measured: the memory backend's first recall), so
+  disposing the chat a user is looking at turned their next message into a
+  ~7 s wait before the agent even started.
+- **Every close is announced** (`EngineSession.onClose`, both the omp wrapper
+  and `AcpEngineSession`): idle, `restartIdleRpcSessions` after a settings
+  save, a crash. The events route ends its stream on it, after sending
+  `retry: 1000`, so the browser reconnects within a second and that reconnect
+  starts the replacement child. Before this, a stream stayed subscribed to
+  the dead wrapper, the next POST spawned a new one nobody listened to, and
+  the page sat on "Sent" until a manual refresh showed the agent had moved on.
+  An auto-reconnect re-registers host tools and re-checks the outbox.
+- **The tool roster is sent only when it changes** (`publishHostTools`,
+  signature-deduped, forced for a fresh child). `device_list` is always
+  published; the working hardware tools follow the granted-device count and
+  are withdrawn only after `DEVICE_TOOLS_RELEASE_GRACE_MS`. `device_list`
+  used to follow the browser's device socket, which flaps on every reload,
+  session switch and backgrounded tab: each flip re-sent the roster to omp's
+  one-at-a-time command line (delaying a send queued behind it) and printed
+  "xd://: unmounted device_list" / "mounted device_list" into the transcript.
+- **Status reads coalesce** (`COALESCED_READS`: `get_state`, `get_subagents`).
+  While one is waiting its turn in omp's queue, an identical ask joins it. The
+  page's pollers (15 s reconcile, stream watchdog, turn-end refresh, the
+  subagent dialog, the plan keeper) otherwise stacked dozens of copies during
+  a stall, which the child then worked through one by one ahead of the next
+  prompt.
+- **A steer into a running turn takes no workspace checkpoint.** It exists to
+  interrupt, the workspace is mid-edit anyway, and it must not wait on a full
+  `git add -A` of the workspace before it reaches omp. Prompts that start a run
+  and mid-run follow-ups still snapshot as before.
+- **omp can freeze for minutes on its own databases.** Measured: after a turn,
+  omp's post-turn memory work waited ~4.5 min on a locked `agent.db`
+  (`SQLiteError: database is locked` in `~/.omp/logs`); bun's SQLite waits
+  synchronously, so the child answered NO command meanwhile — `get_state`,
+  `get_subagents` and the next prompt all queued. Cody cannot unlock it; the
+  bounded ack (202 pending), the ledger poll and the dedupe above are what keep
+  the UI truthful through it. Check those logs first when "Sending…" lingers.
 
 ### Composer-attached panels (`components/ComposerPanels.tsx`)
 - The live todo plan (`TodoList`) and the subagent roster live **pinned above
@@ -2296,26 +2394,86 @@ second Enter was silently ignored while the first was in flight.
   two things on the client's request (`hooks/useDistill.ts`): a COLLAPSED
   thinking block shows a one-line running summary under its header
   (`data-testid="thinking-summary"`, re-requested while streaming every
-  ≥600 chars and ≥4 s, `final` once the block settles, lazily for history
-  blocks scrolled into view), and a FINISHED reply is replaced by a distilled
-  version at the Preferences verbosity (Off/Low/Medium/High,
-  `lib/distill-preferences.ts`) with a "Show full reply" footer
-  (`distilled-reply` / `distill-toggle`). Replies are distilled ONLY when
-  finalized in this page session or already cached; history is never
-  distilled on load, and replies under `REPLY_DISTILL_MIN_CHARS` (400) are
-  left alone because a paraphrase of a short answer is not shorter.
+  ≥600 chars and ≥4 s ONLY while collapsed — nothing to show a running
+  summary for while the box is open), plus a FINAL summary requested once
+  the block settles REGARDLESS of whether it happens to be expanded right
+  then (`thinkingSummaryKeys` in useDistill.ts decouples the two keys), so
+  it is already there, or already in flight, the moment the reader later
+  collapses it. A FINISHED reply is replaced by a distilled version at the
+  Preferences verbosity (Off/Low/Medium/High, `lib/distill-preferences.ts`)
+  with a "Show full reply" footer (`distilled-reply` / `distill-toggle`).
+  Replies are distilled ONLY when finalized in this page session or already
+  cached; history is never distilled on load, and replies under
+  `REPLY_DISTILL_MIN_CHARS` (400) are left alone because a paraphrase of a
+  short answer is not shorter.
+- **Isolated, or every attempt times out.** Every one-shot child (Distill's
+  and the session namer's) runs against `getOneShotAgentDir()`
+  (`lib/omp/isolated-agent-dir.ts`: empty `mcp.json`, `agent.db`/
+  `models.yml`/`config.yml`/`blobs` SYMLINKED to the real ones, never
+  copied, so credential refresh and provider edits still reach the one real
+  store) — the same idea `sidebarAgentDir()` and the web-research planner
+  already used, now one shared helper instead of three copies of it.
+  Measured cause of "summaries never appear": the real agent dir's
+  user-scope MCP servers made every spawn connect to them first — 45-58s on
+  a real install's two servers — before the model ever saw the prompt,
+  against a 20s per-attempt timeout that therefore could never succeed.
+  Isolated, the same spawn answers in single-digit seconds (~2-4s of fixed
+  omp startup, the rest is the model's own latency); `THINKING_TIMEOUT_MS`
+  is now 30s, sized off THAT measurement with margin for a legitimate
+  multi-turn retry a role's own fallback chain can trigger — not off the
+  old MCP tax. The web-research planner (`lib/model-presets/research.ts`)
+  keeps its OWN fresh directory per run instead of the shared one: it
+  spends its turn on untrusted web content, so a longer-lived shared dir is
+  the wrong shape for it regardless of the file-linking logic being shared.
 - **The subagent "summary" is not a model.** Chips and the transcript dialog
   show the raw tool-call intent strings and the verbatim `<id>.md`; the
   reusable one-shot mechanism is the session namer's `omp -p --mode=json`
   run (`lib/model-plan/one-shot.ts`), which Distill drives with `--model=`
   per attempt.
+- **The material is fenced and the task restated after it.** The other
+  assistant's raw text sits inside `<assistant_reasoning>`/
+  `<assistant_reply>` tags with the task repeated again right after the
+  closing tag (`buildDistillPrompt` in prompts.ts). The material is often
+  the OTHER assistant's own first-person narration ("I need to find...",
+  "I'll check..."), which a model that follows instructions weakly
+  continues instead of describing once system-prompt instructions are pages
+  behind it; putting the instruction where generation actually starts fixed
+  that for every chain model tried, not only the strongest one.
 - **Fall through, never fail hard.** Chain entries are validated
   syntactically only; Cody holds no opinion about which models exist. A
-  spawn failure, non-zero exit, unknown model, timeout and empty answer are
-  ONE case: try the next selector, then the engine's own default with no
-  `--model` at all. A distill that still fails leaves the original thinking
-  or reply exactly as it was, with at most a muted "Could not distill ·
-  Retry" row.
+  spawn failure, non-zero exit, unknown model, timeout, empty answer, and a
+  THINKING answer that addresses the reader instead of describing the
+  material (`looksLikeReplyNotDescription` in prompts.ts catches the
+  unambiguous self-referential opens — "I don't have...", "Sure, I can..." —
+  the same english-only, high-precision trade-off session-namer's
+  `REFUSAL_RE` already makes for the same class of failure) are ONE case:
+  try the next selector, then the engine's own default with no `--model` at
+  all. A distill that still fails leaves the original thinking or reply
+  exactly as it was, with at most a muted "Could not distill · Retry" row.
+  A server queue-overflow eviction (`DistillQueueOverflowError`, the
+  waitlist was full and dropped the oldest, usually off-screen, waiter) is
+  explicitly NOT that failure: it reads as never-asked and the client
+  forgets the request, so a later visit to the same now-visible block tries
+  again instead of staying latched at "Could not distill" forever.
+- **Two kinds of "can't right now" are not the same.** `unsupported` (an ACP
+  engine, no binary) is a structural, PERMANENT latch. A 401/403 is a
+  transient auth hiccup (clock skew, an expired credential cache, a proxy
+  needing re-auth) and only pauses every request for `AUTH_BACKOFF_MS`
+  (60s), then tries again on its own — conflating the two used to mean one
+  clock-skewed request disabled Distill for the rest of the page until
+  reload.
+- **Plain language is a phrasing toggle, not a third feature.**
+  `plainLanguage` in `DistillPreferences` (default off, Settings ›
+  Preferences, next to the existing Distill controls) asks the SAME
+  summaries in everyday words instead of developer shorthand: a thinking
+  summary names the goal rather than a code identifier unless the identifier
+  IS the point, and a reply keeps every decision and outcome but explains
+  jargon and never touches a command the reader must actually run. It rides
+  on whichever of replies/thinking summaries is already on and starts
+  nothing by itself. Sent as `plain` in the POST body and folded into BOTH
+  the server cache key (`distillCacheKey`'s 5th segment) and the client
+  store key, so a technical and a plain-language summary of the same block
+  never collide or serve each other stale.
 - **Deltas are an optimization.** `createFrameReader` in one-shot.ts is the
   pure NDJSON reducer: the answer comes from `turn_end`/`message_end` exactly
   as the namer takes it, every other frame type (including ones this build
@@ -2324,10 +2482,11 @@ second Enter was silently ignored while the first was in flight.
   REPLACES what deltas built, never appends.
 - **Cody-owned state.** The chain (`cody-distill.json`) and the summary cache
   (`cody-distill/<sessionId>.json`, keyed
-  `${entryId}:${blockIndex|-}:${kind}:${verbosity|-}`) live in the instance
-  data dir, never in omp's config.yml or the engine's session files, so an
-  engine upgrade or switch cannot lose or rewrite them. Under an ACP engine
-  the routes answer `unsupported` and every Distill surface hides.
+  `${entryId}:${blockIndex|-}:${kind}:${verbosity|-}:${plain|-}`) live in
+  the instance data dir, never in omp's config.yml or the engine's session
+  files, so an engine upgrade or switch cannot lose or rewrite them. Under
+  an ACP engine the routes answer `unsupported` and every Distill surface
+  hides.
 - **Smoothness.** The distilled reply streams through the coalescer, which reparses the full buffer on each animation frame, giving smooth multi-token reveals without a typewriter pacer. Thinking blocks auto-expand while streaming and collapse when finished, providing clear context hierarchy without jarring motion.
 - **Trap — a collapse box must not animate its own growth.**
   `.collapse-box-panel` carries a `height` transition (with
@@ -2340,35 +2499,50 @@ second Enter was silently ignored while the first was in flight.
   (`.collapse-box-panel--motion`, set by `useCollapseMotion` on a real
   toggle) is absent. Measured mid-stream afterwards: `transition-property:
   none`, p95 frame 18.6 ms, one frame over 32 ms in 1119.
-- **Cancel subtask** (`SubagentTranscriptDialog` `CancelSubtaskButton`): omp's
-  RPC has no per-subagent abort (only whole-turn `abort`), so the button
-  STEERS the parent through the existing `steer` path with an instruction to
-  `hub cancel` that id and continue without its result. It never claims the
-  child was killed; a failed steer is a toast and nothing else.
+- **Cancel subtask** (SubagentTranscriptDialog CancelSubtaskButton): omp's RPC
+  has no per-subagent abort, so the button steers the parent through the
+  existing steer path. OMP 18.3 uses write proc://<id>/kill; the instruction
+  names legacy hub cancel only for an older engine that lacks proc://. It never
+  claims the child was killed; a failed steer is a toast and nothing else.
 
 ### Subagent integration (`lib/subagent-types.ts`, `lib/subagent-history.ts`)
+- **Lifecycle + progress, never "events"** (`SUBAGENT_SUBSCRIPTION_LEVEL` in
+  lib/rpc-manager.ts). omp's events level forwards every child's streaming
+  delta as a `subagent_event` carrying the FULL message so far (~70 KB each).
+  Measured on a real session: five children thinking at once wrote 5.3 GB in
+  five minutes. omp spills output Cody has not read yet to a temp file
+  (`/tmp/omp-rpc-output-*/output`) and drains it at a few hundred KB/s, so
+  every later frame of that session — replies, `agent_end`, the answer to
+  `get_subagents` — arrived hours late and the roster could never refresh.
+  Progress frames (omp-throttled to ~7/s per child, ~11 KB) carry what the UI
+  shows. If a session looks frozen, check that temp file's size first.
 - **Live detail**: `subagent_progress` frames carry the full `AgentProgress`
   object — `lib/subagent-types.ts` parses it defensively into
   `SubagentInfo.progress` (current tool/intent, tokens, cost, context
   gauge, resolved model, retry state, detached flag, agentSource). The
   composer chips surface the current activity + telemetry line; retry
-  (`⟳ retrying N/M`) takes precedence over the tool line. `subagent_event`
-  frames also feed a bounded per-subagent activity buffer shown in the
-  transcript dialog.
+  (`⟳ retrying N/M`) takes precedence over the tool line. The transcript
+  dialog's activity list is derived from successive progress frames
+  (`activityFromProgressChange`: tool started, model switch or fallback,
+  reasoning change), and each frame bumps the child's transcript version so
+  an open dialog follows new output.
 - **The roster is run-scoped, on purpose** (`useAgentSession`): the composer
   panel is a live view of the CURRENT run, newest activity first (actives
   lead, then settled, both newest-first — `selectVisibleSubagents`). It is
-  NEVER seeded from on-disk history: run end clears it to empty and it stays
-  empty (still-working detached children re-adopt themselves through their
-  live frames; `mergeSubagents` refuses terminal frames for unknown ids
-  outside a run so late completions cannot resurrect chips). Seeding from
+  NEVER seeded from on-disk history: run end drops finished children and
+  keeps ones still working (background/async tasks outlive the main turn).
+  A progress frame for a RUNNING child the roster does not know adopts it —
+  that is how a child reappears after a session switch or a missed
+  `started` frame; `mergeSubagents` refuses terminal frames for unknown ids
+  outside a run so late completions cannot resurrect chips. Seeding from
   `extractSubagentHistory` is the removed design that bloated long
   conversations to 20+ stale chips — do not bring it back; past runs stay
   reachable through each task call's in-message summary (TaskResultPanel).
-  `get_subagents` snapshots still rehydrate the LIVE roster after SSE
-  reconnect (`refreshSubagentRoster`, wired into mount, send, and the
-  reconcile poll); the `/subagents` route is now consumed only for its
-  `subagentUsage` sum (`refreshSubagentUsage`).
+  `get_subagents` snapshots rehydrate the LIVE roster on mount of ANY live
+  session (main agent idle or not — the event stream is attached then too),
+  after SSE reconnect, on send, and on the reconcile poll; the `/subagents`
+  route is now consumed only for its `subagentUsage` sum
+  (`refreshSubagentUsage`).
 - **On-disk history** (`lib/subagent-history.ts`, `/api/sessions/[id]/subagents*`):
   omp persists each subagent's transcript to the parent session's sibling
   artifacts dir (`<session-dir>/<subagent-id>.jsonl`) and the parent file's
@@ -2777,7 +2951,11 @@ instance data dir (`cody-model-presets.json`), never in `config.yml`.
   (`lib/model-presets/research.ts`): tools restricted to `web_search`, a
   fresh temp cwd (no project `.mcp.json` or context files) and a fresh agent
   dir with an EMPTY `mcp.json` and only `agent.db`/`models.yml`/`config.yml`
-  symlinked. `--tools` alone is not enough: user MCP servers bypass it, and
+  symlinked (`lib/omp/isolated-agent-dir.ts`'s shared helper, given a
+  research-specific file list with no `blobs`; a FRESH per-run directory
+  here, not the reusable one Distill and the session namer share, because
+  this child spends its turn on untrusted web content).
+  `--tools` alone is not enough: user MCP servers bypass it, and
   an untrusted web page must never reach a tool that can touch files or
   commands. Proposals are validated against the live roster (selectors, each
   model's own `thinkingEfforts`, vision), cite their sources, and are only
