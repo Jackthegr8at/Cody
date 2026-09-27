@@ -123,7 +123,19 @@ function normalizeValues(raw: unknown): string[] | undefined {
   const values = raw.filter((entry): entry is string => typeof entry === "string");
   return values.length > 0 ? values : undefined;
 }
-function normalize(schemaModule: Record<string, unknown>, source: OmpSettingsSchema["source"]): OmpSettingsSchema | null {
+
+/** Optional UI copy can be computed by the engine and may depend on runtime-only helpers. */
+function optionalDescription(ui: Record<string, unknown>): string | undefined {
+  try {
+    const description = ui.description;
+    return typeof description === "string" ? description : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Exported to exercise the schema boundary with engine metadata fixtures. */
+export function normalize(schemaModule: Record<string, unknown>, source: OmpSettingsSchema["source"]): OmpSettingsSchema | null {
   const rawSchema = schemaModule.SETTINGS_SCHEMA;
   if (typeof rawSchema !== "object" || rawSchema === null) return null;
 
@@ -153,6 +165,7 @@ function normalize(schemaModule: Record<string, unknown>, source: OmpSettingsSch
     const type = definition.type;
     if (type !== "boolean" && type !== "enum" && type !== "number" && type !== "string" && type !== "array") continue;
     if (uiMeta.secret === true) continue;
+    const description = optionalDescription(uiMeta);
     const values = normalizeValues(definition.values);
     const options = normalizeOptions(uiMeta.options, type === "number" && typeof definition.default === "number" ? definition.default : undefined);
     if (type === "enum" && !values && !options) continue;
@@ -163,7 +176,7 @@ function normalize(schemaModule: Record<string, unknown>, source: OmpSettingsSch
       tab,
       ...(typeof uiMeta.group === "string" ? { group: uiMeta.group } : {}),
       label,
-      ...(typeof uiMeta.description === "string" ? { description: uiMeta.description } : {}),
+      ...(description !== undefined ? { description } : {}),
       ...(values ? { values } : {}),
       ...(options ? { options } : {}),
       ...(isSettingDefault(definition.default) ? { default: definition.default } : {}),
