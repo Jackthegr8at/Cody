@@ -9,10 +9,10 @@ ledger.
 - Upstream branch: `main`
 - Last reviewed commit: `cc0beab4f2e1d9918ca991f0eaf87eb2107683de` (`0.41.2`)
 - Reviewed on: `2026-09-27`
-- Integration branch: `codex/integrate-0.41`, based on maintained `a1ec0a6`
-- State: integration is committed locally on `codex/integrate-0.41` for
-  promotion; not pushed or deployed. The prior `D:\git\Cody-0.40` integration
-  remains untouched.
+- Integration branch: `codex/integrate-0.41`, promoted to `codex/maintained`
+- Maintained commit: `3f85a16c71b116481b7bde79ec9486e302ed7b99`
+- State: pushed to `origin/codex/maintained` and deployed to Dev Hub on
+  `2026-09-27`. The prior `D:\git\Cody-0.40` integration remains untouched.
 
 ## Reviewed commits
 
@@ -45,6 +45,10 @@ modified.
   Windows host because file/directory symlink creation is denied (`EPERM`);
   the remaining tests pass. Re-run those symlink checks on a host with symlink
   privileges before release.
+- Linux Node 22 full suite: 1,904 passed, 3 failed, 4 cancelled, and 18
+  skipped. The remaining route-guard/provider, installer, and RPC-timeout
+  failure categories also reproduced on the maintained `a1ec0a6` baseline;
+  all 9 isolated-agent-directory tests passed on Linux.
 - Production Next.js webpack build: passed, including static page generation.
 
 ## Previous 0.40 validation (historical)
@@ -70,3 +74,18 @@ modified.
 - Preserved the existing eight bind mounts, three Docker networks, and LAN port.
 - Compose backup: `/opt/devhub/services/cody/compose.yaml.bak-upstream-20260926-r1`
 - Rollback image remains available: `cody:devhub-0.38.0-20260925-toast-r1`.
+
+## 0.41.2 Dev Hub deployment
+
+- Date: `2026-09-27`
+- Source commit: `3f85a16c71b116481b7bde79ec9486e302ed7b99`
+- Container: `devhub-cody`, image `cody:upstream-20260927-0.41.2-r1`
+- Image ID: `sha256:e397a88ddec1c8bf2b5ba2220b21408630003cc418dfc96a1417de2a092bde26`
+- Source archive SHA-256:
+  `12ce1d1c51f540346c024aea7bf53f497aba82c006f1a02d25f8c9ac2355a471`
+- Health: healthy, zero restarts; `/login` returned 200 and `/` returned 307
+  at `192.168.0.214:30177`.
+- Preserved the existing eight bind mounts, three Docker networks, and LAN port.
+- Compose backup: `/opt/devhub/services/cody/compose.yaml.bak-upstream-20260927-r1`
+- Build reported six npm audit advisories, including a critical Next.js advisory;
+  review and dependency update should be tracked separately from this integration.
