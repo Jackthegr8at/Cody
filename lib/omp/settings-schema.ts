@@ -124,11 +124,15 @@ function normalizeValues(raw: unknown): string[] | undefined {
   return values.length > 0 ? values : undefined;
 }
 
-/** Optional UI copy can be computed by the engine and may depend on runtime-only helpers. */
-function optionalDescription(ui: Record<string, unknown>): string | undefined {
+/** One text field of a setting's `ui` block. Several are GETTERS in omp 18.3
+ *  (a description that formats a key hint), and their imports are stubbed
+ *  when Cody loads the source, so reading one can throw. One bad getter must
+ *  cost that field, never the whole schema: an uncaught throw here once
+ *  blanked the entire settings panel. */
+function readText(meta: Record<string, unknown>, field: string): string | undefined {
   try {
-    const description = ui.description;
-    return typeof description === "string" ? description : undefined;
+    const value = meta[field];
+    return typeof value === "string" ? value : undefined;
   } catch {
     return undefined;
   }
@@ -159,22 +163,23 @@ export function normalize(schemaModule: Record<string, unknown>, source: OmpSett
     // known provider preference omitted from its panel despite being supported.
     if (typeof ui !== "object" || ui === null) continue;
     const uiMeta = ui as Record<string, unknown>;
-    const tab = uiMeta.tab;
-    const label = uiMeta.label;
-    if (typeof tab !== "string" || typeof label !== "string") continue;
+    const tab = readText(uiMeta, "tab");
+    const label = readText(uiMeta, "label");
+    if (tab === undefined || label === undefined) continue;
     const type = definition.type;
     if (type !== "boolean" && type !== "enum" && type !== "number" && type !== "string" && type !== "array") continue;
     if (uiMeta.secret === true) continue;
-    const description = optionalDescription(uiMeta);
     const values = normalizeValues(definition.values);
     const options = normalizeOptions(uiMeta.options, type === "number" && typeof definition.default === "number" ? definition.default : undefined);
     if (type === "enum" && !values && !options) continue;
+    const group = readText(uiMeta, "group");
+    const description = readText(uiMeta, "description");
 
     settings.push({
       key,
       type,
       tab,
-      ...(typeof uiMeta.group === "string" ? { group: uiMeta.group } : {}),
+      ...(group !== undefined ? { group } : {}),
       label,
       ...(description !== undefined ? { description } : {}),
       ...(values ? { values } : {}),

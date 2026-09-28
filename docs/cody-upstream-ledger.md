@@ -7,12 +7,15 @@ ledger.
 ## Tracking cursor
 
 - Upstream branch: `main`
-- Last reviewed commit: `cc0beab4f2e1d9918ca991f0eaf87eb2107683de` (`0.41.2`)
+- Last reviewed commit: `02d626f207c08e7d91af51976ca2c36b05659db5` (`0.42.1`)
 - Reviewed on: `2026-09-27`
-- Integration branch: `codex/integrate-0.41`, promoted to `codex/maintained`
-- Maintained commit: `3f85a16c71b116481b7bde79ec9486e302ed7b99`
-- State: pushed to `origin/codex/maintained` and deployed to Dev Hub on
-  `2026-09-27`. The prior `D:\git\Cody-0.40` integration remains untouched.
+- Integration branch: `codex/integrate-0.42.1` (isolated worktree)
+- Maintained base: `89b58b0cabf1e5aa9797b542748068c6aa795eea` on
+  `origin/codex/maintained`
+- State: upstream 0.42.0–0.42.1 is integrated and validated locally in the
+  isolated worktree; this integration is not committed, pushed, or deployed.
+  The prior `D:\git\Cody-0.40` and `D:\git\Cody-0.41` integrations remain
+  untouched.
 
 ## Reviewed commits
 
@@ -22,6 +25,9 @@ ledger.
 | `d99992d` | 0.41.0 queued-message reliability, refusal choice, input dock, engine 18.3 | Integrate | Added the durable, ID-based outbox and pending-input/refusal flows. Reconciled `ChatInput`, `ChatWindow`, `SessionSidebar`, and `useAgentSession`; retained the local queued-delete confirmation, distinct steer/follow-up behavior, dismissible notices, and desktop host-tool/URI registration and activity reporting. |
 | `d6afd96` | 0.41.1 immediate delivery and stream recovery | Integrate | Ported the delivery/retry and event-stream liveness updates plus RPC state-cache invalidation, keeping the maintained desktop bridge and live-notice behavior in the overlapping hook and RPC manager. |
 | `cc0beab` | 0.41.2 subagent visibility and scale | Integrate | Ported the subagent/session-list updates and reconciled awaiting-input indicators with the maintained desktop activity callback. |
+| `34f8359` | 0.42.0 steer interrupts, faster sends, bounded checkpoints, and lighter one-shot jobs | Integrate | Reconciled the composer, session hook, RPC manager, checkpoint store, and OMP schema. Upstream `steer_now` retains the held-follow-up-to-steer behavior and also handles an already-handed-off steer. Kept Windows Git behavior and Cody's activity/notification paths. |
+| `7ecacfd` | Test runner cleans up temporary files | Integrate | `npm test` now runs under a private temporary directory and removes it afterward. |
+| `02d626f` | 0.42.1 prunes old engine screenshots | Integrate | Added daily cleanup for only recognized OMP screenshot/helper-stderr names older than seven days, with focused allowlist/age tests. |
 
 ## Preservation review
 
@@ -33,6 +39,28 @@ isolated integration. Upstream's outbox UI is reconciled with the maintained
 delete confirmation and steer/follow-up distinction. No Hermes work was added.
 The earlier 0.40 integration is the starting patch, and its checkout was not
 modified.
+
+## Preservation review — 0.42.1
+
+The 0.42.1 upstream patch does not touch `ProviderDetail.tsx`, Cody's Windows
+bridge/taskbar files, model pagination, or the provider rename/permanent-delete
+flows; these remain unchanged from the maintained base. In overlapping stream
+files, the native activity and notice reporting stays in place. The settings
+schema retains the maintained export used by tests and safely reads each
+optional OMP UI getter independently. Checkpoints keep the fork's Git line
+ending options on both normal and low-priority paths. No Hermes work was added.
+
+## Validation — 0.42.1 integration
+
+- Focused ChatInput, session, RPC, checkpoint, OMP schema/temp-file, and
+  one-shot tests: 118 passed, 0 failed, 14 skipped (Windows POSIX fixtures or
+  OMP package not extracted).
+- TypeScript `--noEmit --incremental false`: passed.
+- ESLint: zero errors, 25 warnings.
+- Full suite: the six `isolated-agent-dir` symlink tests cannot run on this
+  Windows host because symlink creation is denied (`EPERM`).
+- Production Next.js webpack build: passed, including TypeScript and static
+  page generation.
 
 ## Validation — 0.41 integration
 

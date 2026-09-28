@@ -812,7 +812,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, selectSmartModel,
     handleSteer, handleAbortCompaction,
     handleRetryOutboxEntry, handleEditOutboxEntry,
-    removeQueuedMessage, editQueuedMessage, promoteQueuedToSteer,
+    removeQueuedMessage, editQueuedMessage, steerQueuedNow,
     handleBuiltinSlashCommand,
     handleThinkingLevelChange, handleModeChange, handleFastModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
     retryLoadSession,
@@ -1293,7 +1293,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       inputHistory={inputHistory}
       onRemoveQueuedMessage={removeQueuedMessage}
       onEditQueuedMessage={(id) => { void editQueuedMessage(id); }}
-      onPromoteQueuedToSteer={promoteQueuedToSteer}
+      onSteerQueuedNow={steerQueuedNow}
       slashCommands={slashCommands}
       slashCommandsLoading={slashCommandsLoading}
       onLoadSlashCommands={loadSlashCommands}

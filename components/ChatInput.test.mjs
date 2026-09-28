@@ -74,12 +74,12 @@ test("renders goal, planning, and advisor indicators at the composer", () => {
   assert.match(html, /(Advisor enabled|chatInput\.advisorEnabled)/);
 });
 
-test("labels each held outbox entry by behavior and only offers Steer for follow-ups", () => {
-  const renderQueued = (behavior) => renderToStaticMarkup(
+test("labels queued outbox entries by behavior and offers Steer now only before delivery", () => {
+  const renderQueued = (behavior, { held = true, status = "queued" } = {}) => renderToStaticMarkup(
     React.createElement(ChatInput, {
       onSend() {},
       onAbort() {},
-      onPromoteQueuedToSteer() {},
+      onSteerQueuedNow() {},
       isStreaming: true,
       outbox: [{
         id: `queued-${behavior}`,
@@ -87,12 +87,12 @@ test("labels each held outbox entry by behavior and only offers Steer for follow
         text: behavior === "followUp" ? "Follow-up task" : "Already prioritized task",
         images: [],
         behavior,
-        status: "queued",
+        status,
         attempt: 1,
         nextRetryAt: null,
         retryingSince: 0,
         createdAt: 0,
-        held: true,
+        held,
       }],
     }),
   );
@@ -103,7 +103,13 @@ test("labels each held outbox entry by behavior and only offers Steer for follow
 
   const steerHtml = renderQueued("steer");
   assert.match(steerHtml, />(Queued steer|chatInput\.queuedSteer)</);
-  assert.doesNotMatch(steerHtml, />(Steer|chatInput\.queuedSteerAction)</);
+  assert.match(steerHtml, />(Steer|chatInput\.queuedSteerAction)</);
+
+  const handedOffSteerHtml = renderQueued("steer", { held: false });
+  assert.match(handedOffSteerHtml, />(Steer|chatInput\.queuedSteerAction)</);
+
+  const startedHtml = renderQueued("steer", { held: false, status: "started" });
+  assert.doesNotMatch(startedHtml, />(Steer|chatInput\.queuedSteerAction)</);
 });
 
 const ompEngine = { id: "omp", displayName: "OMP", shortName: "omp", experimental: false };
