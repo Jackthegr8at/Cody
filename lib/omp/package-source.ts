@@ -21,6 +21,7 @@ import { resolveOmpBin } from "./omp-cli";
  */
 
 const STUB_FILENAME = "cody-omp-source-stub.cjs";
+const BRIDGED_MODULES_KEY = "__codyOmpBridgedModules";
 
 /** A module whose every export is callable, indexable and iterable — enough to
  * let a source file's top-level expressions evaluate. `then` must stay
@@ -247,10 +248,13 @@ function loadOmpSourceFile(
   }
 }
 
-/** Values a stubbed import would have destroyed, keyed for the bridge modules
- * below. Process-global because a generated CJS file is the only thing jiti's
- * alias map can point at. */
-const bridgedModules = ((globalThis as typeof globalThis & { __codyOmpBridgedModules?: Record<string, Record<string, unknown>> }).__codyOmpBridgedModules ??= {});
+/** Values a stubbed import would have destroyed. The global registry survives
+ * webpack chunk boundaries so the temporary CJS bridge can read it from any
+ * bundled route context. */
+type OmpBridgeGlobal = typeof globalThis & {
+  __codyOmpBridgedModules?: Record<string, Record<string, unknown>>;
+};
+const bridgedModules = ((globalThis as OmpBridgeGlobal)[BRIDGED_MODULES_KEY] ??= {});
 let bridgeCounter = 0;
 
 /**
@@ -281,16 +285,19 @@ function bridgeModule(exported: Record<string, unknown>, stubDir: string): strin
   bridgedModules[id] = exported;
   const bridgePath = path.join(stubDir, id + ".cjs");
   try {
-    fs.writeFileSync(bridgePath, "module.exports = require(" + JSON.stringify(__filename) + ").__codyBridgedModule(" + JSON.stringify(id) + ");", "utf8");
+    // `__filename` is the owning source module in Node, but under Next's
+    // webpack bundle it points at a generated chunk that does not export this
+    // module's bridge accessor. The generated CJS file runs in the same Node
+    // process, so resolve through the process-global registry instead.
+    fs.writeFileSync(
+      bridgePath,
+      `module.exports = globalThis[${JSON.stringify(BRIDGED_MODULES_KEY)}]?.[${JSON.stringify(id)}] ?? {};`,
+      "utf8",
+    );
   } catch {
     return null;
   }
   return bridgePath;
-}
-
-/** Bridge accessor. Exported only so a generated module can reach it. */
-export function __codyBridgedModule(id: string): Record<string, unknown> {
-  return bridgedModules[id] ?? {};
 }
 
 /**

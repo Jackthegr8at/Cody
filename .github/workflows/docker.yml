@@ -220,16 +220,12 @@ jobs:
           grep -q '"mimeType":"image/png"' /tmp/shot-body \
             || fail "screenshot support: an ordinary page must capture as PNG ($(head -c 300 /tmp/shot-body))"
 
-          # Informational: the settings panel degrades to Cody's own controls
-          # when OMP's schema cannot be read, so a miss here is worth seeing in
-          # the log but must not block a release.
-          if curl -sf -b /tmp/smoke-cookies \
-               http://127.0.0.1:30177/api/omp-settings/schema \
-               | grep -q '"settings"'; then
-            echo "omp settings schema served"
-          else
-            echo "::warning::omp settings schema did not load in the image"
-          fi
+          schema=$(curl -s -o /tmp/omp-schema-body -w '%{http_code}' -b /tmp/smoke-cookies \
+            http://127.0.0.1:30177/api/omp-settings/schema || echo 000)
+          [ "$schema" = "200" ] || fail "omp settings schema: expected HTTP 200, got $schema ($(head -c 300 /tmp/omp-schema-body))"
+          grep -q '"settings":\[' /tmp/omp-schema-body \
+            || fail "omp settings schema: installed omp returned no settings array ($(head -c 300 /tmp/omp-schema-body))"
+          echo "omp settings schema served"
           docker rm -f -v cody-smoke >/dev/null
           echo "fresh-install verified (locked, setup mints an admin, omp installs via npm and runs, screenshots capture)"
 
