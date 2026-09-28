@@ -12,8 +12,11 @@ ledger.
 - Integration branch: `codex/integrate-0.42.1` (isolated worktree)
 - Maintained base: `89b58b0cabf1e5aa9797b542748068c6aa795eea` on
   `origin/codex/maintained`
-- State: upstream 0.42.0–0.42.1 is integrated and validated locally in the
-  isolated worktree; this integration is not committed, pushed, or deployed.
+- State: upstream 0.42.0–0.42.1 is integrated and validated in the isolated
+  worktree. Code commit `543e345329978e0a581e40f96380d94fde42b369` is pushed to
+  `origin/codex/integrate-0.42.1` and deployed on Dev Hub as
+  `cody:integrate-0.42.1-543e345` (image
+  `sha256:e69013952690ddcffbc322291a90b71e92558c73c0a2b64246f37f93b94c6a39`).
   The prior `D:\git\Cody-0.40` and `D:\git\Cody-0.41` integrations remain
   untouched.
 
